@@ -590,11 +590,51 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     </p>
 
     <p>
-      Outputs MUST NOT exceed inputs. The difference is the fee, and it is claimed by
-      the block's coinbase or destroyed; there is no third destination.
+      Outputs MUST NOT exceed inputs. The difference is the fee. The part of it
+      that is the transfer's burn, below, is destroyed; the rest is claimed by the
+      block's coinbase or destroyed; there is no third destination.
     </p>
 
-    <h3 id="coinbase"><span class="sub">5.5</span>Coinbase</h3>
+    <h3 id="places"><span class="sub">5.5</span>Places</h3>
+
+    <p>
+      A transfer's <em>places</em> are the number of its outputs less the number of its
+      inputs whose note was in the hot set, or nought if that is negative. An input
+      spent through the grace window, or carrying a proof, frees no place: its note
+      had already left the hot set, so every output beside it is a note the transfer
+      adds to the tier. Which inputs those are is settled as the inputs resolve, by
+      <em>Which witness a spend must carry</em>.
+    </p>
+
+    <p>
+      A transfer's <em>burn</em> is <code>place_price</code> times its places. <strong>A transfer MUST give
+      up as fee at least its burn</strong>, and one that does not is refused
+      <code>PlacesUnpaid</code>. The burn is destroyed: the coinbase may claim the fees less
+      the burns, and no more. So a miner filling its own block with outputs pays for
+      every place what anybody else would, and cannot pay it to itself.
+    </p>
+
+    <p>
+      The burn is a fee, paid once, by whoever makes the transfer, when it is made.
+      Nothing is charged to a note for being in the hot set, for how long it stays
+      there, or for leaving it: a note is never destroyed, expired or charged rent.
+      Spending a note gives its place back for nothing, and a transfer that spends as
+      many hot notes as it creates burns nothing. A coinbase's outputs take places
+      and carry no burn; there are at most 16 of them.
+    </p>
+
+    <p>
+      <code>place_price</code> is a consensus parameter of the network, in the table in <em>The
+      two tiers</em>: 6 000 pebbles on every network here. It is measured rather than
+      chosen, by the rule that pushing a note out of the hot set costs the pusher at
+      least what spending it afterwards costs its owner, in the extra bytes of a cold
+      witness at ten pebbles a byte. Measured after a flood that pushed a full tier
+      out, the displaced owners' payments grew by 596 bytes, a cold witness carrying
+      the note, its position and a path of seventeen hashes against a one-byte tag,
+      and the price is that times ten, rounded up to the thousand.
+    </p>
+
+    <h3 id="coinbase"><span class="sub">5.6</span>Coinbase</h3>
 
     <table>
       <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
@@ -614,8 +654,8 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
 
     <p>
       A coinbase MUST NOT pay more than the schedule allows at its height plus the
-      fees the block's own transfers gave up. Paying less is permitted, and the
-      difference is destroyed rather than held anywhere.
+      fees the block's own transfers gave up, less their burns. Paying less is
+      permitted, and the difference is destroyed rather than held anywhere.
     </p>
   </div>
 </section>
@@ -774,10 +814,10 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
         <tr><td class="n">4</td><td>ZeroValueCoinbaseOutput</td><td>a coinbase note worth nothing</td></tr>
         <tr><td class="n">5</td><td>TooManyTransfers</td><td>past the network's limit, which is 4 096 on every network here</td></tr>
         <tr><td class="n">6</td><td>InvalidTransfer</td><td>every transfer in block order: its shape by the transfer rules above, then its inputs by the refusals in <em>Which witness a spend must carry</em></td></tr>
-        <tr><td class="n">7</td><td>ValueOverflow</td><td>the fees the transfers give up do not sum</td></tr>
+        <tr><td class="n">7</td><td>ValueOverflow</td><td>the fees the transfers give up, or their burns, do not sum</td></tr>
         <tr><td class="n">8</td><td>InvalidSignature</td><td>once every transfer has passed six, the first input in block order whose signature does not verify</td></tr>
-        <tr><td class="n">9</td><td>ValueOverflow</td><td>the schedule's reward plus the fees, or the coinbase's outputs, do not sum</td></tr>
-        <tr><td class="n">10</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up</td></tr>
+        <tr><td class="n">9</td><td>ValueOverflow</td><td>the schedule's reward plus the fees given up less their burns, or the coinbase's outputs, do not sum</td></tr>
+        <tr><td class="n">10</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up, less their burns</td></tr>
         <tr><td class="n">11</td><td>TooManyEvictions</td><td>past the network's eviction cap</td></tr>
         <tr><td class="n">12</td><td>SupplyDoesNotAddUp</td><td>the running supply is not the parent's plus what this block issued</td></tr>
       </tbody>
@@ -795,6 +835,8 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       Seven, and the first half of nine, cannot happen on any chain these rules
       produce: fees are given up by notes that exist, so they sum to at most the
       supply, and the schedule keeps the supply near a tenth of the monetary ceiling.
+      Every transfer's fee covers its own burn, so the fees less the burns never
+      fall below nought either.
       They are named because part 1 names every overflow.
       The second half of nine can happen: a coinbase carries up to sixteen outputs,
       each of them an amount, and sixteen amounts need not sum to one. A node asks
@@ -875,7 +917,8 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       <thead><tr><th>Parameter</th><th>testnet-6</th><th>devnet</th><th>What it bounds</th></tr></thead>
       <tbody>
         <tr><td>hot capacity</td><td class="n">131 072</td><td class="n">64</td><td>notes the hot set holds</td></tr>
-        <tr><td>evictions per block</td><td class="n">1 024</td><td class="n">1 024</td><td>notes one block may push out</td></tr>
+        <tr><td>evictions per block</td><td class="n">1 024</td><td class="n">32</td><td>notes one block may push out</td></tr>
+        <tr><td>place price</td><td class="n">6 000</td><td class="n">6 000</td><td>pebbles destroyed for each place a transfer takes</td></tr>
         <tr><td>coinbase maturity</td><td class="n">1 024</td><td class="n">32</td><td>blocks a reward waits</td></tr>
       </tbody>
     </table>
@@ -894,10 +937,13 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     <p>
       Devnet is a throwaway network and is listed only because a second
       implementation that supports it has to get it right. It lowers the hot
-      capacity and inherits the eviction cap, so there the cap is larger than the
-      tier and one block can empty the whole of it. On testnet-6 the cap is a
-      hundred and twenty eighth of the tier, so emptying the tier takes at least
-      128 blocks whatever shape the blocks take.
+      capacity to 64 and the eviction cap to 32 with it, so there too the cap is
+      below the tier, and emptying the tier takes at least two blocks. The cap goes
+      no lower because a miner building a block keeps room for a full coinbase, 16
+      notes, out of it: a cap of 16 or less would leave a full devnet tier carrying
+      no payment at all. On testnet-6 the cap is a hundred and twenty eighth of the
+      tier, so emptying the tier takes at least 128 blocks whatever shape the blocks
+      take.
     </p>
 
     <h3 id="what-the-state-root-commits-to"><span class="sub">7.2</span>What the state root commits to</h3>
@@ -1068,9 +1114,11 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       <code>max_evictions_per_block</code>, with <code>TooManyEvictions</code>. How fast the hot set turns
       over is a shared resource: every note pushed out is somebody's money now
       needing a proof to spend, and the pusher chooses whose by choosing nothing,
-      since it is always the oldest that falls. Fees put a price on that; a miner
-      includes its own transfers for free, so this is the bound that holds whatever
-      anyone pays.
+      since it is always the oldest that falls. The place price puts a price on
+      that, and since the burn is destroyed rather than claimed, it is the same
+      price for a miner filling its own block as for anyone. A price bounds nothing
+      for whoever will pay it, so this is the bound on the rate, whatever anyone
+      pays.
     </p>
 
     <p>
@@ -1170,6 +1218,10 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       after the block at height <em>h</em> it holds the landings of the blocks at heights
       <em>h</em> - 63 through <em>h</em>, and the block at <em>h</em> + 1 is judged against that. The note
       bound moves that edge earlier whenever more than 128 notes a block are falling.
+      At the eviction cap of a public network it holds the window to 8 blocks, and
+      that rate can be bought by anybody willing to pay the place price for about a
+      thousand places a block, a miner included: 64 blocks of grace is what a quiet
+      chain gives when nobody pays to change it.
     </p>
 
     <h3 id="which-witness-a-spend-must-carry"><span class="sub">7.6</span>Which witness a spend must carry</h3>
@@ -1207,8 +1259,10 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     <p>
       The state-dependent refusals a transfer's inputs produce. Inputs are resolved
       in the order they appear. Within one input, the first two are asked before
-      anything else, the middle four are the branches of where the note turns out to
-      be, and the last is asked once every input has resolved.
+      anything else, the next four are the branches of where the note turns out to
+      be, and the seventh is asked of the input once it has resolved. The last two
+      are asked of the transfer once every input has resolved, and before any
+      signature is verified.
     </p>
 
     <table>
@@ -1220,7 +1274,9 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
         <tr><td class="n">4</td><td>MissingProof</td><td>it is neither in the hot set nor in the window, and the input carries no proof</td></tr>
         <tr><td class="n">5</td><td>UnknownNote</td><td>the window names it and the accumulator no longer holds it</td></tr>
         <tr><td class="n">6</td><td>InvalidProof</td><td>the proof does not verify against the cold commitment</td></tr>
-        <tr><td class="n">7</td><td>OutputsExceedInputs</td><td>the outputs total more than the inputs, once every input has resolved</td></tr>
+        <tr><td class="n">7</td><td>KeyNotOwner</td><td>the key the input carries does not hash to the address that owns the note</td></tr>
+        <tr><td class="n">8</td><td>OutputsExceedInputs</td><td>the outputs total more than the inputs</td></tr>
+        <tr><td class="n">9</td><td>PlacesUnpaid</td><td>the fee is less than the burn of the transfer's places, by <em>Places</em></td></tr>
       </tbody>
     </table>
 
@@ -1434,7 +1490,9 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     <p>
       A block creates whatever its coinbase pays and destroys whatever its transfers
       gave up as fees, since the fees are money that already existed and whatever
-      the coinbase declines to claim is gone. So after a block:
+      the coinbase declines to claim is gone. The burn of the transfers' places is
+      part of the fees and no coinbase may claim it, so that much is gone whoever
+      mined the block. So after a block:
     </p>
 
     <ul>
@@ -2010,7 +2068,7 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     <p>
       Two things the schedule is and is not. It is a ceiling: a coinbase MUST NOT
       claim more than the reward at its height plus the fees its block's transfers
-      gave up, and it MAY claim less, in which case the difference is destroyed and
+      gave up less their burns, and it MAY claim less, in which case the difference is destroyed and
       goes nowhere. So the money a chain has actually issued at a height is at most
       the running total above and may be under it, and the running total is the one
       thing about a handed-over ledger that can be checked against the rules rather
@@ -3075,8 +3133,8 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
 
     <p>
       <strong>One check does not go by that road.</strong> A coinbase claims at most what the
-      schedule pays at its height plus the fees its own block's transfers gave up,
-      and a fee the coinbase declines is destroyed, so a chain at a height holds at
+      schedule pays at its height plus the fees its own block's transfers gave up
+      less their burns, and a fee the coinbase declines is destroyed, so a chain at a height holds at
       most what the schedule has paid by then and never more. Refusal twelve is that
       subtraction. It is the only place in this exchange where a newcomer is not
       taking somebody's word, and no amount of work gets past it. The supply is also

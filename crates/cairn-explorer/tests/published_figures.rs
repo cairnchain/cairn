@@ -2011,3 +2011,94 @@ fn the_surveys_byline_counts_the_works_the_survey_cites() {
         cited.len()
     );
 }
+
+/// What a flood of the hot set costs and does, as the papers give it, worked
+/// out from the constants this build runs on.
+///
+/// The place price made pushing the tier out cost something, and the papers
+/// quote what: the price itself, the burn of a whole tier, the blocks the
+/// eviction cap spreads it over, how short the grace window gets while it
+/// lasts, and the higher price that was turned down. Each is a product of
+/// constants, and before this none of them was written anywhere a test could
+/// hold it: the papers promised sixty four blocks of grace and a cap that made
+/// a flush take two hours, and said nothing of what it cost, which for a miner
+/// was nothing.
+#[test]
+fn the_papers_price_a_flood_of_the_hot_set_from_the_constants() {
+    const THREAT_MODEL: &str = include_str!("../../../docs/cairn-threat-model.html");
+    let flat = |page: &str| page.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (paper, spec, threats) = (flat(PAPER), flat(SPECIFICATION), flat(THREAT_MODEL));
+
+    let live = ConsensusParams::for_network("testnet").unwrap();
+    let price = cairn_ledger::validation::PLACE_PRICE;
+    assert_eq!(
+        live.place_price, price,
+        "the public network charges the price"
+    );
+    let written = grouped(price.as_pebbles());
+    assert_eq!(
+        parameter("Place price, destroyed"),
+        format!("{written} pebbles"),
+        "the paper's parameter list does not give the place price"
+    );
+    assert!(
+        paper.contains(&format!("destroys {written} pebbles, paid once")),
+        "the paper's limitations do not give the place price"
+    );
+    assert!(
+        spec.contains(&format!("{written} pebbles on every network here")),
+        "the specification does not give the place price"
+    );
+
+    // The burn of a whole tier, and the blocks the cap spreads it over: at
+    // least the cap allows, and at the pace a miner's selection builds, which
+    // keeps a full coinbase's room and then pays its miner one note.
+    let tier = live.hot_capacity as u64;
+    let burn = tier * price.as_pebbles();
+    let cairn = format!("{:.1}", burn as f64 / 1e8);
+    let least = live.hot_capacity.div_ceil(live.max_evictions_per_block);
+    let pace = live
+        .hot_capacity
+        .div_ceil(live.max_evictions_per_block - live.max_coinbase_outputs + 1);
+    assert!(
+        paper.contains(&format!(
+            "costs {} places, {cairn} CAIRN destroyed",
+            grouped(tier)
+        )),
+        "the paper's burn of a whole tier is not the tier times the price, {cairn} CAIRN"
+    );
+    assert!(
+        paper.contains(&format!(
+            "at least {least} blocks, about {pace} at the pace"
+        )),
+        "the paper's flush does not take the blocks the cap allows, {least} and {pace}"
+    );
+    assert!(
+        threats.contains(&format!(
+            "{} places at {written} pebbles, about {cairn} CAIRN destroyed",
+            grouped(tier)
+        )),
+        "the threat model's price of a flush is not the tier times the price"
+    );
+
+    // The grace window at the cap, which the note bound decides.
+    let span = GRACE_NOTES / live.max_evictions_per_block;
+    assert!(
+        paper.contains(&format!("the window spans {span} blocks"))
+            && paper.contains(&format!(
+                "the grace window spans {span} blocks rather than {GRACE_BLOCKS}"
+            )),
+        "the paper's grace window under a flood is not the note bound over the cap, {span}"
+    );
+
+    // And the price turned down: a block reward for the whole tier, which a
+    // miner with a tenth of the work earns many times a day.
+    let rejected = live.reward_at(0).as_pebbles() / tier;
+    let rounded = (rejected + 500) / 1_000 * 1_000;
+    let tenth = 24 * 60 * 60 / live.target_block_time / 10;
+    assert!(
+        paper.contains(&format!("about {} pebbles a place", grouped(rounded)))
+            && paper.contains(&format!("one of the {tenth} rewards it earns a day")),
+        "the paper's rejected price is not a block reward over the tier, {rounded}"
+    );
+}
