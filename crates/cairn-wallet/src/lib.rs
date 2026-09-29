@@ -4214,6 +4214,34 @@ mod tests {
         );
     }
 
+    /// **Only a public key in the old form is refused as one: sixty four
+    /// characters that are all hexadecimal, and not either alone.**
+    ///
+    /// A mainnet address is sixty four characters long, and a short string of
+    /// hexadecimal is not a key of any form. A reader that asked for either
+    /// the length or the digits, rather than both, refused every mainnet
+    /// address as an old key and told whoever typed `ab` it was a public key;
+    /// every address in the tests was a test network's, sixty five long, so
+    /// nothing noticed.
+    #[test]
+    fn only_sixty_four_hexadecimal_characters_are_taken_for_an_old_key() {
+        let mainnet = cairn_ledger::note::NetworkId::MAINNET;
+        let address =
+            super::Address::from(SecretKey::from_bytes(&[8; 32]).public_key()).to_text(mainnet);
+        assert_eq!(address.len(), 64, "a mainnet address is sixty four long");
+        assert!(
+            super::parse_address(&address, mainnet).is_ok(),
+            "a mainnet address was refused"
+        );
+        let short = super::parse_address("abcdef", mainnet)
+            .expect_err("six hexadecimal characters are no address")
+            .to_string();
+        assert!(
+            !short.contains("public key"),
+            "six hexadecimal characters were called a public key"
+        );
+    }
+
     /// **Every typo of one character in an address, and every swap of two
     /// neighbours, is refused by the reader every face of this wallet uses.**
     ///
@@ -5799,6 +5827,27 @@ mod tests {
         )
         .unwrap();
         (wallet, directory)
+    }
+
+    /// **The address a wallet shows is the one it is paid at, written for its
+    /// network.**
+    ///
+    /// Every face prints it, the command line, the page and the backup's
+    /// words, and a person copies it from there to whoever pays them. Nothing
+    /// read what was printed back as an address, so a wallet showing another
+    /// network's prefix, or nothing, passed.
+    #[test]
+    fn the_address_a_wallet_shows_is_the_one_it_is_paid_at() {
+        let (wallet, directory) = opened("shows");
+        let shown = wallet.address_text();
+        let read = super::parse_address(&shown, wallet.params().network).ok();
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            read,
+            Some(wallet.address()),
+            "the address a wallet shows does not read back as the one it is paid at"
+        );
     }
 
     /// Leaves `lock` poisoned, the way a thread that panicked holding it does.

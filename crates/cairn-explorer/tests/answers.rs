@@ -283,6 +283,52 @@ fn says(answer: &Response, field: &str, value: &str) -> bool {
     body(answer).contains(&format!("\"{field}\":{value}"))
 }
 
+/// **Every owner the site writes is the address a wallet on this network
+/// reads, and the search finds an address by that text.**
+///
+/// An owner was a public key, and every page wrote it as sixty four
+/// hexadecimal characters. It is the hash of a key now, written with its
+/// network's prefix and a checksum, and a page that wrote anything else would
+/// hand a person a string no wallet takes: the pages' own reader was held to
+/// the wallet's, and what they wrote was held to nothing.
+#[test]
+fn every_owner_the_site_writes_is_an_address_a_wallet_reads() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 3);
+    let explorer = explorer(params);
+    feed(&explorer, &blocks);
+    explorer.refresh();
+
+    let text = address_of(miner.public_key());
+    let page = ask(&explorer, &format!("address/{text}"));
+    assert!(
+        says(&page, "address", &format!("\"{text}\"")),
+        "an address page does not name the address it is about the way a wallet writes it: {}",
+        body(&page)
+    );
+    let listed = ask(&explorer, "blocks");
+    assert!(
+        says(&listed, "miner", &format!("\"{text}\"")),
+        "the list of blocks does not name who each paid the way a wallet writes it: {}",
+        body(&listed)
+    );
+    let block = ask(&explorer, "block/1");
+    assert!(
+        body(&block).contains(&format!("\"owner\":\"{text}\"")),
+        "a block's outputs do not name their owner the way a wallet writes it: {}",
+        body(&block)
+    );
+    let found = ask(&explorer, &format!("search?q={text}"));
+    assert!(
+        says(&found, "target", &format!("\"\\/address\\/{text}\"")),
+        "the search does not find an address by the text a wallet shows: {}",
+        body(&found)
+    );
+    explorer.node().shutdown();
+}
+
 /// A transaction is never served under another transaction's identifier.
 ///
 /// `transaction()` took a location from the index, a block from the chain, and

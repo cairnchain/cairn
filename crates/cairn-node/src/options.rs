@@ -1189,6 +1189,35 @@ mod tests {
         );
     }
 
+    /// Only sixty four characters that are all hexadecimal are read as a key:
+    /// a mainnet address is sixty four characters too, and a short run of
+    /// hexadecimal is no key at all.
+    ///
+    /// Asking for the length or the digits rather than both read every
+    /// mainnet address as an old key and refused it, and called `abcd` sixty
+    /// four hexadecimal characters. Every address the tests passed was a test
+    /// network's, sixty five long, so nothing noticed.
+    #[test]
+    fn only_sixty_four_hexadecimal_characters_are_read_as_a_key() {
+        let mainnet = NetworkId::MAINNET;
+        let address = Address::from(cairn_crypto::SecretKey::from_bytes(&[5; 32]).public_key());
+        let text = address.to_text(mainnet);
+        assert_eq!(text.len(), 64, "a mainnet address is sixty four long");
+        assert_eq!(
+            parse_mining_address(&text, mainnet),
+            Ok(MineTo {
+                address,
+                was_a_key: false,
+            }),
+            "a mainnet address was not read as an address"
+        );
+        let short = parse_mining_address("abcd", mainnet).unwrap_err();
+        assert!(
+            !short.contains("sixty four"),
+            "four hexadecimal characters were called sixty four: {short}"
+        );
+    }
+
     /// Sixty four hexadecimal characters that are not a usable key are
     /// refused, and the hash of an address is refused as often as it is not
     /// a key, which is fifteen times in sixteen.
