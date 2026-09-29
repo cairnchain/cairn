@@ -4214,6 +4214,48 @@ mod tests {
         );
     }
 
+    /// **Every typo of one character in an address, and every swap of two
+    /// neighbours, is refused by the reader every face of this wallet uses.**
+    ///
+    /// An address was sixty four hexadecimal characters with nothing to catch
+    /// a typo but whether the bytes were a usable key, which about one string
+    /// in sixteen is: measured over four addresses before the checksum, 242 of
+    /// the 3 840 single-character substitutions were taken as an address, each
+    /// one nobody holds, and the payment gone.
+    #[test]
+    fn every_typo_of_one_character_in_an_address_is_refused() {
+        let testnet = cairn_ledger::note::NetworkId::TESTNET;
+        for seed in 1..=4u8 {
+            let real = super::Address::from(SecretKey::from_bytes(&[seed; 32]).public_key())
+                .to_text(testnet);
+            assert!(super::parse_address(&real, testnet).is_ok());
+            let written: Vec<char> = real.chars().collect();
+            for at in 0..written.len() {
+                for typed in (0x21u8..=0x7e).map(char::from) {
+                    if typed == written[at] {
+                        continue;
+                    }
+                    let mut bent = written.clone();
+                    bent[at] = typed;
+                    let bent: String = bent.into_iter().collect();
+                    assert!(
+                        super::parse_address(&bent, testnet).is_err(),
+                        "an address one character away from a real one was taken"
+                    );
+                }
+                if at + 1 < written.len() && written[at] != written[at + 1] {
+                    let mut swapped = written.clone();
+                    swapped.swap(at, at + 1);
+                    let swapped: String = swapped.into_iter().collect();
+                    assert!(
+                        super::parse_address(&swapped, testnet).is_err(),
+                        "an address with two neighbours swapped was taken"
+                    );
+                }
+            }
+        }
+    }
+
     /// A bad address is answered as a bad address, in the same words by both
     /// faces.
     ///
