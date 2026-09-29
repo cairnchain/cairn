@@ -13069,6 +13069,46 @@ mod peers_and_loops {
         }
     }
 
+    /// The peers a node has reached are its own dials that have introduced
+    /// themselves, less a feeler: what the miner waits for before it mines.
+    ///
+    /// Nothing but the miner read the count, so a count of every greeted
+    /// peer, of every dial, or of feelers too passed: each told a miner it
+    /// was on the network when only a stranger had dialled in, or when its own
+    /// dials had not said a word.
+    #[test]
+    fn the_peers_a_node_has_reached_are_its_own_dials_that_introduced_themselves() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let entry = |dialled: bool, greeted: bool, feeler: bool| Peer {
+            greeted,
+            feeler,
+            ..stand_in(&socket, dialled)
+        };
+        {
+            let mut peers = node.shared.peers();
+            peers.insert(1, entry(true, true, false));
+            peers.insert(2, entry(true, true, false));
+            // Dialled, and never said who it was.
+            peers.insert(3, entry(true, false, false));
+            // Somebody else's dial.
+            peers.insert(4, entry(false, true, false));
+            // A feeler, let go of once it has answered.
+            peers.insert(5, entry(true, true, true));
+        }
+        let reached = node.peers_reached();
+        let introduced = node.peers_introduced();
+        stop_all(&node);
+        assert_eq!(
+            reached, 2,
+            "the peers reached were not the dials that introduced themselves, less the feeler"
+        );
+        assert_eq!(
+            introduced, 4,
+            "the peers introduced were not every connection that said who it was"
+        );
+    }
+
     /// A node whose table is full dials nobody.
     ///
     /// The round took a dial as allowed when either the refusal or the room
