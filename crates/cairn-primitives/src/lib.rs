@@ -4,6 +4,7 @@
 //! of any function in this crate will disagree on the chain.
 
 pub mod amount;
+pub mod bech32m;
 pub mod codec;
 pub mod hash;
 pub mod hex;

@@ -129,6 +129,7 @@ thing it exists for.
     <tr><td>coinbase id</td><td><code>cairn v1 coinbase id</code></td></tr>
     <tr><td>block header id</td><td><code>cairn v1 block header id</code></td></tr>
     <tr><td>signature message</td><td><code>cairn v1 signature message</code></td></tr>
+    <tr><td>address</td><td><code>cairn v1 address</code></td></tr>
     <tr><td>merkle leaf</td><td><code>cairn v1 merkle leaf</code></td></tr>
     <tr><td>merkle node</td><td><code>cairn v1 merkle node</code></td></tr>
     <tr><td>merkle empty</td><td><code>cairn v1 merkle empty</code></td></tr>

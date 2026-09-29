@@ -129,6 +129,7 @@ domains! {
     CoinbaseId => coinbase_id, "cairn v1 coinbase id";
     BlockHeaderId => block_header_id, "cairn v1 block header id";
     SignatureMessage => signature_message, "cairn v1 signature message";
+    Address => address, "cairn v1 address";
     MerkleLeaf => merkle_leaf, "cairn v1 merkle leaf";
     MerkleNode => merkle_node, "cairn v1 merkle node";
     MerkleEmpty => merkle_empty, "cairn v1 merkle empty";
