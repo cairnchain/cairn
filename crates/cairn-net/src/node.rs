@@ -12873,6 +12873,31 @@ mod peers_and_loops {
         node.shared.book().insert(door.local_addr().unwrap());
         dial_from_book(&node.shared, 1_001);
         let let_go = waiting(&|| node.shared.peers().len() == TARGET_PEERS);
+        // Read before anything else moves, for a failure to say which half of
+        // letting go did not happen: a feeler still in this table while the far
+        // end still holds its connection is a hang-up the far end never saw,
+        // and one the far end has let go of is a slot this node did not clear.
+        let far_end = far
+            .shared
+            .peers()
+            .values()
+            .filter(|peer| peer.dialled_to.is_none())
+            .count();
+        let table = {
+            let peers = node.shared.peers();
+            let mut entries: Vec<_> = peers.iter().collect();
+            entries.sort_by_key(|(id, _)| **id);
+            let entries: Vec<String> = entries
+                .into_iter()
+                .map(|(id, peer)| {
+                    format!(
+                        "{id}: feeler {}, greeted {}, leaving {}, dialled to {:?}",
+                        peer.feeler, peer.greeted, peer.leaving, peer.dialled_to
+                    )
+                })
+                .collect();
+            format!("{} entries [{}]", peers.len(), entries.join("; "))
+        };
         let early = node.shared.peers().len();
         dial_from_book(&node.shared, 1_000 + FEELER_PERIOD);
         let on_time = node.shared.peers().len();
@@ -12892,7 +12917,12 @@ mod peers_and_loops {
             greeted,
             "the connection that answered was not held as a feeler"
         );
-        assert!(let_go, "a feeler that had answered was kept");
+        assert!(
+            let_go,
+            "a feeler that had answered was kept: when the wait for it ran out the table held \
+             {table} where it should have come back to {TARGET_PEERS}, and the far end still \
+             held {far_end} connection(s) it had not dialled"
+        );
         assert_eq!(
             early, TARGET_PEERS,
             "another feeler was dialled before its period was up"
