@@ -196,6 +196,18 @@ fn a_payment_at_the_quote_is_pooled_and_mined_where_a_place_is_priced() {
         Some(price),
         "the quote's margin for the one note that can fall is not the place price"
     );
+    // What the confirmation says before paying: the burn of the one place the
+    // payment takes, and nothing for a spend that cannot be drafted.
+    assert_eq!(
+        wallet.burn_of_the_fee(recipient, cairn("1"), least),
+        Some(price),
+        "the part of the fee said to be burned is not the price of the place the payment takes"
+    );
+    assert_eq!(
+        wallet.burn_of_the_fee(recipient, Amount::ZERO, least),
+        None,
+        "a spend that cannot be drafted was said to burn something"
+    );
     let sent = wallet
         .send(recipient, cairn("1"), least)
         .expect("a payment at the wallet's own floor was refused by its own pool");
