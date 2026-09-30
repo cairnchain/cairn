@@ -430,20 +430,18 @@ impl ConsensusParams {
             // Not yet made. A network exists once its first block does, and
             // that block will be mined in the open on the day it is announced.
             "mainnet" => None,
-            // The network line here changes nothing today and is not
-            // redundant. `NetworkId::TESTNET` is an alias for `TESTNET_7`, and
-            // `Self::testnet()` below spreads that alias in, so naming
-            // `TESTNET_7` again writes the value that was already there:
-            // deleting the line is an equivalent mutation, measured.
+            // The network comes in with `Self::testnet()`, whose
+            // `NetworkId::TESTNET` is an alias for `TESTNET_7`. A line naming
+            // `TESTNET_7` here wrote the value that was already there, which
+            // is a mutant nothing can kill, and the mutation gate cannot be
+            // told to leave a deleted field alone; so the line is not here.
             //
-            // It stops being one the day the alias moves to the next testnet,
-            // which is the day this arm has to keep answering about
-            // testnet-7 while the alias means something else. The guard for
-            // that is `network_rules.rs`
-            // `::the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to`,
-            // which reads the first block off whatever network the rules
-            // name; with this line gone and the alias moved, the two stop
-            // agreeing and it says so.
+            // It has to come back the day the alias moves to the next testnet,
+            // when this arm must keep answering about testnet-7 while the
+            // alias means something else. `network_rules.rs`
+            // `::the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to`
+            // reads the first block off whatever network the rules name, so
+            // moving the alias without it fails there and says so.
             //
             // testnet-6 answers nothing here, the way testnet-5 and every
             // testnet before it already does: a retired network is still
@@ -451,7 +449,6 @@ impl ConsensusParams {
             // plainly which network it is on, but asking `for_network` for it
             // does not bring its rules back.
             "testnet" | "testnet-7" => Some(Self {
-                network: NetworkId::TESTNET_7,
                 genesis: crate::genesis::pinned(NetworkId::TESTNET_7),
                 opens_at: crate::genesis::opens_at(NetworkId::TESTNET_7),
                 genesis_difficulty: 1 << 27,
