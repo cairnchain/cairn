@@ -12914,25 +12914,49 @@ mod peers_and_loops {
             .is_some()
     }
 
-    /// An address nothing listens on, so a dial to it is refused.
-    fn a_vacant_address() -> SocketAddr {
-        vacant_addresses(1)[0]
+    /// `count` addresses nothing listens on, no two the same.
+    fn vacant_addresses(count: usize) -> Vec<SocketAddr> {
+        vacant_addresses_but(count, &[])
     }
 
-    /// `count` addresses nothing listens on, no two the same.
+    /// `count` addresses nothing listens on, no two the same and none of
+    /// `taken`.
     ///
     /// Each listener is held until every one is drawn. Let go as soon as it
     /// was drawn, a port was free for the system to hand out again at the
     /// next draw, and Linux does now and then: sixteen draws gave fifteen
     /// addresses, the book kept fifteen, and a test counting sixteen dials
-    /// failed on a round that had done nothing wrong.
-    fn vacant_addresses(count: usize) -> Vec<SocketAddr> {
-        let held: Vec<TcpListener> = (0..count)
-            .map(|_| TcpListener::bind(local()).unwrap())
-            .collect();
-        held.iter()
-            .map(|listener| listener.local_addr().unwrap())
-            .collect()
+    /// failed on a round that had done nothing wrong. `taken` is for a port
+    /// let go of before the draw began, which holding cannot keep out.
+    fn vacant_addresses_but(count: usize, taken: &[SocketAddr]) -> Vec<SocketAddr> {
+        let mut held = Vec::new();
+        let mut drawn = Vec::new();
+        while drawn.len() < count {
+            let listener = TcpListener::bind(local()).unwrap();
+            let address = listener.local_addr().unwrap();
+            if !taken.contains(&address) {
+                drawn.push(address);
+            }
+            held.push(listener);
+        }
+        drawn
+    }
+
+    /// A node one peer short of its target, with `count` addresses nothing
+    /// listens on in its book, none of them its own.
+    ///
+    /// Drawn once the node is bound, and around its address. A quiet node has
+    /// let go of its own port, a round never dials a node's own address, and
+    /// Linux hands a free port out again at random: drawn before the node, or
+    /// blind to it, one of seventeen could be the node's, and the round dialled
+    /// one fewer than the test counted.
+    fn one_short_knowing_vacant(count: usize) -> (Node, TcpStream, TcpStream, Vec<SocketAddr>) {
+        let (node, socket, far) = one_short_knowing(&[]);
+        let vacant = vacant_addresses_but(count, &[node.shared.address]);
+        for address in &vacant {
+            node.shared.book().insert(*address);
+        }
+        (node, socket, far, vacant)
     }
 
     /// A node one peer short of its target, with `addresses` in its book.
@@ -12963,8 +12987,7 @@ mod peers_and_loops {
     /// runner is for; the one after it stands in for Windows here.
     #[test]
     fn a_round_charges_every_address_that_refuses_it() {
-        let vacant = vacant_addresses(16);
-        let (node, _socket, _far) = one_short_knowing(&vacant);
+        let (node, _socket, _far, vacant) = one_short_knowing_vacant(16);
         dial_from_book(&node.shared, 1_000);
         let ready = node.shared.book().ready(1_000);
         let reached = dialled(&node);
@@ -12988,8 +13011,7 @@ mod peers_and_loops {
     /// passed.
     #[test]
     fn a_round_is_not_rationed_by_addresses_that_are_slow_to_refuse() {
-        let vacant = vacant_addresses(16);
-        let (node, _socket, _far) = one_short_knowing(&vacant);
+        let (node, _socket, _far, vacant) = one_short_knowing_vacant(16);
         let dials = AtomicUsize::new(0);
         dial_from_book_with(&node.shared, 1_000, &|_: &SocketAddr| {
             dials.fetch_add(1, Ordering::SeqCst);
@@ -13015,14 +13037,20 @@ mod peers_and_loops {
     #[test]
     fn a_wave_past_the_first_dials_twice_the_target_at_once() {
         let wide = 2 * TARGET_PEERS;
-        let vacant = vacant_addresses(wide + 1);
-        let (node, _socket, _far) = one_short_knowing(&vacant);
+        let (node, _socket, _far, _vacant) = one_short_knowing_vacant(wide + 1);
         let in_flight = AtomicUsize::new(0);
         let most = AtomicUsize::new(0);
         dial_from_book_with(&node.shared, 1_000, &|_: &SocketAddr| {
             let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             most.fetch_max(now, Ordering::SeqCst);
-            thread::sleep(Duration::from_secs(1));
+            // Each dial waits for the whole wave to be in flight, or for long
+            // enough to say it never will be. A second's sleep counted only
+            // the dials whose threads had started within that second, and a
+            // loaded runner started one late.
+            let deadline = Instant::now() + Duration::from_millis(1_500);
+            while most.load(Ordering::SeqCst) < wide && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
             in_flight.fetch_sub(1, Ordering::SeqCst);
             Err(io::ErrorKind::ConnectionRefused.into())
         });
@@ -13044,11 +13072,15 @@ mod peers_and_loops {
     #[test]
     fn a_round_takes_what_it_is_short_of_and_holds_nothing_against_the_rest() {
         let doors = [a_door(), a_door(), a_door()];
-        // Drawn while the doors are open, so it cannot be one of them.
-        let refusing = a_vacant_address();
+        let (node, _socket, _far) = one_short_knowing(&[]);
+        // Drawn while the doors are open and around the node's own port, so
+        // it is none of them.
+        let refusing = vacant_addresses_but(1, &[node.shared.address])[0];
         let mut known = vec![refusing];
         known.extend(doors.iter().map(|door| door.local_addr().unwrap()));
-        let (node, _socket, _far) = one_short_knowing(&known);
+        for address in &known {
+            node.shared.book().insert(*address);
+        }
         // Heard from, so it is dialled first and the first wave comes back
         // short.
         node.shared.book().answered(&refusing, 900);
