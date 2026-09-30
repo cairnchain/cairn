@@ -138,7 +138,7 @@ fn an_address_whose_node_names_no_port_leaves_the_book_of_the_node_that_dialled_
     let wallets_directory = scratch("dialled-wallet");
     let owner = SecretKey::from_bytes(&[2; 32]).public_key();
     let (wallet, _) =
-        Node::open_watching(params(), loopback(), &wallets_directory, &[owner]).unwrap();
+        Node::open_watching(params(), loopback(), &wallets_directory, &[owner.into()]).unwrap();
     let dialler = Node::bind(params(), loopback()).unwrap();
     let plain = Node::bind(params(), loopback()).unwrap();
     let wallet_address = wallet.address();
