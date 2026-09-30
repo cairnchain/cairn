@@ -98,10 +98,14 @@
       address, which is the hash of a public key, identified by the transaction
       that created it and its index among that transaction's outputs. It is
       written once and consumed once. This is the unspent output model, as in
-      Bitcoin. The key itself appears on the chain only when the note is spent,
-      in the input that spends it, so an unspent note shows nothing a future
-      computer could work a secret back from, and reading one costs a node no
-      curve arithmetic.
+      Bitcoin. The key appears on the chain when a note paid to an address is
+      first spent, in the input that spends it, and every note that address
+      still holds, change included, sits behind that published key from then
+      on: an address shields its notes only up to a wallet's first payment.
+      The shipped wallet pays every payment's change back to the one address it
+      uses, so keeping the property afterward needs a fresh key drawn per
+      payment, a decision the open questions paper already took and has not
+      started. Reading a note costs a node no curve arithmetic either way.
     </p>
 
     <p>
@@ -1345,6 +1349,10 @@
       does is price the flood: every place a transfer takes in the hot set
       destroys 6 000 pebbles, paid once, as part of the fee, by whoever takes
       it, and a miner pays it too because it is destroyed rather than claimed.
+      Its own coinbase is the one exception: up to fifteen extra outputs
+      beyond the one that claims the reward take a place each for nothing, so
+      a miner with a tenth of the work adds about one and a half unpriced
+      places a block this way, and one mining alone up to fifteen.
       Pushing every note out of the hot set therefore costs 131 072 places, 7.9
       CAIRN destroyed and about half a CAIRN more in byte fees, and the eviction
       cap spreads it over at least 128 blocks, about 130 at the pace a miner's

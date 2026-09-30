@@ -364,13 +364,13 @@
     },
     "outputs": {
       "plain": "These are the new notes. Each belongs to one address and can be spent exactly once, later, by whoever holds the matching secret.",
-      "curious": "Each output is a value locked to an address, which is the hash of a public key: the key itself appears only when the note is spent. Its identifier comes from the transaction that made it plus its position in the list.",
+      "curious": "Each output is a value locked to an address, which is the hash of a public key: the key appears only when a note paid to that address is first spent, and every note still left there, change included, sits behind it from then on. Its identifier comes from the transaction that made it plus its position in the list.",
       "technical": "Note identifiers are the source transaction identifier and an index. Ordering over identifiers is defined so the note set has one canonical enumeration, which the state commitment depends on."
     },
     "address": {
       "plain": "An address is a public name you can hand out safely. Anyone can see what it holds. Only the person with the matching secret can spend it, and that secret never appears here or anywhere on this site.",
       "curious": "This page is built from an index over the whole chain, which is a service the explorer provides and the protocol deliberately does not: no node keeps a map from owners to notes.",
-      "technical": "Ed25519 keys, refused at construction unless canonically encoded, not of small order and in the prime order subgroup, so two byte strings can never name one key and nothing can be paid to a key nobody holds. A signature is checked by the cofactorless equation against an R that is canonical and not of small order, so one node takes exactly the signatures every node takes."
+      "technical": "An address is the hash of a public key, so anything can be paid to an address nobody holds a key for, as on any chain that pays to the hash of a key; the checksum is what stops one being typed by mistake. Ed25519 keys are refused unless canonically encoded, not of small order and in the prime order subgroup, all three asked of the key an input presents when it spends. A signature is checked by the cofactorless equation against an R that is canonical and not of small order, so one node takes exactly the signatures every node takes."
     },
     "holdings": {
       "plain": "The individual notes this address is holding. A balance is just what they add up to.",

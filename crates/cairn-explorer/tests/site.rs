@@ -863,3 +863,67 @@ fn each_of_the_four_decisions_of_31_august_says_where_it_stands() {
         );
     }
 }
+
+/// **The whitepaper's Notes paragraph and both `outputs.curious` strings say
+/// what reusing an address does to a note.**
+///
+/// The whitepaper said an unspent note "shows nothing a future computer
+/// could work a secret back from", without saying that spending one note
+/// paid to an address publishes the key that every other note the address
+/// still holds, change included, then sits behind. The shipped wallet pays
+/// every payment's change back to its one address, so that was the whole of
+/// what a reader learned about the one thing that stops holding after a
+/// wallet's first payment (02-F1). The words are matched rather than a
+/// keyword, the way 44-F3's status lines are: a rewrite that drops the fact
+/// while keeping some other mention of "change" fails here.
+#[test]
+fn the_key_exposure_papers_say_what_reusing_an_address_does() {
+    let flowing = PAPER.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flowing.contains(
+            "every note that address still holds, change included, sits behind that \
+             published key"
+        ),
+        "the whitepaper's Notes paragraph does not say what an address's other notes \
+         become once its key is published"
+    );
+    assert!(
+        EN.contains(
+            "and every note still left there, change included, sits behind it from then on"
+        ),
+        "the English outputs.curious string does not say what an address's other \
+         notes become once its key is published"
+    );
+    assert!(
+        FR.contains(
+            "et tout billet qui y reste ensuite, monnaie rendue comprise, se retrouve \
+             derrière elle"
+        ),
+        "the French outputs.curious string does not say what an address's other \
+         notes become once its key is published"
+    );
+}
+
+/// **No `address.technical` string says nothing can be paid to a key nobody
+/// holds.**
+///
+/// An address is the hash of a key, and the explorer's own explainer said the
+/// opposite: that the checks Ed25519 asks of a key mean nothing can be paid
+/// to one nobody holds. They mean no such thing; they are asked of the key an
+/// input presents when it spends, and an output can be, and is, paid to a
+/// hash nobody has a key for, as on any chain that pays to the hash of a key
+/// (02-F4).
+#[test]
+fn no_address_page_claims_nothing_can_be_paid_to_a_key_nobody_holds() {
+    for (language, text) in [("English", EN), ("French", FR)] {
+        for stale in [
+            "nothing can be paid to a key nobody holds",
+            "rien ne peut être payé à une clé que personne ne détient",
+        ] {
+            assert!(
+                !text.contains(stale),
+                "the {language} site still says `{stale}`, which the address format made false"
+            );
+        }
+    }
+}

@@ -764,6 +764,76 @@ echo "network      $network (0x00000000)""#;
         }
     }
 
+    /// **The installer takes an address written all in capitals, the way a
+    /// QR code carries it.**
+    ///
+    /// The specification's *Addresses as text* says a reader MAY accept the
+    /// same string written all in capitals, and the Rust reader does; the
+    /// installer's own shape check did not, because `case` in POSIX `sh` is
+    /// case-sensitive and its three accepted patterns were all lower case.
+    /// An upper-case address fell to the arm that refuses anything with a
+    /// character outside `0-9a-fA-F`, with the message "MINE is not an
+    /// address," which was false (03-F2).
+    #[test]
+    fn the_installer_accepts_an_address_written_all_in_capitals() {
+        let address = "tcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqtk5uk3";
+        let shouting = address.to_uppercase();
+        for shell in shells() {
+            let machine = Machine::new(&INSTALL, "shout", shell);
+            machine.running("testnet-6", "testnet-6");
+            machine.building("testnet-6", "testnet-6");
+            machine.installed("--network testnet-6");
+
+            let output = machine.run(&[("MINE", shouting.as_str())]);
+            assert!(
+                output.status.success(),
+                "the installer refused an address written all in capitals, which the \
+                 specification says a reader MAY accept: {}",
+                said(&output)
+            );
+            assert!(
+                format!("{} ", machine.exec_start()).contains(&format!(" --mine {shouting} ")),
+                "the installer did not write the capitalised address into the line it \
+                 installed"
+            );
+        }
+    }
+
+    /// **The installer refuses an address with anything appended to it,
+    /// rather than smuggling it through `--check`'s unquoted expansion.**
+    ///
+    /// The shape check only looked at an address's prefix, so a `MINE`
+    /// carrying a valid address followed by a space and another flag matched
+    /// it. `check_the_line` runs `--check $ARGS` unquoted, splitting that
+    /// value into `--mine <address> --archive` there and in the unit this
+    /// script writes: a malformed or pasted-with-extras `MINE` could install
+    /// extra arguments rather than being refused (02-F8).
+    #[test]
+    fn the_installer_refuses_an_address_with_something_appended() {
+        let address = "tcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqtk5uk3";
+        let smuggled = format!("{address} --archive");
+        for shell in shells() {
+            let machine = Machine::new(&INSTALL, "smuggle", shell);
+            machine.running("testnet-6", "testnet-6");
+            machine.building("testnet-6", "testnet-6");
+            machine.installed("--network testnet-6");
+
+            let before = machine.unit();
+            let output = machine.run(&[("MINE", smuggled.as_str())]);
+            assert!(
+                !output.status.success(),
+                "the installer took a MINE carrying more than one address's worth of \
+                 characters: {smuggled}"
+            );
+            assert!(
+                said(&output).contains("MINE is not an address"),
+                "the installer did not say what MINE should be: {}",
+                said(&output)
+            );
+            assert_eq!(machine.unit(), before, "and it changed the unit anyway");
+        }
+    }
+
     /// A `cairn.conf` wherever the installer is started from has no say in
     /// the network, and a check that fails for another reason does not hand
     /// the machine another network.
