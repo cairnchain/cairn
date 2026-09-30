@@ -320,15 +320,21 @@ fn neighbourhood_of(address: &SocketAddr) -> (SocketAddr, SocketAddr) {
             )
         }
         IpAddr::V6(ip) => {
+            // An address carried through NAT64 belongs to the neighbourhood of
+            // the IPv4 address it carries: see [`group_of_host`]. The stretch
+            // read for it is the addresses beside it under the same prefix
+            // and the same /16, which is part of that neighbourhood and never
+            // another's.
+            let kept = if carried_v4(ip).is_some() { 14 } else { 4 };
             let mut low = ip.octets();
             let mut high = ip.octets();
             for (at, byte) in low.iter_mut().enumerate() {
-                if at >= 4 {
+                if at >= kept {
                     *byte = 0;
                 }
             }
             for (at, byte) in high.iter_mut().enumerate() {
-                if at >= 4 {
+                if at >= kept {
                     *byte = u8::MAX;
                 }
             }
@@ -347,7 +353,15 @@ fn group_of(address: &SocketAddr) -> Group {
 
 /// Which neighbourhood a host belongs to: the rule the book groups by, for
 /// the rules beside it that need the same answer.
+///
+/// An IPv4 address carried through NAT64 is grouped as the IPv4 address it
+/// is. Read as it stands, every one of them was the one neighbourhood
+/// `64:ff9b::/32`, whatever part of the IPv4 network it reached.
 pub(crate) fn group_of_host(ip: IpAddr) -> Group {
+    let ip = match ip {
+        IpAddr::V6(v6) => carried_v4(v6).map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    };
     match ip {
         IpAddr::V4(ip) => {
             let octets = ip.octets();
@@ -384,14 +398,37 @@ pub(crate) fn drawn_place(group: Group, salt: u64) -> u64 {
 ///
 /// The loopback is left whole. `::1` is inside nobody's /64, and it is the
 /// one address several rules exist to recognise.
+///
+/// And an IPv4 address carried through NAT64 is the IPv4 address it carries,
+/// as [`realm_of`] reads it. Read as a /64, every one of them was the one
+/// machine `64:ff9b::`: a node on an IPv6-only network, which is where a
+/// phone lives, held two connections to the whole IPv4 network, shared one
+/// allowance with all of it, and one refusal turned all of it away.
 pub(crate) fn machine_of(ip: IpAddr) -> IpAddr {
     match ip.to_canonical() {
-        IpAddr::V6(v6) if !v6.is_loopback() => {
-            let [a, b, c, d, ..] = v6.segments();
-            IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
-        }
+        IpAddr::V6(v6) if !v6.is_loopback() => carried_v4(v6).map_or_else(
+            || {
+                let [a, b, c, d, ..] = v6.segments();
+                IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
+            },
+            IpAddr::V4,
+        ),
         other => other,
     }
+}
+
+/// The IPv4 address an IPv6 one carries through NAT64, when it carries one.
+///
+/// RFC 6052's well known prefix, `64:ff9b::/96`, and the range RFC 8215
+/// reserves for a network's own choice of prefix, `64:ff9b:1::/48`, both with
+/// the address in the last thirty two bits. See [`realm_of`] for why both, and
+/// for the one layout this cannot read.
+fn carried_v4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let octets = v6.octets();
+    let well_known =
+        octets[..4] == [0x00, 0x64, 0xff, 0x9b] && octets[4..12].iter().all(|byte| *byte == 0);
+    let local_use = octets[..6] == [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01];
+    (well_known || local_use).then(|| Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]))
 }
 
 /// An address as the book keeps it: an IPv4 one wearing an IPv6 hat is
@@ -1158,15 +1195,10 @@ pub fn realm_of(ip: IpAddr) -> Realm {
             // a gateway that uses the `/48` as a `/48`, where RFC 6052 splits
             // the v4 address around the reserved octet instead of leaving it
             // at the end.
-            let octets = v6.octets();
-            let well_known = octets[..4] == [0x00, 0x64, 0xff, 0x9b]
-                && octets[4..12].iter().all(|byte| *byte == 0);
-            let local_use = octets[..6] == [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01];
-            if well_known || local_use {
-                return realm_of_v4(Ipv4Addr::new(
-                    octets[12], octets[13], octets[14], octets[15],
-                ));
+            if let Some(v4) = carried_v4(v6) {
+                return realm_of_v4(v4);
             }
+            let octets = v6.octets();
             if octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80 {
                 Realm::LinkLocal
             } else if (octets[0] & 0xfe) == 0xfc {
@@ -1255,6 +1287,103 @@ mod tests {
         for step in 0..u64::from(times) {
             book.missed(address, step.saturating_mul(MAX_QUIET));
         }
+    }
+
+    /// The IPv6 address NAT64 carries `v4` in, under the well known prefix.
+    fn carried(v4: [u8; 4]) -> IpAddr {
+        let [a, b, c, d] = v4;
+        IpAddr::V6(Ipv6Addr::new(
+            0x64,
+            0xff9b,
+            0,
+            0,
+            0,
+            0,
+            u16::from_be_bytes([a, b]),
+            u16::from_be_bytes([c, d]),
+        ))
+    }
+
+    /// An IPv4 address carried through NAT64 is the machine, and sits in the
+    /// neighbourhood, of the IPv4 address it carries.
+    ///
+    /// Read as an IPv6 /64, every such address was the one machine
+    /// `64:ff9b::` and the one neighbourhood `64:ff9b::/32`: a node on an
+    /// IPv6-only network held two connections to the whole IPv4 network,
+    /// shared one allowance with it, and one refusal turned all of it away.
+    /// Nothing asked this, so a rule that read every translated address as one
+    /// machine passed: every test ran over the loopback.
+    #[test]
+    fn an_address_carried_through_nat64_is_the_machine_it_carries() {
+        let one = carried([192, 0, 2, 1]);
+        let plain = IpAddr::from([192, 0, 2, 1]);
+        assert_ne!(
+            machine_of(one),
+            machine_of(carried([192, 0, 2, 2])),
+            "two IPv4 machines reached through NAT64 were read as one"
+        );
+        assert_eq!(machine_of(one), machine_of(plain));
+        let own_prefix = IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 1, 2, 0, 0, 0xc000, 0x0201));
+        assert_eq!(
+            machine_of(own_prefix),
+            machine_of(plain),
+            "a network's own translation prefix was read as a machine of its own"
+        );
+        assert_eq!(
+            group_of_host(one),
+            group_of_host(IpAddr::from([192, 0, 9, 9])),
+            "an address carried through NAT64 was not in the neighbourhood it carries"
+        );
+        assert_ne!(
+            group_of_host(one),
+            group_of_host(carried([198, 51, 100, 1])),
+            "two IPv4 neighbourhoods reached through NAT64 were read as one"
+        );
+        let native = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 6));
+        assert_eq!(
+            machine_of(native),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, 0)),
+            "a native IPv6 address stopped being its /64"
+        );
+    }
+
+    /// A neighbourhood reached through NAT64 fills up on its own and makes
+    /// room inside itself.
+    ///
+    /// Every translated address used to be one neighbourhood, so a book on an
+    /// IPv6-only network held [`MAX_PER_GROUP`] addresses of the whole IPv4
+    /// network, and none past them once those had answered.
+    #[test]
+    fn addresses_carried_through_nat64_fill_their_own_neighbourhoods() {
+        let mut book = AddressBook::new();
+        let in_one =
+            |at: usize| SocketAddr::new(carried([192, 0, 2, u8::try_from(at).unwrap()]), 9_000);
+        for at in 0..MAX_PER_GROUP {
+            assert!(book.insert(in_one(at)));
+            book.answered(&in_one(at), 1_000);
+        }
+        let elsewhere = SocketAddr::new(carried([198, 51, 100, 1]), 9_000);
+        assert!(
+            book.insert(elsewhere),
+            "an address reached through NAT64 was refused for a neighbourhood that is not its own"
+        );
+        assert!(
+            !book.insert(in_one(MAX_PER_GROUP)),
+            "a neighbourhood reached through NAT64 took one past its share"
+        );
+        // Room made in a full one comes out of that one.
+        let mut book = AddressBook::new();
+        for at in 0..MAX_PER_GROUP {
+            assert!(book.insert(in_one(at)));
+        }
+        let beside = SocketAddr::new(IpAddr::from([198, 51, 100, 2]), 9_000);
+        assert!(book.insert(elsewhere) && book.insert(beside));
+        assert!(book.insert(in_one(MAX_PER_GROUP)));
+        assert!(
+            book.contains(&elsewhere) && book.contains(&beside),
+            "room in one neighbourhood was made by dropping an address from another"
+        );
+        assert_eq!(book.len(), MAX_PER_GROUP + 2);
     }
 
     #[test]

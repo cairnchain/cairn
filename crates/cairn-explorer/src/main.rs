@@ -21,6 +21,33 @@ use cairn_net::{seeds, Node, NodeError, NAME_LOOKUP_PERIOD};
 
 use crate::api::Explorer;
 
+/// Writes a line to standard output, and lets it go if nobody is reading.
+///
+/// Every line this program prints goes through here, as every line `cairnd`
+/// prints goes through its own. `println!` panics when the write fails, and
+/// the write fails when whatever was reading went away: a `tee` that was
+/// killed, a log shipper that restarted, a script that read the first line of
+/// `--check` and closed the pipe. Rust ignores `SIGPIPE`, so that arrives as
+/// an error from the write, and the release profile's `panic = "abort"` made
+/// the panic the whole explorer gone, with no line anywhere saying why. The
+/// site is served from the disk and the index, not from these lines, so a
+/// line nobody can read is dropped and the explorer carries on.
+macro_rules! say {
+    ($($words:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout().lock(), $($words)*);
+    }};
+}
+
+/// The same for standard error, where a closed descriptor turned the exit
+/// codes a unit file reads, 1 and 2, into the 101 of a panic.
+macro_rules! complain {
+    ($($words:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), $($words)*);
+    }};
+}
+
 /// How often the index reads what the chain has added.
 ///
 /// Fast enough that a block appears on the page about when it appears on the
@@ -74,10 +101,10 @@ fn main() {
         })
         .and_then(|arguments| run(&arguments));
     if let Err(message) = ran {
-        eprintln!("cairn-explorer: {message}");
+        complain!("cairn-explorer: {message}");
         if let Stopping::Misread(_) = message {
-            eprintln!();
-            eprintln!("{}", options::HELP);
+            complain!();
+            complain!("{}", options::HELP);
             std::process::exit(2);
         }
         std::process::exit(1);
@@ -182,20 +209,20 @@ fn say_what_the_start_found(
     directory: &str,
 ) {
     for line in said::what_was_restored(restored, directory) {
-        println!("{line}");
+        say!("{line}");
     }
     if let Some(unread) = node.unread() {
         for line in said::wrapped(&said::will_not_read_back(&unread, directory)) {
-            println!("             {line}");
+            say!("             {line}");
         }
     }
     if let Some(probation) = node.probation() {
-        println!("probation    {probation}");
-        println!("             every page on the site says so until it has");
+        say!("probation    {probation}");
+        say!("             every page on the site says so until it has");
     }
     if let Some(ahead) = said::rules_running_out(params, node.height()) {
         for line in said::wrapped(&ahead) {
-            println!("             {line}");
+            say!("             {line}");
         }
     }
 }
@@ -203,19 +230,20 @@ fn say_what_the_start_found(
 #[allow(clippy::too_many_lines)]
 fn run(arguments: &[String]) -> Result<(), Stopping> {
     let Some(options) = options::resolve_options(arguments).map_err(Stopping::Misread)? else {
-        println!("{}", options::HELP);
+        say!("{}", options::HELP);
         return Ok(());
     };
 
-    println!("cairn-explorer {}", env!("CARGO_PKG_VERSION"));
-    println!(
+    say!("cairn-explorer {}", env!("CARGO_PKG_VERSION"));
+    say!(
         "network      {} (0x{:08x})",
         options.params.network_name(),
         options.params.network.as_u32()
     );
-    match options.params.genesis {
-        Some(genesis) => println!("starts from  {genesis}"),
-        None => println!("starts from  nothing pinned"),
+    if let Some(genesis) = options.params.genesis {
+        say!("starts from  {genesis}");
+    } else {
+        say!("starts from  nothing pinned");
     }
 
     // Everything above is a question about the settings, and everything below
@@ -241,8 +269,8 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
     // is read from every block at every start. `--keep` used to be handed
     // straight through, and the node trimmed to it, which for an explorer was
     // the blocks it needs most and a directory it could not start on again.
-    println!("listening    {}", node.address());
-    println!("blocks       {}", options::kept(options.keep));
+    say!("listening    {}", node.address());
+    say!("blocks       {}", options::kept(options.keep));
     let directory = options.data.display().to_string();
     say_what_the_start_found(&node, &restored, &options.params, &directory);
 
@@ -256,7 +284,7 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
         seeds::start_from(&[], options.params.network).unwrap_or_default()
     });
     if let Some(line) = what_the_seeds_came_to(&options, known, &seeds) {
-        println!("{line}");
+        say!("{line}");
     }
 
     for seed in &seeds {
@@ -266,11 +294,11 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
         // for both: a seed turned away for want of room was printed as
         // `reached`, and the operator counted it.
         match node.connect(*seed) {
-            Ok(()) => println!("reached      {seed}"),
+            Ok(()) => say!("reached      {seed}"),
             Err(NodeError::NotKept { because, .. }) => {
-                println!("not kept     {seed} ({because}), will keep trying");
+                say!("not kept     {seed} ({because}), will keep trying");
             }
-            Err(error) => println!("unreachable  {seed} ({error}), will keep trying"),
+            Err(error) => say!("unreachable  {seed} ({error}), will keep trying"),
         }
     }
 
@@ -327,10 +355,10 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
                     &running,
                 );
                 if let Some(fault) = fault {
-                    println!("stopping: {fault}");
+                    say!("stopping: {fault}");
                     running.store(false, Ordering::SeqCst);
                     node.shutdown();
-                    println!("stopped on the fault above");
+                    say!("stopped on the fault above");
                     std::process::exit(1);
                 }
             })
@@ -353,10 +381,10 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
     // the sentence above true rather than intended.
 
     let languages: Vec<&str> = assets::LOCALES.iter().map(|(code, _, _)| *code).collect();
-    println!("languages    {}", languages.join(", "));
-    println!();
-    println!("open         http://{served}/");
-    println!();
+    say!("languages    {}", languages.join(", "));
+    say!();
+    say!("open         http://{served}/");
+    say!();
 
     // Without bodies: no route here takes one, and a POST whose body never
     // came held a slot for the whole deadline behind the proxy, where every
@@ -371,7 +399,7 @@ fn run(arguments: &[String]) -> Result<(), Stopping> {
     running.store(false, Ordering::SeqCst);
     explorer.node().shutdown();
     let _ = indexer.join();
-    println!("stopped");
+    say!("stopped");
     Ok(())
 }
 

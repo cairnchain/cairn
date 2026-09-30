@@ -311,6 +311,27 @@ fn a_retired_network_is_named_and_not_written_out_in_hexadecimal() {
     assert_eq!(live.network_name(), NetworkId::TESTNET_6.name().unwrap());
 }
 
+/// The next test network is named before it starts.
+///
+/// A node reads a marker's name from its own build, so a node that takes no
+/// release once the network starts over can name the new one only if a
+/// release before the restart already did. Without that, every testnet-6 node
+/// still running when testnet-7 starts reads its peers as `0x4341525a`, which
+/// is the message the table above exists to replace.
+#[test]
+fn the_next_test_network_is_named_before_it_starts() {
+    use cairn_ledger::note::NetworkId;
+
+    let next = NetworkId::new(0x4341_525A);
+    assert_eq!(next, NetworkId::TESTNET_7);
+    assert_eq!(next.name(), Some("testnet-7"));
+    assert_eq!(next.to_string(), "testnet-7");
+    assert!(
+        ConsensusParams::for_network("testnet-7").is_none(),
+        "a network was answered for before its first block exists"
+    );
+}
+
 /// The network a rule set names is the network its first block belongs to.
 ///
 /// `for_network` writes the network three times in each arm: once as the
