@@ -846,7 +846,7 @@ fn the_threat_model_names_only_what_the_repository_holds() {
 fn each_of_the_four_decisions_of_31_august_says_where_it_stands() {
     for (decision, state) in [
         ("La réutilisation d'adresse", "Statut : pas commencé."),
-        ("L'adresse", "Statut : fait dans la 0.10.0, sur testnet-7."),
+        ("L'adresse", "Statut : fait dans la 0.11.0, sur testnet-7."),
         ("Le carnet du portefeuille", "Statut : pas commencé."),
         ("Qui porte quoi", "Statut : pas commencé."),
     ] {

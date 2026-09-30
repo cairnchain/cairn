@@ -45,7 +45,7 @@ aujourd'hui vaut pour toute la valeur qui se posera dessus.
 ### Ce qu'un observateur apprend
 
 L'adresse est écrite sur la chaîne à la création du billet, en clair, à côté
-du montant. Jusqu'à la 0.10.0 c'était la clé publique elle-même ; c'en est
+du montant. Jusqu'à la 0.11.0 c'était la clé publique elle-même ; c'en est
 l'empreinte depuis, ce qui ne change rien à ce qu'un observateur lit. Un
 paiement ordinaire pèse 223 octets et chacun d'eux se lit : quels billets
 meurent, quels billets naissent, pour qui, pour combien, et la différence
@@ -161,7 +161,7 @@ en-têtes n'ont rien à craindre.
 Les fonds, si. Un billet est verrouillé par une signature Ed25519, dont la clé
 secrète se retrouve depuis la clé publique sur un ordinateur quantique assez
 grand. Et tant que l'adresse était la clé publique elle-même, jusqu'à la
-0.10.0, la clé de chaque billet non dépensé était en clair sur la chaîne
+0.11.0, la clé de chaque billet non dépensé était en clair sur la chaîne
 depuis sa création. Un tel adversaire
 n'a pas besoin d'attraper une transaction au vol : il lit la chaîne, à son
 heure, et chaque billet dormant est une cible immobile. L'épargnant,
@@ -192,7 +192,7 @@ dépensé, deux créés, dans un bloc de 128 ko :
     <caption>Un paiement ordinaire sous chaque schéma, adresse en empreinte de clé</caption>
     <thead><tr><th>Schéma</th><th>Clé publique</th><th>Signature</th><th>Un paiement</th><th>Par bloc</th><th>Par seconde</th></tr></thead>
     <tbody>
-      <tr><td>Ed25519, adresse = clé (jusqu'à la 0.10.0)</td><td class="num">32 o</td><td class="num">64 o</td><td class="num">191 o</td><td class="num">686</td><td class="num">11,4</td></tr>
+      <tr><td>Ed25519, adresse = clé (jusqu'à la 0.11.0)</td><td class="num">32 o</td><td class="num">64 o</td><td class="num">191 o</td><td class="num">686</td><td class="num">11,4</td></tr>
       <tr class="us"><td>Ed25519, adresse en empreinte</td><td class="num">32 o</td><td class="num">64 o</td><td class="num">223 o</td><td class="num">587</td><td class="num">9,8</td></tr>
       <tr><td>Falcon-512</td><td class="num">897 o</td><td class="num">666 o</td><td class="num">1 690 o</td><td class="num">77</td><td class="num">1,3</td></tr>
       <tr><td>ML-DSA-44</td><td class="num">1 312 o</td><td class="num">2 420 o</td><td class="num">3 859 o</td><td class="num">33</td><td class="num">0,55</td></tr>
@@ -217,7 +217,7 @@ n'ait plus à changer le jour où l'on tranche.
     <span class="q">L'adresse</span>
     <span class="a">L'empreinte de la clé, plus jamais la clé, avant le mainnet</span>
     <span class="why">Un billet porte désormais trente-deux octets qui nomment une clé sans la montrer. Le dépensier révèle sa clé en dépensant, le nœud vérifie l'empreinte puis la signature : un hachage et une comparaison de plus. Le prix : trente-deux octets par entrée, un paiement passe de 191 à 223 octets, un bloc de 686 à 587 paiements, 9,8 par seconde. Ce que cela achète : le bouclier de Bitcoin, un billet non dépensé d'une adresse jamais réutilisée n'expose rien, et surtout le découplage, car le billet ne sait plus quel schéma de signature le garde, donc le schéma peut changer sans que le format change. C'est la seule décision de ce document qui doive entrer dans le format avant qu'une chaîne de valeur existe, et elle coûte trente-deux octets.</span>
-    <span class="state">Statut : fait dans la 0.10.0, sur testnet-7. Le billet porte l'empreinte, l'entrée qui le dépense porte la clé, et une adresse s'écrit en Bech32m avec le préfixe de son réseau, tcairn1 sur les réseaux de test, si bien qu'une faute de frappe est refusée au lieu d'être payée.</span>
+    <span class="state">Statut : fait dans la 0.11.0, sur testnet-7. Le billet porte l'empreinte, l'entrée qui le dépense porte la clé, et une adresse s'écrit en Bech32m avec le préfixe de son réseau, tcairn1 sur les réseaux de test, si bien qu'une faute de frappe est refusée au lieu d'être payée.</span>
   </div>
   <div class="dec">
     <span class="q">Le schéma de signature</span>

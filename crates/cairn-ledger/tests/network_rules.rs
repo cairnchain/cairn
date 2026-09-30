@@ -352,7 +352,7 @@ fn a_retired_network_is_named_and_not_written_out_in_hexadecimal() {
 /// release before the restart already did. Without that, every testnet-6 node
 /// still running when testnet-7 starts reads its peers as `0x4341525a`, which
 /// is the message the table above exists to replace. The name shipped ahead
-/// of the network in 0.9.5; this restart is the release where `for_network`
+/// of the network in 0.10.0; this restart is the release where `for_network`
 /// catches up to it.
 #[test]
 fn the_next_test_network_is_named_before_it_starts() {

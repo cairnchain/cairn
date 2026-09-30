@@ -145,7 +145,7 @@ the_settings() {
     resolve PORT "${listen##*:}" 9944
     resolve SEED "$(carried seed)" ""
     # An address to pay block rewards to, or a public key in the form an
-    # address had before 0.10, which the node converts to its address. Mining
+    # address had before 0.11, which the node converts to its address. Mining
     # needs the address money goes to and nothing else: the key that spends
     # it never leaves the machine that holds it, so this stays true even
     # here, where nothing worth stealing may sit.
@@ -418,7 +418,7 @@ if [ -n "$MINE" ] && [ "$MINE" != off ]; then
                 exit 1
                 ;;
             *)
-                # A public key, the form an address had before 0.10. The node
+                # A public key, the form an address had before 0.11. The node
                 # still takes one and converts it to its address.
                 if [ "${#MINE}" -ne 64 ]; then
                     echo "MINE is neither an address nor a 64 character public key: $MINE" >&2
@@ -547,7 +547,7 @@ check_the_line "$BUILT"
 # writes the address back. So the build's own answer is asked, once, and
 # written into the unit in the key's place: a 0.9 unit is rewritten with its
 # address the first time it is installed under a build that has one, and
-# 0.11 can drop the conversion because no unit carries a bare key by then.
+# 0.12 can drop the conversion because no unit carries a bare key by then.
 if [ -n "$MINE" ] && [ "$MINE" != off ] && [ -z "$mine_prefix" ]; then
     # shellcheck disable=SC2086
     resolved=$( (cd / && "$BUILT" --check $ARGS 2>/dev/null) | awk '/^mining / {print $NF; exit}')
