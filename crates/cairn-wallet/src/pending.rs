@@ -70,8 +70,10 @@ const MOST_WORDS: usize = 4096;
 /// ever.
 ///
 /// That is a pool's word and not the chain's. What a pool refuses a payment
-/// over is most often its fee floor, which no block is held to, so the
-/// transfer as it was made stays one a miner may carry for as long as its
+/// over is its fee floor, which no block is held to, or the burn of a place a
+/// fallen note of it no longer frees, which holds only while the note stays
+/// fallen: a reorganisation can put it back in the hot set. Either way the
+/// transfer as it was made may yet be one a miner carries, for as long as its
 /// notes are unspent. So the next payment this wallet builds spends one of
 /// them first, and the two can never both be carried: see
 /// `Wallet::send`.

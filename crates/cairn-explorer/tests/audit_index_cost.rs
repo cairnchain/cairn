@@ -742,16 +742,19 @@ fn what_a_block_of_dust_costs_the_index() {
     );
 
     // What that block costs whoever mines it, under this node's own pool
-    // policy. Consensus asks for nothing: a miner building its own block pays
-    // none of this.
+    // policy on the rules a public network runs. Consensus asks for the burn
+    // of every place, which a miner building its own block pays like anyone;
+    // only the bytes' share comes back to it.
+    let priced = params.with_place_price(cairn_ledger::validation::PLACE_PRICE);
     let mut floor = 0u64;
     for transfer in &per_block.transfers {
-        let weight = cairn_chain::transfer_weight(transfer, transfer.encode().len(), 1);
-        floor = floor.saturating_add(cairn_chain::fee_floor(weight).as_pebbles());
+        let places = cairn_chain::places_taken(transfer, 1);
+        let asked = cairn_chain::fee_floor(transfer.encode().len(), places, &priced);
+        floor = floor.saturating_add(asked.as_pebbles());
     }
     println!(
         "the pool would ask {floor} pebbles for it ({:.4} CAIRN), which is {} pebbles a note; \
-         a miner building the block itself pays nothing",
+         a miner building the block itself still burns the price of every place",
         floor as f64 / 100_000_000.0,
         floor / notes_per_block as u64,
     );

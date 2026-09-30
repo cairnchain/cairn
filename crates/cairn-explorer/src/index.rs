@@ -7,10 +7,11 @@
 //! refuses to put on validators. Keeping the two apart is not tidiness. It is
 //! the claim: this file is what the chain does not make anyone carry.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{Address, NoteId};
+use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::{Amount, Hash32};
 
 /// Where a transaction sits on the followed branch.
@@ -117,6 +118,14 @@ pub(crate) struct Totals {
     pub(crate) paid_to_miners: Amount,
     /// The part of that which came from senders rather than from emission.
     pub(crate) fees: Amount,
+    /// What the transfers burned for the places they took in the hot set:
+    /// the place price times each one's places, and nothing else.
+    ///
+    /// Not what the schedule paid less what exists. That difference also
+    /// holds every reward a coinbase left unclaimed, the first block's
+    /// included on a network whose first block pays nobody, and neither of
+    /// those is a burn: one was never issued, the other is a miner's choice.
+    pub(crate) burned: Amount,
 }
 
 impl Totals {
@@ -124,9 +133,10 @@ impl Totals {
     /// fee is money that already existed.
     ///
     /// What a coinbase declines to claim, of its reward or of the fees, is
-    /// destroyed and never appears here, so this can sit below the schedule
-    /// without the index being wrong. It said Cairn burns nothing, which is
-    /// the one case that makes the total fall.
+    /// never issued and never appears here, and neither does the burn of the
+    /// places transfers took, so this sits below the schedule without the
+    /// index being wrong. The two are told apart: the burn is
+    /// [`Totals::burned`], and the rest is what the site calls unclaimed.
     pub(crate) fn issued(&self) -> Amount {
         self.paid_to_miners
             .checked_sub(self.fees)
@@ -135,8 +145,25 @@ impl Totals {
 }
 
 /// The explorer's view of the chain.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Index {
+    /// The rules of the chain being read, for the two numbers the burn needs:
+    /// how many notes the hot set holds, and what a place in it costs.
+    rules: ConsensusParams,
+    /// Which notes the hot set holds after the last block read, by the height
+    /// that made them and their identifier, which is the order they fall in.
+    ///
+    /// A copy of what every node holds, kept because a block does not say
+    /// which of its inputs were hot. A note spent with a plain tag may have
+    /// fallen already and be spent out of the grace window, and it then frees
+    /// no place: the burn is the place price times the outputs less the hot
+    /// inputs, and only the hot set can tell the two kinds apart. Bounded by
+    /// the tier, like the set it copies, and right only for an index that
+    /// read the chain from its first block.
+    hot: BTreeSet<(u64, NoteId)>,
+    /// What each block read burned, in pebbles, from the lowest height read
+    /// up. Eight bytes a block, which [`BYTES_PER_BLOCK`] counts.
+    burns: Vec<u64>,
     /// The stretch of the branch already read, or nothing before the first
     /// block goes in.
     span: Option<Span>,
@@ -224,9 +251,14 @@ struct Undo {
     made: Vec<(Hash32, u32)>,
     /// The notes it spent that this index knew, in the order it spent them.
     spent: Vec<NoteId>,
-    /// What went onto the two money totals for it, which is what comes off.
+    /// What went onto the money totals for it, which is what comes off.
     paid: Amount,
     fees: Amount,
+    burned: Amount,
+    /// The hot notes it spent and the notes it pushed out of the hot set, by
+    /// height and identifier, which are what the copy of the tier takes back.
+    hot_spent: Vec<(u64, NoteId)>,
+    evicted: Vec<(u64, NoteId)>,
 }
 
 /// The run of blocks the index has read, and what stood at the top of it.
@@ -370,8 +402,9 @@ const BATCH: u64 = 64;
 ///
 /// What taking a block back needs is kept for this many of the newest blocks
 /// read: a few dozen bytes for an ordinary block, and some fifty kilobytes for
-/// one at the byte ceiling full of spends, so the whole of it stays a few
-/// megabytes however long the chain grows. A switch deeper than this is read
+/// one at the byte ceiling full of spends, and as much again for one that
+/// pushes the most notes the rules allow out of the hot set, so the whole of
+/// it stays a few megabytes however long the chain grows. A switch deeper than this is read
 /// again from the start, which is what every switch cost before.
 ///
 /// More than a turn of the walk, because the check at the bottom of a turn
@@ -474,13 +507,13 @@ pub(crate) const BYTES_PER_NOTE: u64 = 627;
 
 /// Bytes one block costs the index beside its notes: its identifier and the
 /// height it sits at, so that it can be found by the one as it is by the
-/// other, and the time in its header, so that a page can date a movement
-/// without the block.
+/// other, the time in its header, so that a page can date a movement without
+/// the block, and what its transfers burned, which the block does not say.
 ///
 /// Content, like [`BYTES_PER_NOTE`], and counted apart from it because it is
 /// a cost of the chain's length and not of what the chain carries: a chain of
 /// empty blocks pays it and nothing else.
-pub(crate) const BYTES_PER_BLOCK: u64 = 48;
+pub(crate) const BYTES_PER_BLOCK: u64 = 56;
 
 /// What the index is made of, for the operator who has to pay for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -496,8 +529,39 @@ pub(crate) struct Size {
 }
 
 impl Index {
+    /// An index of a chain under the rules the tests build on.
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self::under(ConsensusParams::testnet())
+    }
+
+    /// An index of a chain under `rules`, which it needs to know what each
+    /// block burned.
+    pub(crate) fn under(rules: ConsensusParams) -> Self {
+        Self {
+            rules,
+            hot: BTreeSet::new(),
+            burns: Vec::new(),
+            span: None,
+            at: HashMap::new(),
+            blocks: HashMap::new(),
+            times: Vec::new(),
+            notes: BTreeMap::new(),
+            owners: HashMap::new(),
+            totals: Totals::default(),
+            movements: 0,
+            richest: Vec::new(),
+            holders: 0,
+            stock_due: false,
+            stock_at: None,
+            resume: 0,
+            undo: VecDeque::new(),
+        }
+    }
+
+    /// The same index read from nothing, under the same rules.
+    fn start_again(&mut self) {
+        *self = Self::under(self.rules);
     }
 
     /// Reads whatever the chain has added since the last call.
@@ -560,7 +624,7 @@ impl Index {
                 // chain, so a block the branch still carries has under it only
                 // blocks the branch still carries.
                 if !self.back_to_the_branch(span.through, &id_at) {
-                    *self = Self::new();
+                    self.start_again();
                 }
             }
         }
@@ -614,7 +678,7 @@ impl Index {
                     // so far has a hole under it. An index with a hole answers
                     // wrongly rather than shortly, so it starts again here.
                     if self.span.is_some() {
-                        *self = Self::new();
+                        self.start_again();
                         self.stock_due = true;
                     }
                 }
@@ -685,7 +749,7 @@ impl Index {
         let started_over = moved.is_some();
         if let Some(height) = moved {
             if !self.back_to_the_branch(height.saturating_sub(1), &id_at) {
-                *self = Self::new();
+                self.start_again();
                 self.stock_due = true;
             }
         }
@@ -718,7 +782,14 @@ impl Index {
             spent: Vec::new(),
             paid: Amount::ZERO,
             fees: Amount::ZERO,
+            burned: Amount::ZERO,
+            hot_spent: Vec::new(),
+            evicted: Vec::new(),
         };
+        // Which inputs were hot is asked of the tier as it stood before the
+        // block, which is what the rules ask it of, so before anything here
+        // moves it.
+        undo.burned = self.burn_of(block, &mut undo.hot_spent);
 
         let coinbase = block.coinbase.id();
         self.at.insert(
@@ -770,10 +841,78 @@ impl Index {
             }
         }
 
+        undo.evicted = self.turn_the_tier(block, &undo.hot_spent);
+        self.burns.push(undo.burned.as_pebbles());
+        self.totals.burned = self
+            .totals
+            .burned
+            .checked_add(undo.burned)
+            .unwrap_or(self.totals.burned);
+
         self.undo.push_back(undo);
         if self.undo.len() > UNDO_DEPTH {
             self.undo.pop_front();
         }
+    }
+
+    /// What `block`'s transfers burned for the places they took, with the hot
+    /// notes it spent written into `hot_spent`.
+    ///
+    /// A transfer's places are its outputs less its inputs whose note was in
+    /// the hot set, which is the count the rules burn for, and
+    /// `ConsensusParams::burn_for` is the price the rules charge.
+    fn burn_of(&self, block: &Block, hot_spent: &mut Vec<(u64, NoteId)>) -> Amount {
+        let mut burned = Amount::ZERO;
+        for transfer in &block.transfers {
+            let before = hot_spent.len();
+            for input in &transfer.inputs {
+                let Some(record) = self.notes.get(&input.note_id) else {
+                    continue;
+                };
+                let held = (record.created_at, input.note_id);
+                if self.hot.contains(&held) {
+                    hot_spent.push(held);
+                }
+            }
+            let freed = hot_spent.len().saturating_sub(before);
+            let places = transfer.outputs.len().saturating_sub(freed);
+            let burn = self.rules.burn_for(places).unwrap_or(Amount::ZERO);
+            burned = burned.checked_add(burn).unwrap_or(burned);
+        }
+        burned
+    }
+
+    /// Moves the copy of the hot set on by one block, the way the rules move
+    /// the real one, and returns what fell out of it.
+    ///
+    /// The hot notes the block spent leave, every note it made comes in at its
+    /// height, and while the tier holds more than it may the oldest fall
+    /// first, by height and then by identifier. Every note the block made
+    /// sits at a height above every note already there, so letting them all
+    /// in and then taking the oldest out is the order the rules give,
+    /// including a block that makes more notes than the tier holds, whose own
+    /// notes then fall by identifier.
+    fn turn_the_tier(&mut self, block: &Block, hot_spent: &[(u64, NoteId)]) -> Vec<(u64, NoteId)> {
+        let height = block.header.height;
+        for held in hot_spent {
+            self.hot.remove(held);
+        }
+        for (id, _) in block.coinbase.created_notes() {
+            self.hot.insert((height, id));
+        }
+        for transfer in &block.transfers {
+            for (id, _) in transfer.created_notes() {
+                self.hot.insert((height, id));
+            }
+        }
+        let mut evicted = Vec::new();
+        while self.hot.len() > self.rules.hot_capacity {
+            let Some(oldest) = self.hot.pop_first() else {
+                break;
+            };
+            evicted.push(oldest);
+        }
+        evicted
     }
 
     /// Takes back every block read above where the branch parted from what
@@ -911,6 +1050,23 @@ impl Index {
                 self.owners.remove(&owner);
             }
         }
+        // The tier as it stood before the block: what fell comes back, the hot
+        // notes it spent come back, and what it made goes. A note it made and
+        // pushed straight out is in both lists, and leaves last.
+        for held in undo.evicted.iter().chain(&undo.hot_spent) {
+            self.hot.insert(*held);
+        }
+        for (source, outputs) in &undo.made {
+            for index in 0..*outputs {
+                self.hot.remove(&(undo.height, NoteId::new(*source, index)));
+            }
+        }
+        self.burns.pop();
+        self.totals.burned = self
+            .totals
+            .burned
+            .checked_sub(undo.burned)
+            .unwrap_or(Amount::ZERO);
         self.blocks.remove(&undo.id);
         self.times.pop();
         let transfers = u64::try_from(undo.made.len().saturating_sub(1)).unwrap_or(u64::MAX);
@@ -1013,6 +1169,27 @@ impl Index {
                 .saturating_mul(BYTES_PER_NOTE)
                 .saturating_add(blocks.saturating_mul(BYTES_PER_BLOCK)),
         }
+    }
+
+    /// What the block this index read at `height` burned for its places.
+    ///
+    /// Nothing for an index that did not read the chain from its first block:
+    /// its copy of the hot set started empty, so it cannot tell a hot input
+    /// from one spent out of the grace window, and a guess would be printed as
+    /// a figure.
+    pub(crate) fn burned_at(&self, height: u64) -> Option<Amount> {
+        if !self.reads_from_the_start() {
+            return None;
+        }
+        let at = usize::try_from(height).ok()?;
+        self.burns.get(at).copied().and_then(Amount::from_pebbles)
+    }
+
+    /// What every block this index read burned, and nothing for an index that
+    /// did not read the chain from its first block, for the same reason as
+    /// [`Self::burned_at`].
+    pub(crate) fn burned(&self) -> Option<Amount> {
+        self.reads_from_the_start().then_some(self.totals.burned)
     }
 
     /// The height a block this index read sits at, by its identifier.
@@ -1127,8 +1304,8 @@ impl Index {
         let owners: BTreeMap<_, _> = self.owners.iter().collect();
         let blocks: BTreeMap<_, _> = self.blocks.iter().collect();
         format!(
-            "{:?}\n{at:?}\n{blocks:?}\n{:?}\n{:?}\n{owners:?}\n{:?}\n{}",
-            self.span, self.times, self.notes, self.totals, self.movements
+            "{:?}\n{at:?}\n{blocks:?}\n{:?}\n{:?}\n{owners:?}\n{:?}\n{}\n{:?}\n{:?}",
+            self.span, self.times, self.notes, self.totals, self.movements, self.hot, self.burns
         )
     }
 }

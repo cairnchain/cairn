@@ -233,6 +233,15 @@ note and its proof during that window, so nothing is asked of the
 spender. Without it the boundary between tiers would be a cliff that a
 payer falls off for no reason of their own.
 
+Which of the two bounds is met depends on how fast notes are falling. On a
+quiet chain it is the 64 blocks. At the eviction cap, 1 024 notes a block,
+the 8 192 notes are met first and the window spans 8 blocks. That rate can be
+bought, by anybody, at a price: every note a transfer adds to the hot set
+destroys a fixed price, the *place price*, paid as part of its fee. It is
+destroyed rather than paid to whoever mines the block, so a miner filling its
+own blocks pays it like anyone else. What a flood costs, and what it does to
+the people it pushes out, is in the limitations.
+
 Utreexo has a comparable observation, that outputs created and spent
 within one block need not enter the accumulator at all
 <sup>[[4]](#r4)</sup>, and roughly 40% of outputs live fewer
@@ -853,6 +862,7 @@ estimated, on one core of an ordinary machine.
   <div><span class="k">Hot set at capacity</span><span class="v">68 MB</span></div>
   <div><span class="k">Cold set carried by a node</span><span class="v">64 hashes, 2 kB</span></div>
   <div><span class="k">Grace window</span><span class="v">64 blocks, 8 192 notes</span></div>
+  <div><span class="k">Place price, destroyed</span><span class="v">6 000 pebbles</span></div>
   <div><span class="k">Difficulty window</span><span class="v">90 blocks, LWMA</span></div>
   <div><span class="k">Median time past</span><span class="v">11 blocks</span></div>
   <div><span class="k">Maximum retarget</span><span class="v">factor 4</span></div>
@@ -1081,6 +1091,31 @@ signatures. The rules that keep one party from filling a node's peers are
 rules about addresses, and this adversary needs none. Whether to encrypt
 the transport is a decision this project has not taken; Bitcoin took it
 in BIP 324.
+
+**The comfort of a quiet chain can be bought away.** How long a note
+stays hot, and the 64 blocks of grace after it falls, are what a quiet
+chain gives when nobody pays to change them, and not guarantees. The
+protocol cannot tell a flood from a busy chain and does not try. What it
+does is price the flood: every place a transfer takes in the hot set
+destroys 6 000 pebbles, paid once, as part of the fee, by whoever takes
+it, and a miner pays it too because it is destroyed rather than claimed.
+Pushing every note out of the hot set therefore costs 131 072 places, 7.9
+CAIRN destroyed and about half a CAIRN more in byte fees, and the eviction
+cap spreads it over at least 128 blocks, about 130 at the pace a miner's
+software builds them: a little over two hours. Measured on the
+implementation, `cairn-chain/examples/flood.rs` flushed a full tier in 130
+blocks of 1 009 evictions each. While a flood lasts the grace window spans 8
+blocks rather than 64, and a spend waiting in a pool with a proof is let go
+of whenever the tree its proof belongs to changes, which in the measured
+flood was about one block in two, unless its wallet offers it again with the
+proof its node keeps current. Nothing is taken: the notes are pushed out, not
+removed, and a note is never charged for where it sits. Their owners spend
+them with a proof, which is about six hundred bytes more, and that is what
+the price is measured to cover. It is not set higher because every payment
+with change pays it once too: a price of a block reward for the whole tier,
+about 38 000 pebbles a place, would multiply an ordinary payment's floor by
+five and still leave a miner with a tenth of the work able to flush the tier
+for one of the 144 rewards it earns a day.
 
 **The theorem's cost is real.** A wallet offline long enough,
 or one that lost its records, must ask an archivist. Nobody is paid for

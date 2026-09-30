@@ -471,7 +471,8 @@ fn would_refuse(
     let transfer = Transfer::new(inputs, outputs);
     let bytes = cairn_primitives::codec::Encode::encode(&transfer).len();
     let freed = chosen.iter().filter(|held| held.fallen.is_none()).count();
-    let floor = cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes, freed));
+    let places = cairn_chain::places_taken(&transfer, freed);
+    let floor = cairn_chain::fee_floor(bytes, places, wallet.params());
     (fee < floor).then_some(floor)
 }
 

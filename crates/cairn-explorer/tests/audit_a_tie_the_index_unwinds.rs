@@ -218,14 +218,24 @@ fn read_level(index: &mut Index, chain: &Branch, reads: &Cell<usize>) {
 /// An index that read `chain` from nothing, which is what any other way of
 /// arriving at the same branch has to be indistinguishable from.
 fn fresh(chain: &Branch) -> Index {
-    let mut index = Index::new();
+    fresh_under(ConsensusParams::testnet(), chain)
+}
+
+/// The same, under `rules`.
+fn fresh_under(rules: ConsensusParams, chain: &Branch) -> Index {
+    let mut index = Index::under(rules);
     read_level(&mut index, chain, &Cell::new(0));
     index
 }
 
 /// Holds `index` to one that read `chain` from nothing, table by table.
 fn same_as_fresh(index: &Index, chain: &Branch, what: &str) {
-    let fresh = fresh(chain);
+    same_as_fresh_under(ConsensusParams::testnet(), index, chain, what);
+}
+
+/// The same, for an index under `rules`.
+fn same_as_fresh_under(rules: ConsensusParams, index: &Index, chain: &Branch, what: &str) {
+    let fresh = fresh_under(rules, chain);
     assert_eq!(
         index.contents(),
         fresh.contents(),
@@ -243,8 +253,13 @@ fn same_as_fresh(index: &Index, chain: &Branch, what: &str) {
 /// Level with branch A, then switched to branch B: how many blocks the walk
 /// asked for to follow the switch.
 fn switch(first: &Branch, second: &Branch) -> (Index, usize) {
+    switch_under(ConsensusParams::testnet(), first, second)
+}
+
+/// The same, for an index under `rules`.
+fn switch_under(rules: ConsensusParams, first: &Branch, second: &Branch) -> (Index, usize) {
     let reads = Cell::new(0usize);
-    let mut index = Index::new();
+    let mut index = Index::under(rules);
     read_level(&mut index, first, &reads);
     assert_eq!(
         index.covers(),
@@ -306,6 +321,159 @@ fn a_deeper_switch_is_taken_back_to_exactly_what_a_fresh_read_holds() {
     assert_eq!(index.covers(), Some((0, first.tip())));
     assert_eq!(reads.get(), 20, "and back again costs the blocks applied");
     same_as_fresh(&index, &first, "switched back to a shorter branch");
+}
+
+/// A switch on a tier small enough for notes to fall every block leaves the
+/// index's copy of the hot set, and what each block burned, exactly as a
+/// fresh read of the winning branch would.
+///
+/// The copy moves on every block: the hot notes a block spent leave it, what
+/// it made comes in, and the oldest fall out. Taking a block back has to put
+/// every one of those back, and a note the block made and pushed straight out
+/// is in two of the lists at once. A copy left wrong after a switch prices
+/// every later spend of a fallen note as if it gave a place back, and every
+/// block after says it destroyed the wrong amount.
+#[test]
+fn a_switch_takes_back_what_each_block_did_to_the_hot_set() {
+    let rules = ConsensusParams::testnet()
+        .with_hot_capacity(4)
+        .with_place_price(cairn_ledger::validation::PLACE_PRICE);
+    let (first, second) = two_branches(40, 20, 21);
+    let (index, reads) = switch_under(rules, &first, &second);
+    assert_eq!(
+        reads, 21,
+        "the walk asked for the blocks the switch applied"
+    );
+    same_as_fresh_under(
+        rules,
+        &index,
+        &second,
+        "twenty blocks undone on a small tier",
+    );
+    assert!(
+        index.burned().is_some_and(|burned| burned > Amount::ZERO),
+        "fixture: the branches take places, so there is a burn to get wrong"
+    );
+
+    let reads = Cell::new(0usize);
+    let mut index = index;
+    read_level(&mut index, &first, &reads);
+    same_as_fresh_under(rules, &index, &first, "switched back on a small tier");
+}
+
+/// A one block switch puts back every note the undone block took out of the
+/// hot set, so the winning block's spends of them give their places back.
+///
+/// The block taken back spent a hot note and pushed two out; the block that
+/// replaces it spends one of each. Read fresh, both were hot, so each of its
+/// two spends takes one place. An index that took the block back and left
+/// either note out of its copy of the tier reads that spend as one out of the
+/// grace window, and says the block destroyed a place more than it did.
+#[test]
+fn a_switch_puts_back_the_notes_the_undone_block_took_out_of_the_hot_set() {
+    let rules = ConsensusParams::testnet()
+        .with_hot_capacity(4)
+        .with_place_price(cairn_ledger::validation::PLACE_PRICE);
+    let one = |height: u64, tag: u8| {
+        CoinbaseTransaction::with_extra(height, vec![Note::new(reward(), key(0))], vec![tag])
+    };
+    let mut shared = HashMap::new();
+    for height in 0..4 {
+        shared.insert(height, finish(height, one(height, 0), Vec::new()));
+    }
+    let shared = Branch { at: shared };
+    let (pushed, spent) = (shared.coinbase_note(1), shared.coinbase_note(3));
+    let half = Amount::from_pebbles(reward().as_pebbles() / 2).unwrap();
+    let into_two = |note: NoteId, to: u64| {
+        Transfer::new(
+            vec![Input::hot(note)],
+            vec![Note::new(half, key(to)), Note::new(half, key(to))],
+        )
+    };
+
+    // The branch read first: one block spending a hot note and paying two,
+    // which pushes the two oldest out.
+    let mut first = shared.clone();
+    first.at.insert(
+        4,
+        finish(
+            4,
+            CoinbaseTransaction::with_extra(
+                4,
+                vec![Note::new(half, key(1)), Note::new(half, key(1))],
+                vec![1],
+            ),
+            vec![Transfer::new(
+                vec![Input::hot(spent)],
+                vec![Note::new(reward(), key(1))],
+            )],
+        ),
+    );
+    // The branch that wins: at the same height, a spend of a note the first
+    // pushed out and of the note it spent, each into two, and one more block.
+    let mut second = shared.clone();
+    second.at.insert(
+        4,
+        finish(4, one(4, 2), vec![into_two(pushed, 2), into_two(spent, 3)]),
+    );
+    second.at.insert(5, finish(5, one(5, 2), Vec::new()));
+
+    let (index, _) = switch_under(rules, &first, &second);
+    same_as_fresh_under(rules, &index, &second, "one block undone on a tier of four");
+    assert_eq!(
+        index.burned_at(4),
+        rules.burn_for(2),
+        "the winning block's two spends of hot notes are said to burn other than a \
+         place each"
+    );
+}
+
+/// An index that did not read the chain from its first block says nothing
+/// about what was burned, rather than a figure off an empty copy of the tier.
+///
+/// Its copy of the hot set starts with nothing in it, so every note spent
+/// with a plain tag reads as one that had already fallen, and each block's
+/// burn comes out as if no input gave a place back. Printed, that is a wrong
+/// figure in the one column a reader has no other way to check.
+#[test]
+fn an_index_that_started_above_the_first_block_says_nothing_about_burns() {
+    let rules = ConsensusParams::testnet()
+        .with_hot_capacity(4)
+        .with_place_price(cairn_ledger::validation::PLACE_PRICE);
+    let (first, _) = two_branches(10, 4, 5);
+    let mut index = Index::under(rules);
+    let head = Head {
+        tip: first.tip(),
+        at_last_read: None,
+    };
+    let kept_from_three = |height: u64| {
+        if height < 3 {
+            Held::Dropped
+        } else {
+            first.held(height)
+        }
+    };
+    assert!(read_to_the_end(first.tip(), || index.refresh(
+        &head,
+        kept_from_three,
+        |height| first.id_at(height),
+        || Some(first.tip())
+    )));
+    assert_eq!(
+        index.covers(),
+        Some((3, first.tip())),
+        "fixture: a shorter index"
+    );
+    assert_eq!(
+        index.burned(),
+        None,
+        "an index that started above the first block gave a total burned"
+    );
+    assert_eq!(
+        index.burned_at(3),
+        None,
+        "an index that started above the first block gave a block's burn"
+    );
 }
 
 /// A switch deeper than the index keeps the means to take back is read again

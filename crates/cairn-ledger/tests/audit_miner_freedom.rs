@@ -3,9 +3,9 @@
 //!
 //! Every rule in this chain is enforced by validators and followed by miners
 //! only where following pays. These tests are about the places the two come
-//! apart: the coinbase a miner writes for itself, the transfers it carries for
-//! free because the fee comes back to it, and the one shared resource a fee
-//! was supposed to price.
+//! apart: the coinbase a miner writes for itself, the transfers it carries
+//! whose fees come back to it, and the one shared resource a fee was supposed
+//! to price and a burn now does.
 //!
 //! Nothing here is fixed by the tests. They record what the rules currently
 //! allow so that a change to any of it is visible.
@@ -27,7 +27,7 @@ use cairn_ledger::state::{GRACE_BLOCKS, GRACE_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer, MAX_COINBASE_EXTRA};
 use cairn_ledger::validation::{
     assemble_block, check_transfer, connect_block, mine_block, BlockError, ConsensusParams,
-    TransferError,
+    TransferError, PLACE_PRICE,
 };
 use cairn_ledger::{Block, HeaderSummary, LedgerState};
 use cairn_primitives::codec::Encode;
@@ -118,17 +118,18 @@ impl Bench {
     }
 }
 
-/// Spends one note into `count` notes of the least value there is, leaving no
-/// fee at all. The shape a miner reaches for when it wants places in the hot
-/// set and is not paying for them.
+/// Spends one note into `count` notes of the least value there is, leaving
+/// `fee` behind. The shape a miner reaches for when it wants places in the hot
+/// set.
 fn stuffing(
     params: &ConsensusParams,
     id: NoteId,
     note: Note,
     owner: &SecretKey,
     count: usize,
+    fee: u64,
 ) -> Transfer {
-    let value = note.value.as_pebbles();
+    let value = note.value.as_pebbles() - fee;
     let each = 1u64;
     let first = value - each * (count as u64 - 1);
     let outputs: Vec<Note> = (0..count)
@@ -155,64 +156,96 @@ fn spendable_without_a_proof(state: &LedgerState, params: &ConsensusParams, id: 
 }
 
 // ---------------------------------------------------------------------------
-// 1. The fee floor is not a rule, and a miner never pays it.
+// 1. The fee floor is not a rule; the place price is, and a miner pays it.
 // ---------------------------------------------------------------------------
 
-/// A miner pays no fee for the transfers it puts in its own block.
+/// The rules a public network charges for a place, with rewards spendable at
+/// once so a test can spend what it mines.
+fn priced() -> ConsensusParams {
+    ConsensusParams::testnet()
+        .with_coinbase_maturity(0)
+        .with_place_price(PLACE_PRICE)
+}
+
+/// What `places` places burn at the price.
+fn burn_of(places: usize) -> u64 {
+    PLACE_PRICE.as_pebbles() * places as u64
+}
+
+/// A miner pays the place price for the transfers it puts in its own block.
 ///
 /// The floor in `cairn-chain` is the price of being relayed and pooled by a
-/// stranger. A miner assembling its own block reaches none of that code: it
-/// hands `assemble_block` whatever it likes, and the only fee rule consensus
-/// has is that the coinbase may not claim more than the reward plus the fees.
-/// A transfer paying nothing satisfies it.
-///
-/// This is not a defect on its own. It is the reason every argument in this
-/// file that starts "it would cost the attacker N pebbles" has to be read
-/// twice: if the attacker is the miner, N is zero.
+/// stranger, and a miner assembling its own block reaches none of that code.
+/// It used to reach no price at all: the only fee rule consensus had was that
+/// the coinbase may not claim more than the reward plus the fees, so a zero
+/// fee transfer creating two hundred and fifty six notes was a valid block
+/// body, and every argument that started "it would cost the attacker N
+/// pebbles" read N as nought when the attacker was the miner. Each place now
+/// burns the price, which the coinbase cannot claim back.
 #[test]
-fn a_miner_carries_its_own_transfers_for_nothing() {
-    let params = ConsensusParams::testnet().with_coinbase_maturity(0);
+fn a_miner_pays_for_the_places_its_own_transfers_take() {
+    let params = priced();
     let miner = wallet(1);
     let mut bench = Bench::new(params);
     let (id, note) = bench.plain(&miner);
+    let count = params.max_outputs_per_transfer;
 
-    // Every pebble that went in comes back out: the fee is exactly zero, which
-    // the pool would refuse and the block does not.
-    let transfer = stuffing(&params, id, note, &miner, params.max_outputs_per_transfer);
-    let paid = transfer.total_output().unwrap();
-    assert_eq!(paid, note.value, "the transfer pays no fee at all");
-
+    let free = stuffing(&params, id, note, &miner, count, 0);
     let height = bench.height();
     let reward = params.reward_at(height);
     let coinbase = CoinbaseTransaction::new(height, vec![Note::new(reward, miner.public_key())]);
-    bench.mine(coinbase, vec![transfer]);
-
-    println!(
-        "\n  a zero fee transfer creating {} notes is a valid block body",
-        params.max_outputs_per_transfer
+    let refused = assemble_block(
+        &bench.ledger,
+        coinbase.clone(),
+        vec![free],
+        &params,
+        bench.clock + 60,
+        0,
     );
-    println!("  the fee floor is cairn-chain policy and consensus has no floor at all\n");
+    assert!(
+        matches!(
+            refused,
+            Err(BlockError::InvalidTransfer {
+                source: TransferError::PlacesUnpaid { places, .. },
+                ..
+            }) if places == count - 1
+        ),
+        "a miner's own zero fee transfer took every place it made for nothing"
+    );
+
+    let before = bench.ledger.supply();
+    let paying = stuffing(&params, id, note, &miner, count, burn_of(count - 1));
+    bench.mine(coinbase, vec![paying]);
+    println!(
+        "\n  a transfer creating {count} notes burns {} pebbles, whoever mines it",
+        burn_of(count - 1)
+    );
+    assert_eq!(
+        bench.ledger.supply().as_pebbles(),
+        before.as_pebbles() + reward.as_pebbles() - burn_of(count - 1),
+        "the miner claimed the reward and its own transfer's burn went nowhere"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// 2. The eviction cap prices the rate. Nobody prices the total.
+// 2. The eviction cap bounds the rate. The place price prices the total.
 // ---------------------------------------------------------------------------
 
-/// A miner empties the hot set at the cap, block after block, for nothing.
+/// A miner empties the hot set at the cap, block after block, and pays the
+/// place price for every note it pushes out.
 ///
-/// The cap exists because "a miner includes its own transfers for free", which
-/// the comment on `max_evictions_per_block` says out loud. What the cap buys
-/// is time: it makes emptying the tier take `hot_capacity / cap` blocks. It
-/// does not make it cost anything, and the arithmetic at the end of this test
-/// is what those blocks come to on the live rules.
+/// The cap was written because "a miner includes its own transfers for free",
+/// and what it buys is time: emptying the tier takes `hot_capacity / cap`
+/// blocks. It made nothing cost anything, and this test used to end with the
+/// miner having paid nought. The burn is what makes it cost: every place the
+/// miner's transfers take destroys the price, so pushing the tier out costs a
+/// miner what it costs anybody, and the arithmetic at the end is what that
+/// comes to on the live rules.
 #[test]
-fn emptying_the_hot_set_costs_a_miner_nothing_but_time() {
+fn emptying_the_hot_set_costs_a_miner_the_place_price_of_every_note() {
     // Small enough to run, shaped like the real thing: a tier, a cap that is a
     // fraction of it, and a coinbase allowance held back.
-    let params = ConsensusParams::testnet()
-        .with_coinbase_maturity(0)
-        .with_hot_capacity(64)
-        .with_max_evictions(8);
+    let params = priced().with_hot_capacity(64).with_max_evictions(8);
     let miner = wallet(1);
     let victim = wallet(2);
 
@@ -230,21 +263,24 @@ fn emptying_the_hot_set_costs_a_miner_nothing_but_time() {
     }
 
     // Now the attack, which is one ordinary looking block after another. Each
-    // carries a single transfer of the miner's own, paying no fee, spending
-    // one note and creating eight. Seven net places plus one for the coinbase
-    // is the cap exactly.
+    // carries a single transfer of the miner's own, spending one note and
+    // creating eight, and paying exactly the burn of its seven places. Seven
+    // net places plus one for the coinbase is the cap exactly.
     let mut blocks = 0usize;
-    let mut spent_in_fees = 0u64;
+    let mut burned = 0u64;
+    let before = bench.ledger.supply();
+    let mut rewards = 0u64;
     while victims
         .iter()
         .any(|(id, _)| bench.ledger.hot_note(id).is_some())
     {
         let (id, note) = purse.pop().expect("the miner has notes to spend");
-        let transfer = stuffing(&params, id, note, &miner, 8);
-        spent_in_fees += note.value.as_pebbles() - transfer.total_output().unwrap().as_pebbles();
+        let transfer = stuffing(&params, id, note, &miner, 8, burn_of(7));
+        burned += note.value.as_pebbles() - transfer.total_output().unwrap().as_pebbles();
 
         let height = bench.height();
         let reward = params.reward_at(height);
+        rewards += reward.as_pebbles();
         let coinbase =
             CoinbaseTransaction::new(height, vec![Note::new(reward, miner.public_key())]);
         bench.mine(coinbase, vec![transfer]);
@@ -252,42 +288,58 @@ fn emptying_the_hot_set_costs_a_miner_nothing_but_time() {
         assert!(blocks < 100, "this should take a handful of blocks");
     }
 
-    assert_eq!(spent_in_fees, 0, "the miner paid no fee to do any of this");
+    assert_eq!(
+        burned,
+        blocks as u64 * burn_of(7),
+        "the miner paid the price of every place"
+    );
+    assert_eq!(
+        bench.ledger.supply().as_pebbles(),
+        before.as_pebbles() + rewards - burned,
+        "and what it paid is gone, not back in the miner's coinbase"
+    );
     println!("\n  a tier of {} notes, a cap of {} a block", 64, 8);
     println!("  every note the victim held was pushed to the cold set in {blocks} blocks,");
-    println!("  and the miner paid {spent_in_fees} pebbles for it\n");
+    println!("  and the miner destroyed {burned} pebbles doing it\n");
 
     // What the same thing comes to under the rules a public network runs.
-    let live = ConsensusParams::testnet();
+    let live = ConsensusParams::for_network("testnet").unwrap();
     let needed = live.hot_capacity.div_ceil(live.max_evictions_per_block);
+    let flush = live.hot_capacity as u64 * live.place_price.as_pebbles();
     println!(
         "  on the live rules: {} notes in the tier, {} evictions a block,",
         live.hot_capacity, live.max_evictions_per_block
     );
     println!(
-        "  so the whole tier goes cold in {needed} blocks, about {:.1} hours",
-        needed as f64 * live.target_block_time as f64 / 3_600.0
+        "  so the whole tier goes cold in {needed} blocks at least, about {:.1} hours,\n  \
+         and burns {:.2} CAIRN whoever does it",
+        needed as f64 * live.target_block_time as f64 / 3_600.0,
+        flush as f64 / 100_000_000.0
     );
     assert_eq!(needed, 128);
 
     // And the honest comparison, which is what decides whether any of this
-    // matters. A chain of full blocks of ordinary payments nets about six
-    // hundred and eighty six new notes a block on its own, so the tier turns
-    // over completely in about that many blocks with nobody attacking
-    // anything. The cap is what keeps the two figures within striking
-    // distance of each other, and it does: the attack buys an acceleration of
-    // about half again, not an order of magnitude.
-    let honest_per_block = live.max_block_bytes / 191;
+    // matters. A chain of full blocks of ordinary payments nets about five
+    // hundred and eighty seven new notes a block on its own, so the tier
+    // turns over completely in about that many blocks with nobody attacking
+    // anything, and pays the same price for every place. The cap is what
+    // keeps the two rates within striking distance of each other: the attack
+    // buys an acceleration of under double, not an order of magnitude. The
+    // payment is measured rather than written down, since its size is the
+    // note format's and moved when an input began carrying its key.
+    let payment = Transfer::new(
+        vec![Input::hot(NoteId::new(cairn_primitives::Hash32::ZERO, 0))],
+        vec![Note::new(pebbles(1), victim.public_key()); 2],
+    );
+    let honest_per_block = live.max_block_bytes / payment.encode().len();
     let honest_blocks = live.hot_capacity.div_ceil(honest_per_block);
     println!(
         "\n  against that: a full chain of ordinary payments nets {honest_per_block} notes a\n  \
          block on its own and empties the tier in {honest_blocks} blocks, {:.1} hours.\n  \
          So the cap holds the attack to {:.2} times what a busy honest chain\n  \
-         already does. What the miner saves is the {:.2} CAIRN a block of fees\n  \
-         that traffic would have paid, not the eviction itself\n",
+         already does, and both pay the same price for each place\n",
         honest_blocks as f64 * live.target_block_time as f64 / 3_600.0,
         honest_blocks as f64 / needed as f64,
-        honest_per_block as f64 * 7_030.0 / 100_000_000.0
     );
     assert!(
         honest_blocks < needed * 2,
@@ -509,7 +561,14 @@ fn assemble_block_hands_back_a_block_every_node_refuses() {
     let mut bytes = 0usize;
     while bytes <= params.max_block_bytes {
         let (id, note) = purse.pop().unwrap();
-        let transfer = stuffing(&params, id, note, &miner, params.max_outputs_per_transfer);
+        let transfer = stuffing(
+            &params,
+            id,
+            note,
+            &miner,
+            params.max_outputs_per_transfer,
+            0,
+        );
         bytes += transfer.encode().len();
         transfers.push(transfer);
     }
@@ -705,17 +764,15 @@ fn nothing_stops_a_miner_dating_a_block_before_the_network_opened() {
 ///
 /// The eviction order is by the height a note was made at, oldest first, and
 /// spending a note makes a new one at the current height. A miner pays no fee
-/// on its own transfers, so refreshing its whole holding costs it nothing but
-/// block room, and it can do it every block. The comment on the eviction cap
+/// on its own transfers, and a spend of sixteen notes into sixteen takes no
+/// place, so the place price does not touch it either: refreshing its whole
+/// holding costs it nothing but block room, and it can do it every block. The comment on the eviction cap
 /// says the pusher "chooses who by choosing nothing, since it is always the
 /// oldest that falls". That is true of the notes it pushes out and not of its
 /// own: it chooses itself out of the queue every time.
 #[test]
 fn a_miner_holds_its_own_money_at_the_front_of_the_queue_for_nothing() {
-    let params = ConsensusParams::testnet()
-        .with_coinbase_maturity(0)
-        .with_hot_capacity(32)
-        .with_max_evictions(1_024);
+    let params = priced().with_hot_capacity(32).with_max_evictions(1_024);
     let miner = wallet(1);
     let victim = wallet(2);
     let mut bench = Bench::new(params);

@@ -1,13 +1,14 @@
-//! Auditing the weight formula's claim that pushing a note out of the hot set
-//! costs about what an ordinary payment costs, "however the pusher shapes the
-//! transfer".
+//! Auditing the claim that pushing a note out of the hot set costs about what
+//! an ordinary payment costs, "however the pusher shapes the transfer".
 //!
-//! The formula charges `max(0, outputs - inputs)` places. It credits every
+//! The formula charged `max(0, outputs - inputs)` places. It credited every
 //! input as if it freed a hot place. A note spent out of the grace window with
 //! a plain `Witness::Hot` frees no hot place, having already fallen, yet is
-//! cheap to encode and counts as an input. So a transfer that re-spends grace
-//! notes and creates the same number of outputs is charged zero places while
-//! evicting a note for every output.
+//! cheap to encode and counts as an input. So a transfer that re-spent grace
+//! notes and created the same number of outputs was charged zero places while
+//! evicting a note for every output. The pool and the consensus burn both
+//! count only the inputs that were still hot now, on the rules a public
+//! network runs, place price included.
 
 #![allow(
     clippy::unwrap_used,
@@ -19,11 +20,11 @@
 
 use std::collections::BTreeSet;
 
-use cairn_chain::{fee_floor, transfer_weight};
+use cairn_chain::{fee_floor, places_taken, transfer_weight};
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
+use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams, PLACE_PRICE};
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::Amount;
@@ -32,7 +33,9 @@ const NOW: u64 = 1_000_000_000;
 const CAPACITY: usize = 8;
 
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet().with_hot_capacity(CAPACITY)
+    ConsensusParams::testnet()
+        .with_hot_capacity(CAPACITY)
+        .with_place_price(PLACE_PRICE)
 }
 
 fn wallet(seed: u8) -> SecretKey {
@@ -156,8 +159,8 @@ fn grace_respends_pay_the_same_rate_per_eviction() {
     let ordinary_evicts = evicted_by(&state, &params, &ordinary);
     let grace_evicts = evicted_by(&state, &params, &grace);
 
-    let ordinary_floor = fee_floor(ordinary_weight).as_pebbles();
-    let grace_floor = fee_floor(grace_weight).as_pebbles();
+    let ordinary_floor = fee_floor(ordinary_bytes, ordinary_places, &params).as_pebbles();
+    let grace_floor = fee_floor(grace_bytes, grace_places, &params).as_pebbles();
     let ordinary_per = ordinary_floor / ordinary_evicts as u64;
     let grace_per = grace_floor / grace_evicts as u64;
 
@@ -199,11 +202,11 @@ mod repricing {
     use cairn_crypto::SecretKey;
     use cairn_ledger::note::{Note, NoteId};
     use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
-    use cairn_ledger::validation::{assemble_block, mine_block, ConsensusParams};
+    use cairn_ledger::validation::{assemble_block, mine_block, ConsensusParams, PLACE_PRICE};
     use cairn_primitives::codec::Encode;
     use cairn_primitives::Amount;
 
-    use super::{fee_floor, transfer_weight, wallet, CAPACITY, NOW};
+    use super::{fee_floor, places_taken, transfer_weight, wallet, CAPACITY, NOW};
 
     const ATTEMPTS: u64 = 1 << 20;
 
@@ -213,6 +216,7 @@ mod repricing {
         ConsensusParams::testnet()
             .with_hot_capacity(CAPACITY)
             .with_coinbase_maturity(0)
+            .with_place_price(PLACE_PRICE)
     }
 
     /// A chain with one note a block, so a fixed number of blocks pushes a
@@ -304,9 +308,19 @@ mod repricing {
     }
 
     /// What the same transfer weighs once its inputs have left the tier: the
-    /// shape's honest price, which is what `prune_pool` has to charge it.
+    /// shape's honest weight, which is what `prune_pool` has to rank it by.
     fn weight_when_fallen(transfer: &Transfer) -> usize {
         transfer_weight(transfer, transfer.encode().len(), 0)
+    }
+
+    /// The floor of a transfer whose `freed` inputs are still hot.
+    fn floor_of(transfer: &Transfer, freed: usize) -> u64 {
+        fee_floor(
+            transfer.encode().len(),
+            places_taken(transfer, freed),
+            &params(),
+        )
+        .as_pebbles()
     }
 
     /// Pushes `count` notes out of the tier by paying somebody else.
@@ -318,8 +332,8 @@ mod repricing {
     }
 
     /// A transfer paying exactly the floor for the places it took while its
-    /// notes were hot pays a fifth of the floor for the places it takes once
-    /// they have fallen. It used to go on waiting at the price it came in at.
+    /// notes were hot pays nothing for the places it takes once they have
+    /// fallen. It used to go on waiting at the price it came in at.
     #[test]
     fn a_pooled_transfer_stops_paying_the_floor_when_its_notes_fall() {
         let miner = wallet(1);
@@ -330,7 +344,7 @@ mod repricing {
         let hot = respend(&params, &notes[0..take], &miner, 1);
         let hot_weight = transfer_weight(&hot, hot.encode().len(), take);
         let fallen_weight = weight_when_fallen(&hot);
-        let fee = fee_floor(hot_weight).as_pebbles();
+        let fee = floor_of(&hot, take);
 
         let transfer = respend(&params, &notes[0..take], &miner, fee);
         let id = transfer.id();
@@ -342,20 +356,19 @@ mod repricing {
         // Enough blocks paying somebody else to push all four out of the tier.
         churn(&mut store, &mut clock, take);
 
+        let fallen_floor = floor_of(&hot, 0);
         println!(
             "weighed {hot_weight} hot and {fallen_weight} fallen; paid {fee} pebbles \
-             against a floor of {} once fallen",
-            fee_floor(fallen_weight).as_pebbles()
+             against a floor of {fallen_floor} once fallen"
         );
         assert!(
-            fee < fee_floor(fallen_weight).as_pebbles(),
+            fee < fallen_floor,
             "the shape has to have become one the floor refuses"
         );
         assert!(
             store.pooled(&id).is_none(),
             "the pool went on holding, and offering to miners, a transfer that \
-             pays {fee} pebbles where its shape now costs {}",
-            fee_floor(fallen_weight).as_pebbles()
+             pays {fee} pebbles where its shape now costs {fallen_floor}"
         );
     }
 
@@ -366,7 +379,8 @@ mod repricing {
     /// re-spend pays exactly what its fallen shape costs; the ordinary payment
     /// pays twice what its own shape costs. Priced honestly the payment is the
     /// better of the two and is picked first. Priced at what the re-spend was
-    /// worth while its notes were hot, the re-spend wins by four to one.
+    /// worth while its notes were hot, when none of its fee was a burn, the
+    /// re-spend wins.
     #[test]
     fn a_miner_picks_by_what_a_transfer_takes_now_rather_than_when_it_arrived() {
         let miner = wallet(1);
@@ -377,9 +391,12 @@ mod repricing {
         let probe = respend(&params, &notes[0..take], &miner, 1);
         let hot_weight = transfer_weight(&probe, probe.encode().len(), take);
         let fallen_weight = weight_when_fallen(&probe);
-        let respend_fee = fee_floor(fallen_weight).as_pebbles();
+        let respend_fee = floor_of(&probe, 0);
+        // What a miner keeps: all of it while the notes were hot, and what is
+        // left over the burn of four places once they have fallen.
+        let fallen_kept = respend_fee - 4 * PLACE_PRICE.as_pebbles();
         let stale = respend_fee * 65_536 / hot_weight as u64;
-        let honest = respend_fee * 65_536 / fallen_weight as u64;
+        let honest = fallen_kept * 65_536 / fallen_weight as u64;
 
         let sneak = respend(&params, &notes[0..take], &miner, respend_fee);
         let sneak_id = sneak.id();
@@ -392,7 +409,7 @@ mod repricing {
         let (last_id, last_note) = notes[CAPACITY - 1];
         let probe = respend(&params, &[(last_id, last_note)], &miner, 1);
         let payment_weight = transfer_weight(&probe, probe.encode().len(), 1);
-        let payment_fee = fee_floor(payment_weight).as_pebbles() * 2;
+        let payment_fee = floor_of(&probe, 1) * 2;
         let payment_rate = payment_fee * 65_536 / payment_weight as u64;
         let payment = respend(&params, &[(last_id, last_note)], &miner, payment_fee);
         let payment_id = payment.id();

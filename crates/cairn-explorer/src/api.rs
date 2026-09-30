@@ -23,7 +23,7 @@ use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{hex, Amount, Hash32};
 
-use crate::index::{read_to_the_end, Head, Held, Index, NoteRecord, Reading, Size};
+use crate::index::{read_to_the_end, Head, Held, Index, NoteRecord, Reading, Size, Totals};
 use cairn_http::{Mark, Writer};
 use cairn_http::{Request, Response};
 
@@ -164,9 +164,12 @@ impl std::fmt::Debug for Explorer {
 
 impl Explorer {
     pub(crate) fn new(node: Node) -> Self {
+        // The index needs the rules for what a block burned, and they are the
+        // chain's, fixed by the network the node was started on.
+        let rules = node.with_chain(|chain| *chain.params());
         Self {
             node,
-            index: Mutex::new(Index::new()),
+            index: Mutex::new(Index::under(rules)),
             waiting: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -908,6 +911,7 @@ fn status(context: &Context<'_>) -> Response {
     // and nothing would say which, and the chain's own answer is the one a
     // header commits to.
     json.field_str("issued", &state.supply().as_pebbles().to_string());
+    field_burned_in_all(&mut json, context, &totals);
     // What the index made of the same chain, kept so the two can be compared
     // rather than trusted. They are computed from different things: the
     // ledger from emission accounting, this from the notes themselves.
@@ -1504,11 +1508,83 @@ fn block_summary(json: &mut Writer, context: &Context<'_>, block: &Block) {
         Some(output) => json.field_str("miner", &context.text_of(&output.owner)),
         None => json.field_null("miner"),
     }
-    match block_fees(context, block) {
+    let fees = block_fees(context, block);
+    match fees {
         Some(fees) => json.field_str("fees", &fees.as_pebbles().to_string()),
         None => json.field_null("fees"),
     }
+    field_destroyed(json, context, block, fees);
     json.end_object();
+}
+
+/// What the chain read so far has destroyed, and what it left unclaimed, as
+/// two figures and never one.
+///
+/// Destroyed is the place price burned for every place a transfer took, which
+/// the index adds up block by block; nothing else is destroyed. Unclaimed is
+/// what the schedule paid out and the fees gave up, less what coinbases
+/// claimed and the burns: a first block that pays nobody, and every reward
+/// or fee a miner left on the table. It was never issued, and a miner chose
+/// it, so it is said apart. Both are left out, as null, by an index that did
+/// not read the chain from its first block, which cannot tell a hot spend
+/// from one out of the grace window.
+fn field_burned_in_all(json: &mut Writer, context: &Context<'_>, totals: &Totals) {
+    let burned = context.index.burned();
+    match burned {
+        Some(burned) => json.field_str("destroyed", &burned.as_pebbles().to_string()),
+        None => json.field_null("destroyed"),
+    }
+    let through = context.index.covers().map(|(_, through)| through);
+    let unclaimed = burned.zip(through).and_then(|(burned, through)| {
+        context
+            .params()
+            .emitted_by(through)
+            .checked_add(totals.fees)?
+            .checked_sub(totals.paid_to_miners)?
+            .checked_sub(burned)
+    });
+    match unclaimed {
+        Some(unclaimed) => json.field_str("unclaimed", &unclaimed.as_pebbles().to_string()),
+        None => json.field_null("unclaimed"),
+    }
+}
+
+/// What a block destroyed, and apart from it what its coinbase left
+/// unclaimed.
+///
+/// Destroyed is the burn of the places its transfers took, as the index
+/// worked it out when it read the block, against its copy of the hot set.
+/// It used to be the reward and fees the block was owed less what its
+/// coinbase claimed, which also counts what a miner chose not to take and,
+/// on a first block paying nobody, a reward that was never issued. That
+/// difference less the burn is what the coinbase left unclaimed, which is its
+/// own field. Either is null where it is not known: above what the index has
+/// read, on an index that did not start at the first block, or without the
+/// fees.
+fn field_destroyed(json: &mut Writer, context: &Context<'_>, block: &Block, fees: Option<Amount>) {
+    let params = context.params();
+    let burned = context.index.burned_at(block.header.height);
+    match burned {
+        Some(burned) => json.field_str("destroyed", &burned.as_pebbles().to_string()),
+        None => json.field_null("destroyed"),
+    }
+    let owed = fees.and_then(|fees| {
+        reward_at(
+            block.header.height,
+            params.halving_interval,
+            params.initial_reward,
+            params.tail_reward,
+        )
+        .checked_add(fees)
+    });
+    let unclaimed = owed
+        .zip(burned)
+        .zip(block.coinbase.total_output())
+        .and_then(|((owed, burned), claimed)| owed.checked_sub(burned)?.checked_sub(claimed));
+    match unclaimed {
+        Some(unclaimed) => json.field_str("unclaimed", &unclaimed.as_pebbles().to_string()),
+        None => json.field_null("unclaimed"),
+    }
 }
 
 /// What senders paid in this block, measured from the transfers rather than
@@ -1616,10 +1692,12 @@ fn block(context: &Context<'_>, request: &Request, reference: &str) -> Response 
         None => json.field_null("next"),
     }
 
-    match block_fees(context, &block) {
+    let fees = block_fees(context, &block);
+    match fees {
         Some(fees) => json.field_str("fees", &fees.as_pebbles().to_string()),
         None => json.field_null("fees"),
     }
+    field_destroyed(&mut json, context, &block, fees);
     json.field_str(
         "reward",
         &reward_at(

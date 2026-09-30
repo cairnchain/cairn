@@ -148,6 +148,46 @@ impl Forge {
         (0..count).map(|_| self.mine(miner)).collect()
     }
 
+    /// A block whose coinbase pays exactly `outputs`, which may be nobody or
+    /// less than the rules allow, carrying `transfers`.
+    fn paying(&mut self, outputs: Vec<Note>, transfers: Vec<Transfer>) -> Block {
+        let height = self.state.next_height().unwrap();
+        self.clock += 600;
+        let coinbase = CoinbaseTransaction::new(height, outputs);
+        let block = assemble_block(
+            &self.state,
+            coinbase,
+            transfers,
+            &self.params,
+            self.clock,
+            0,
+        )
+        .unwrap();
+        let block = mine_block(block, ATTEMPTS).expect("a nonce exists");
+        connect_block(&mut self.state, &block, &self.params, NOW).unwrap();
+        block
+    }
+
+    /// What the rules burn for `transfers` against the chain as it stands,
+    /// which is the figure a page saying "destroyed" has to print.
+    fn burn_of(&self, transfers: &[Transfer]) -> u64 {
+        transfers
+            .iter()
+            .map(|transfer| {
+                cairn_ledger::validation::check_transfer_again(
+                    transfer,
+                    &self.state,
+                    &std::collections::BTreeSet::new(),
+                    &std::collections::BTreeMap::new(),
+                    &self.params,
+                )
+                .expect("a transfer the rules take")
+                .burn
+                .as_pebbles()
+            })
+            .sum()
+    }
+
     fn fork(&self) -> Self {
         self.clone()
     }
@@ -454,6 +494,448 @@ fn a_note_from_an_abandoned_branch_is_not_called_cold() {
         says(&answer, "tier", "\"unknown\""),
         "a note nobody holds is not in the cave: {}",
         body(&answer)
+    );
+}
+
+/// A block says what it destroyed, and the supply what has been destroyed in
+/// all, so the issued total is explained against the schedule.
+///
+/// Every place a transfer takes in the hot set burns the place price, which
+/// no coinbase may claim, so the issued total falls short of what the
+/// schedule has paid by exactly what was burned. Nothing on the site said so:
+/// a block showed its fees and what its miner was paid, and the difference
+/// was nowhere, and the supply sat below the schedule with no word why.
+#[test]
+fn a_block_says_what_it_destroyed_and_the_supply_what_has_been_destroyed_in_all() {
+    let price = cairn_ledger::validation::PLACE_PRICE;
+    let params = params().with_place_price(price);
+    let miner = wallet(1);
+    let alice = wallet(3).public_key();
+
+    let mut forge = Forge::new(params);
+    let early = forge.mine_many(&miner, 3);
+
+    // One note in, the payment and its change out: one new place, so the
+    // burn is the price, and a thousand pebbles over it for the miner.
+    let (id, note) = reward(&early, 0);
+    let fee = price.as_pebbles() + 1_000;
+    let half = note.value.as_pebbles() / 2;
+    let mut transfer = Transfer::new(
+        vec![Input::hot(id)],
+        vec![
+            Note::new(Amount::from_pebbles(half).unwrap(), alice),
+            Note::new(
+                Amount::from_pebbles(note.value.as_pebbles() - half - fee).unwrap(),
+                miner.public_key(),
+            ),
+        ],
+    );
+    transfer.sign_input(params.network, 0, &note, &miner);
+
+    // The miner claims the reward and everything the rules let it keep.
+    let height = forge.state.next_height().unwrap();
+    forge.clock += 600;
+    let claimed = params.reward_at(height).as_pebbles() + 1_000;
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(
+            Amount::from_pebbles(claimed).unwrap(),
+            miner.public_key(),
+        )],
+    );
+    let carrying = assemble_block(
+        &forge.state,
+        coinbase,
+        vec![transfer],
+        &params,
+        forge.clock,
+        0,
+    )
+    .unwrap();
+    let carrying = mine_block(carrying, ATTEMPTS).unwrap();
+    connect_block(&mut forge.state, &carrying, &params, NOW).unwrap();
+
+    let explorer = explorer(params);
+    feed(&explorer, &early);
+    feed(&explorer, std::slice::from_ref(&carrying));
+    explorer.refresh();
+
+    let burn = price.as_pebbles().to_string();
+    let answer = ask(&explorer, &format!("block/{height}"));
+    assert!(
+        says(&answer, "destroyed", &format!("\"{burn}\"")),
+        "the block does not say it destroyed the price of its one place: {}",
+        body(&answer)
+    );
+    let quiet = ask(&explorer, "block/1");
+    assert!(
+        says(&quiet, "destroyed", "\"0\""),
+        "a block that took no place and claimed its reward destroyed something: {}",
+        body(&quiet)
+    );
+
+    let status = ask(&explorer, "status");
+    assert!(
+        says(&status, "destroyed", &format!("\"{burn}\"")),
+        "the supply does not say what has been destroyed in all: {}",
+        body(&status)
+    );
+    let issued = (params.emitted_by(height).as_pebbles() - price.as_pebbles()).to_string();
+    assert!(
+        says(&status, "issued", &format!("\"{issued}\"")),
+        "the issued total is not the schedule less the burn: {}",
+        body(&status)
+    );
+}
+
+/// The rules a public network charges for a place, on a tier small enough to
+/// watch notes fall, with rewards spendable at once.
+fn priced_small_tier() -> ConsensusParams {
+    params()
+        .with_hot_capacity(8)
+        .with_max_evictions(16)
+        .with_place_price(cairn_ledger::validation::PLACE_PRICE)
+}
+
+/// Spends `spent` with the witnesses given, paying `outputs` and leaving the
+/// rest as the fee.
+fn spending(
+    params: &ConsensusParams,
+    secret: &SecretKey,
+    spent: &[(Input, Note)],
+    outputs: Vec<Note>,
+) -> Transfer {
+    let inputs = spent.iter().map(|(input, _)| input.clone()).collect();
+    let mut transfer = Transfer::new(inputs, outputs);
+    for (index, (_, note)) in spent.iter().enumerate() {
+        transfer.sign_input(params.network, index as u32, note, secret);
+    }
+    transfer
+}
+
+/// What has been destroyed is the burn of places bought, and a first block
+/// that paid nobody is not part of it.
+///
+/// The site worked destroyed out as what the schedule had paid less what
+/// exists. On a network whose first block pays nobody, that is a whole reward
+/// before anybody has bought a place, and it is not a burn: it was never
+/// issued. Nothing asked a chain like that, so a total that read fifty CAIRN
+/// destroyed on a chain where nothing had been passed.
+#[test]
+fn nothing_is_destroyed_until_a_place_is_bought_whatever_the_first_block_paid() {
+    let params = priced_small_tier();
+    let miner = wallet(1);
+    let alice = wallet(3).public_key();
+
+    let mut forge = Forge::new(params);
+    let first = forge.paying(Vec::new(), Vec::new());
+    let early = forge.mine_many(&miner, 2);
+    let explorer = explorer(params);
+    feed(&explorer, std::slice::from_ref(&first));
+    feed(&explorer, &early);
+    explorer.refresh();
+
+    let status = ask(&explorer, "status");
+    assert!(
+        says(&status, "destroyed", "\"0\""),
+        "nothing was destroyed and the site says something was, because the first \
+         block paid nobody: {}",
+        body(&status)
+    );
+    let unissued = params.reward_at(0).as_pebbles().to_string();
+    assert!(
+        says(&status, "unclaimed", &format!("\"{unissued}\"")),
+        "what the first block left unpaid is not said apart from what was destroyed: {}",
+        body(&status)
+    );
+    let first_block = ask(&explorer, "block/0");
+    assert!(
+        says(&first_block, "destroyed", "\"0\"")
+            && says(&first_block, "unclaimed", &format!("\"{unissued}\"")),
+        "the first block, which paid nobody, is said to have destroyed its reward: {}",
+        body(&first_block)
+    );
+
+    // A place bought, and the total is its price.
+    let (id, note) = reward(&early, 1);
+    let price = params.place_price.as_pebbles();
+    let half = note.value.as_pebbles() / 2;
+    let payment = spending(
+        &params,
+        &miner,
+        &[(Input::hot(id), note)],
+        vec![
+            Note::new(Amount::from_pebbles(half).unwrap(), alice),
+            Note::new(
+                Amount::from_pebbles(note.value.as_pebbles() - half - price).unwrap(),
+                miner.public_key(),
+            ),
+        ],
+    );
+    let height = forge.state.next_height().unwrap();
+    let carrying = forge.paying(
+        vec![Note::new(params.reward_at(height), miner.public_key())],
+        vec![payment],
+    );
+    feed(&explorer, std::slice::from_ref(&carrying));
+    explorer.refresh();
+    let status = ask(&explorer, "status");
+    assert!(
+        says(&status, "destroyed", &format!("\"{price}\"")),
+        "one place bought is not what the site says was destroyed: {}",
+        body(&status)
+    );
+}
+
+/// A block that claims less than it may destroyed its burn and nothing more,
+/// and says apart what its miner left unclaimed.
+///
+/// A block's destroyed figure was the reward and fees it was owed less what
+/// its coinbase claimed, which is the burn only when the miner claims all it
+/// may. A miner leaving a thousand pebbles on the table was said to have
+/// destroyed them with the place price, and the page called a miner's choice
+/// the price of a place.
+#[test]
+fn a_block_that_claims_less_than_it_may_destroyed_only_its_burn() {
+    let params = priced_small_tier();
+    let miner = wallet(1);
+    let alice = wallet(3).public_key();
+
+    let mut forge = Forge::new(params);
+    let early = forge.mine_many(&miner, 2);
+    let (id, note) = reward(&early, 0);
+    let price = params.place_price.as_pebbles();
+    let fee = price + 1_000;
+    let half = note.value.as_pebbles() / 2;
+    let payment = spending(
+        &params,
+        &miner,
+        &[(Input::hot(id), note)],
+        vec![
+            Note::new(Amount::from_pebbles(half).unwrap(), alice),
+            Note::new(
+                Amount::from_pebbles(note.value.as_pebbles() - half - fee).unwrap(),
+                miner.public_key(),
+            ),
+        ],
+    );
+    // The reward and not the thousand over the burn it could have claimed.
+    let height = forge.state.next_height().unwrap();
+    let carrying = forge.paying(
+        vec![Note::new(params.reward_at(height), miner.public_key())],
+        vec![payment],
+    );
+
+    let explorer = explorer(params);
+    feed(&explorer, &early);
+    feed(&explorer, std::slice::from_ref(&carrying));
+    explorer.refresh();
+
+    let answer = ask(&explorer, &format!("block/{height}"));
+    assert!(
+        says(&answer, "destroyed", &format!("\"{price}\"")),
+        "a block that claimed less than it may is said to have destroyed more than \
+         the price of its one place: {}",
+        body(&answer)
+    );
+    assert!(
+        says(&answer, "unclaimed", "\"1000\""),
+        "what its miner left unclaimed is not said apart: {}",
+        body(&answer)
+    );
+    let status = ask(&explorer, "status");
+    assert!(
+        says(&status, "destroyed", &format!("\"{price}\"")),
+        "the running total counts what a miner left unclaimed as destroyed: {}",
+        body(&status)
+    );
+    assert!(
+        says(&status, "unclaimed", "\"1000\""),
+        "the running total of what miners left unclaimed is not the thousand left: {}",
+        body(&status)
+    );
+}
+
+/// Every block says exactly what the rules burned for it, including the
+/// spends a block alone does not tell apart.
+///
+/// A plain tag spends a hot note, which gives its place back, or a note that
+/// fell a moment ago and is spent out of the grace window, which gives nothing
+/// back, and the block does not say which. What decides it is the hot set as
+/// it stood, which the explorer keeps a copy of: this holds that copy to the
+/// ledger, one spend a block so that no two errors can cancel in a total,
+/// across notes falling, hot spends young and old, grace spends, a proof, a
+/// gathering that gives room back, and a spend of the newest note there is.
+#[test]
+fn every_block_says_what_the_rules_burned_for_it() {
+    let params = priced_small_tier();
+    let miner = wallet(1);
+    let alice = wallet(3).public_key();
+    let price = params.place_price.as_pebbles();
+
+    let mut forge = Forge::new(params).paying_in(4);
+    forge.state = LedgerState::archiving();
+    let mut blocks = Vec::new();
+    let mut burned = Vec::new();
+    // Four notes a block on a tier of eight: block zero's fall in block two
+    // and block one's in block three, into the grace window.
+    for _ in 0..4 {
+        blocks.push(forge.mine(&miner));
+        burned.push(0u64);
+    }
+    let note_of = |block: &Block, index: u32| {
+        (
+            NoteId::new(block.coinbase.id(), index),
+            block.coinbase.outputs[index as usize],
+        )
+    };
+    let split = |value: Amount, fee: u64, to: usize| -> Vec<Note> {
+        let spare = value.as_pebbles() - fee;
+        let each = spare / to as u64;
+        (0..to)
+            .map(|index| {
+                let amount = if index == 0 {
+                    spare - each * (to as u64 - 1)
+                } else {
+                    each
+                };
+                Note::new(Amount::from_pebbles(amount).unwrap(), alice)
+            })
+            .collect()
+    };
+    // One transfer a block, the coinbase paying one note, with what the rules
+    // burn for it worked out on the ledger first.
+    let carry = |forge: &mut Forge,
+                 blocks: &mut Vec<Block>,
+                 burned: &mut Vec<u64>,
+                 transfer: Transfer,
+                 places: u64| {
+        let burn = forge.burn_of(std::slice::from_ref(&transfer));
+        assert_eq!(
+            burn,
+            places * price,
+            "fixture: the rules burn {places} places"
+        );
+        let height = forge.state.next_height().unwrap();
+        let block = forge.paying(
+            vec![Note::new(params.reward_at(height), miner.public_key())],
+            vec![transfer],
+        );
+        blocks.push(block.clone());
+        burned.push(burn);
+        block
+    };
+
+    // A young hot note, into two: one place. The block's three new notes
+    // push out the two oldest.
+    let (young_id, young) = note_of(&blocks[3], 3);
+    assert!(forge.state.hot_note(&young_id).is_some());
+    let spend = spending(
+        &params,
+        &miner,
+        &[(Input::hot(young_id), young)],
+        split(young.value, price, 2),
+    );
+    carry(&mut forge, &mut blocks, &mut burned, spend, 1);
+
+    // The oldest note still hot, into two: one place. A copy of the tier
+    // that kept the note spent above counts one note too many, pushes one
+    // more out, and reads this one as fallen.
+    let (still_id, still) = note_of(&blocks[2], 2);
+    assert!(forge.state.hot_note(&still_id).is_some());
+    let spend = spending(
+        &params,
+        &miner,
+        &[(Input::hot(still_id), still)],
+        split(still.value, price, 2),
+    );
+    carry(&mut forge, &mut blocks, &mut burned, spend, 1);
+
+    // One that block pushed out, spent with a plain tag out of the grace
+    // window into two: it gives nothing back, so two places.
+    let (pushed_id, pushed) = note_of(&blocks[2], 3);
+    assert!(forge.state.hot_note(&pushed_id).is_none());
+    assert!(forge.state.within_grace(&pushed_id).is_some());
+    let spend = spending(
+        &params,
+        &miner,
+        &[(Input::hot(pushed_id), pushed)],
+        split(pushed.value, 2 * price, 2),
+    );
+    carry(&mut forge, &mut blocks, &mut burned, spend, 2);
+
+    // A note that fell longer ago, the same way: two places.
+    let (grace_id, grace_note) = note_of(&blocks[1], 0);
+    assert!(forge.state.within_grace(&grace_id).is_some());
+    let spend = spending(
+        &params,
+        &miner,
+        &[(Input::hot(grace_id), grace_note)],
+        split(grace_note.value, 2 * price, 2),
+    );
+    carry(&mut forge, &mut blocks, &mut burned, spend, 2);
+
+    // A fallen note spent with its proof into one: one place.
+    let (proved_id, proved_note) = note_of(&blocks[0], 0);
+    let position = forge.state.cold().locate(&proved_id, &proved_note).unwrap();
+    let proof = forge.state.cold().prove(position).unwrap();
+    let spend = spending(
+        &params,
+        &miner,
+        &[(
+            Input::cold(proved_id, proved_note, position, proof),
+            proved_note,
+        )],
+        split(proved_note.value, price, 1),
+    );
+    carry(&mut forge, &mut blocks, &mut burned, spend, 1);
+
+    // The two newest coinbases gathered into one: room given back.
+    let last = blocks.len() - 1;
+    let (a_id, a_note) = note_of(&blocks[last], 0);
+    let (b_id, b_note) = note_of(&blocks[last - 1], 0);
+    let spend = spending(
+        &params,
+        &miner,
+        &[(Input::hot(a_id), a_note), (Input::hot(b_id), b_note)],
+        vec![Note::new(
+            a_note.value.checked_add(b_note.value).unwrap(),
+            alice,
+        )],
+    );
+    let gathered = carry(&mut forge, &mut blocks, &mut burned, spend, 0);
+
+    // And the newest note there is, into two: hot, so one place.
+    let (newest_id, newest) = note_of(&gathered, 0);
+    let spend = spending(
+        &params,
+        &miner,
+        &[(Input::hot(newest_id), newest)],
+        split(newest.value, price, 2),
+    );
+    carry(&mut forge, &mut blocks, &mut burned, spend, 1);
+    blocks.push(forge.mine(&miner));
+    burned.push(0);
+
+    let explorer = explorer(params);
+    feed(&explorer, &blocks);
+    explorer.refresh();
+    for (height, burn) in burned.iter().enumerate() {
+        let answer = ask(&explorer, &format!("block/{height}"));
+        assert!(
+            says(&answer, "destroyed", &format!("\"{burn}\"")),
+            "block {height} burned {burn} under the rules and the site says otherwise: {}",
+            body(&answer)
+        );
+    }
+    let total: u64 = burned.iter().sum();
+    assert!(
+        says(
+            &ask(&explorer, "status"),
+            "destroyed",
+            &format!("\"{total}\"")
+        ),
+        "the running total is not the sum of what the rules burned"
     );
 }
 

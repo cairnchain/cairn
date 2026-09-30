@@ -115,18 +115,14 @@ fn every_network_answers_to_the_name_it_reports() {
 /// the sentence beside it says that emptying the tier therefore takes at least
 /// that many blocks however the blocks are stuffed. The sentence is about the
 /// two numbers together, and devnet moves one of them: it takes the tier down
-/// to sixty four and leaves the cap where it was, so the cap is sixteen times
-/// the tier and one block empties the whole thing.
-///
-/// That is the other direction of this file's subject. It is not a rule devnet
-/// lowered below a floor; it is a rule devnet left above a ceiling, so the one
-/// bound on how fast the hot set turns over is the one bound a throwaway
-/// network does not rehearse. There is no number that keeps the relation at
-/// that size, which is why the answer is written down rather than asserted
-/// equal: a hundred and twenty eighth of sixty four is nought, and a cap of
-/// one refuses an ordinary devnet payment.
+/// to sixty four, and it used to leave the cap where it was, sixteen times the
+/// tier, so one block emptied the whole thing and the one bound on how fast
+/// the hot set turns over was the one bound a throwaway network did not
+/// rehearse. It takes the cap down to thirty two with the tier now, which is
+/// as low as it goes while a block still has room for payments beside a full
+/// coinbase: see the next test.
 #[test]
-fn the_eviction_cap_buys_a_hundred_and_twenty_eight_blocks_and_on_devnet_one() {
+fn the_eviction_cap_buys_a_hundred_and_twenty_eight_blocks_and_on_devnet_two() {
     let blocks_to_empty = |name: &str| {
         let params = ConsensusParams::for_network(name).expect("a network that answers");
         params
@@ -140,10 +136,73 @@ fn the_eviction_cap_buys_a_hundred_and_twenty_eight_blocks_and_on_devnet_one() {
     );
     assert_eq!(
         blocks_to_empty("devnet"),
-        1,
-        "devnet's cap started binding, which would be an improvement worth \
-         reading the comment beside it for"
+        2,
+        "devnet's cap moved, which is worth reading the comment where devnet \
+         is built for"
     );
+}
+
+/// Every network's eviction cap is below its tier and above its coinbase.
+///
+/// Below the tier, or one block empties it: devnet inherited the public cap
+/// of a thousand and twenty four over a tier of sixty four, and nothing here
+/// asked. Above the coinbase, because a miner's `selection` keeps room for a
+/// full coinbase out of the cap: a cap no larger than that leaves a full tier
+/// carrying no payment at all, which is the other way a small network can get
+/// this wrong.
+#[test]
+fn every_networks_eviction_cap_is_below_its_tier_and_above_its_coinbase() {
+    for name in NAMED {
+        let Some(params) = ConsensusParams::for_network(name) else {
+            continue;
+        };
+        assert!(
+            params.max_evictions_per_block < params.hot_capacity,
+            "{name} lets one block push out {} notes from a tier of {}, so a \
+             single block empties it",
+            params.max_evictions_per_block,
+            params.hot_capacity
+        );
+        assert!(
+            params.max_evictions_per_block > params.max_coinbase_outputs,
+            "{name} caps a block at {} evictions and keeps {} for its coinbase, \
+             so a full tier carries no payment",
+            params.max_evictions_per_block,
+            params.max_coinbase_outputs
+        );
+    }
+}
+
+/// Every named network charges the place price, and so do the rules fixtures
+/// mine on; only the bare test rules charge nothing.
+///
+/// The price is what makes a place cost a miner what it costs anyone, and a
+/// network that left it at nought would be one where a miner flushes the hot
+/// set for free, which is what it exists to end. `testnet()` carries nought
+/// for the reason it carries the floor difficulty: it is what most tests
+/// build on, and they are not about fees.
+#[test]
+fn every_network_charges_the_place_price_and_only_the_test_rules_do_not() {
+    use cairn_ledger::validation::PLACE_PRICE;
+    use cairn_primitives::Amount;
+
+    assert!(PLACE_PRICE > Amount::ZERO, "a price of nought is no price");
+    for name in NAMED {
+        let Some(params) = ConsensusParams::for_network(name) else {
+            continue;
+        };
+        assert_eq!(
+            params.place_price, PLACE_PRICE,
+            "{name} does not charge the place price"
+        );
+    }
+    assert_eq!(
+        ConsensusParams::mineable_network(32).place_price,
+        PLACE_PRICE,
+        "the rules fixtures mine on charge nothing for a place, so no fixture \
+         rehearses what a public network asks"
+    );
+    assert_eq!(ConsensusParams::testnet().place_price, Amount::ZERO);
 }
 
 /// The rule set fixtures mine on is a public network's, field by field.
