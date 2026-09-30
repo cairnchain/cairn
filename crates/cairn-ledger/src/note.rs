@@ -100,6 +100,14 @@ impl NetworkId {
     /// something every node agrees about. Every block mined under the old
     /// rules is invalid under these, so the network starts over.
     pub const TESTNET_6: Self = Self(0x4341_5259);
+    /// The seventh, named here before it exists.
+    ///
+    /// A node reads a marker's name from its own build, so a name has to ship
+    /// ahead of the network it names: a node still on testnet-6 when the
+    /// network starts over then says which network its peers moved to rather
+    /// than printing a number. Nothing makes this a network yet, and
+    /// `ConsensusParams::for_network` does not answer to it.
+    pub const TESTNET_7: Self = Self(0x4341_525A);
     /// Kept as the name of whichever test network is current.
     pub const TESTNET: Self = Self::TESTNET_6;
     /// A throwaway network with the same rules but a much shorter block time,
@@ -137,6 +145,7 @@ impl NetworkId {
             Self::TESTNET_4 => Some("testnet-4"),
             Self::TESTNET_5 => Some("testnet-5"),
             Self::TESTNET_6 => Some("testnet-6"),
+            Self::TESTNET_7 => Some("testnet-7"),
             Self::DEVNET => Some("devnet"),
             _ => None,
         }

@@ -64,7 +64,10 @@ pub const TARGET_PEERS: usize = 8;
 ///
 /// Without a ceiling, anyone can open connections until the node runs out of
 /// threads. Each one costs two threads and a read buffer, so the ceiling is
-/// what turns an unbounded cost into a known one.
+/// what turns an unbounded cost into a known one. Past it, at most
+/// `MOST_WAITING` visitors wait a few seconds for their introduction, holding
+/// no slot, and one connection on its way out for a visitor: a known cost
+/// still.
 pub const MAX_PEERS: usize = 48;
 
 /// Connections somebody else can hold on a node that has reached nobody.
@@ -84,8 +87,9 @@ pub const MAX_PEERS: usize = 48;
 ///
 /// Nor are these slots held for good by whoever took them first. A node
 /// whose slots for outsiders are all taken lets one of them go to make room
-/// for a visitor, the youngest of the neighbourhood holding the most, and
-/// keeps the ones that are useful or were there first: see `to_let_go`.
+/// for a visitor that has introduced itself, the youngest of the
+/// neighbourhood holding the most, and keeps the ones that are useful or were
+/// there first: see `to_let_go` and `admit_a_visitor`.
 pub const MOST_FROM_OUTSIDE: usize = MAX_PEERS - TARGET_PEERS;
 
 /// Connections accepted from any one machine: one IPv4 address, or one IPv6
@@ -160,6 +164,11 @@ const DIAL_BUDGET: Duration = Duration::from_secs(3);
 /// is [`DIAL_TIMEOUT`] at most.
 const DIALS_AT_ONCE: usize = 2 * TARGET_PEERS;
 /// How long a read waits before the loop looks up to check on things.
+///
+/// Also how long a connection this node has shut can go on being read, on
+/// Windows. Shutting a socket wakes a read already waiting on it on Linux and
+/// macOS, and not on Windows: there the read goes on until the far end
+/// closes or this deadline passes, and the one after it fails at once.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a write may block before the peer is treated as gone.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -483,6 +492,31 @@ const SHORT_PEERS: usize = 2;
 
 /// Addresses counted towards [`SHORT_PEERS`] at once.
 const SHORT_SENDERS: usize = 64;
+
+/// Machines that have to have sent blocks from a branch this node cannot
+/// reach before anybody is told about them.
+///
+/// One is a stranger's doing and costs it a hash. A block at or below the
+/// deepest point this node would undo is refused as too old after its work is
+/// checked against the difficulty the block itself declares, and before its
+/// parent is looked for, so a block with a made-up parent, an old height and
+/// the easiest difficulty was counted as a block from a chain: one greeted
+/// stranger made every status line of cairnd and every page of an explorer
+/// say the node might be on a branch the network had left, for as long as it
+/// ran. Two machines rather than two addresses, which is what its siblings
+/// count: what the line tells an operator to do is start again from an empty
+/// directory, and one machine claiming two ports is still one party.
+const UNREACHABLE_MACHINES: usize = 2;
+
+/// Machines counted towards [`UNREACHABLE_MACHINES`] at once.
+const UNREACHABLE_SENDERS: usize = 64;
+
+/// Seconds of meeting none of them before the count starts again, and after
+/// which what was counted is no longer said.
+///
+/// A branch the network has moved to renews its own evidence with every block
+/// it makes. A handful met long ago is not that.
+const UNREACHABLE_MEMORY: u64 = 3_600;
 
 /// A gap between two rounds of maintenance that means the machine was away.
 ///
@@ -1382,7 +1416,8 @@ struct Peer {
     /// and counting it as one of this node's own is how a stranger decides who
     /// it talks to.
     dialled: bool,
-    /// Whether this peer has introduced itself.
+    /// Whether this peer has introduced itself, whoever opened the
+    /// connection: what [`Node::peers_introduced`] counts.
     ///
     /// Read by [`Shared::broadcast`], and it has to be. A peer goes into this
     /// table the moment its socket is accepted, and the welcome is only queued
@@ -1423,7 +1458,7 @@ struct Peer {
     claims: Option<(u64, u128)>,
     /// Whether this connection was chosen to make room for a visitor and is
     /// on its way out. It holds no slot from then on: see
-    /// [`Shared::make_room_for`].
+    /// [`make_room_in`].
     leaving: bool,
     /// When this peer last handed over a block this node took, or nought.
     ///
@@ -1435,6 +1470,10 @@ struct Peer {
     /// Whether this node dialled it only to hear whether anybody answers at
     /// the address, and lets it go once it has: see [`feel`].
     feeler: bool,
+    /// Whether this is a visitor let in past a full table to introduce
+    /// itself, holding no slot until it has and room has been made for it:
+    /// see [`admit_a_visitor`] and [`Shared::seat`].
+    waiting: bool,
 }
 
 impl Peer {
@@ -1593,7 +1632,10 @@ struct Shared {
     /// complete silence: the peer is not blamed, which is right, and nothing
     /// else was said either, which is how an operator ends up watching a
     /// healthy-looking height that never moves.
-    out_of_reach: AtomicU64,
+    ///
+    /// Counted with the machines they came from, and said only once several
+    /// sent them: see [`UNREACHABLE_MACHINES`].
+    out_of_reach: Mutex<Unreachable>,
     /// Set once, if this node turns out to be somewhere it cannot get on from.
     ///
     /// Kept rather than only acted on, for the same reason [`Shared::outdated`]
@@ -2138,6 +2180,49 @@ mod ending_a_question {
     }
 }
 
+/// Blocks from a branch this node can never reach, and the machines they
+/// came from.
+///
+/// Counted rather than acted on, and said only as [`unreachable_lately`]
+/// decides.
+#[derive(Debug, Default)]
+struct Unreachable {
+    blocks: u64,
+    /// The machines they came from, up to [`UNREACHABLE_SENDERS`].
+    machines: HashSet<IpAddr>,
+    /// When the last of them arrived.
+    last: u64,
+}
+
+/// Counts one block from a branch this node can never reach, and the machine
+/// it came from.
+fn count_unreachable(met: &mut Unreachable, from: Option<IpAddr>, now: u64) {
+    let lapsed = now < met.last || now.saturating_sub(met.last) > UNREACHABLE_MEMORY;
+    if lapsed {
+        *met = Unreachable::default();
+    }
+    met.blocks = met.blocks.saturating_add(1);
+    met.last = now;
+    if let Some(from) = from {
+        if met.machines.len() < UNREACHABLE_SENDERS {
+            met.machines.insert(machine_of(from));
+        }
+    }
+}
+
+/// The blocks from a branch this node can never reach that are worth saying
+/// at `now`: all of them, once [`UNREACHABLE_MACHINES`] machines or more sent
+/// them and the last arrived within [`UNREACHABLE_MEMORY`], and nought
+/// otherwise.
+fn unreachable_lately(met: &Unreachable, now: u64) -> u64 {
+    let lately = now.saturating_sub(met.last) <= UNREACHABLE_MEMORY;
+    if lately && met.machines.len() >= UNREACHABLE_MACHINES {
+        met.blocks
+    } else {
+        0
+    }
+}
+
 /// Blocks written under rules this build does not have, as they add up.
 ///
 /// Counted rather than acted on. What one of these means is settled in
@@ -2279,6 +2364,200 @@ fn room_beside(held: impl Iterator<Item = Option<IpAddr>>, host: IpAddr) -> bool
     held.filter(|from| from.map(machine_of) == Some(machine))
         .count()
         < MAX_PER_HOST
+}
+
+/// Whether the table has room for one more connection from `host`: its
+/// ceiling and the host's share, counting a connection on its way out only
+/// when `visiting` is false.
+///
+/// A connection on its way out to make room for a visitor holds its slot
+/// against a dial, because that slot is the visitor's, and nothing against the
+/// visitor it was let go of for. A visitor waiting past a full table for its
+/// introduction holds nothing in either: it has no place until
+/// [`Shared::seat`] gives it one.
+fn room_in(peers: &HashMap<PeerId, Peer>, host: Option<IpAddr>, visiting: bool) -> bool {
+    let holding = || {
+        peers
+            .values()
+            .filter(|peer| !peer.waiting && (!visiting || !peer.leaving))
+    };
+    if holding().count() >= MAX_PEERS {
+        return false;
+    }
+    let Some(host) = host else {
+        return true;
+    };
+    if !can_be_refused(host) {
+        return true;
+    }
+    room_beside(holding().map(|peer| peer.host), host)
+}
+
+/// What the table holds as a visitor sees it: the connections holding a
+/// place, and the places still kept back for this node's own dials.
+fn held_against_visitors(peers: &HashMap<PeerId, Peer>) -> usize {
+    let dialled = peers.values().filter(|peer| peer.dialled).count();
+    peers
+        .values()
+        .filter(|peer| !peer.leaving && !peer.waiting)
+        .count()
+        .saturating_add(TARGET_PEERS.saturating_sub(dialled))
+}
+
+/// Whether one more connection somebody else opened is welcome.
+///
+/// See [`MOST_FROM_OUTSIDE`] for the figure this leaves a node that has
+/// reached nobody.
+///
+/// The ceiling of [`room_in`], less the slots this node still needs to reach
+/// the peers it chooses for itself. There was no number between
+/// [`TARGET_PEERS`] and [`MAX_PEERS`]: the accept loop and the dialling round
+/// asked the same question, so once the table was full the dialling round
+/// could not open anything, and the table filling was not something this node
+/// decided.
+///
+/// Nothing about filling it is misbehaviour. Forty eight connections that
+/// greet, are welcomed and say a word every few seconds are never refused and
+/// never fall quiet, and `MAX_PER_HOST` was two per exact address, so that was
+/// twenty four addresses: a quarter of a /24, or twenty four out of one
+/// machine's IPv6 /64. Measured: the victim reported forty eight peers, knew
+/// thirty three addresses, and never dialled the one its operator gave it. For
+/// a node with no chain that hands the one irreversible choice it makes to
+/// whoever filled the table, because every claim it hears is theirs and it
+/// cannot reach anybody else.
+///
+/// "Has this node room for another connection" is true, and it is the
+/// question the accept loop needed answered. The dialling round needed "has
+/// this node room for a connection it chooses".
+fn room_to_accept_in(peers: &HashMap<PeerId, Peer>, host: Option<IpAddr>) -> bool {
+    if held_against_visitors(peers) >= MAX_PEERS {
+        return false;
+    }
+    room_in(peers, host, true)
+}
+
+/// Whether a visitor from `host` is taken: when the table has room for it, or
+/// when letting one connection go makes that room.
+///
+/// All of it in one turn of the table's lock, so two visitors seated at once
+/// from two threads are not both told of the one place made. The table is
+/// not asked again after one is let go: [`make_room_in`] lets one go only
+/// where that departure is the room. It was asked again, and turned the
+/// visitor away, on a table one departure left past its ceiling, after
+/// somebody had been let go of for it.
+fn room_made_in(peers: &mut HashMap<PeerId, Peer>, host: IpAddr, salt: u64) -> bool {
+    room_to_accept_in(peers, Some(host)) || make_room_in(peers, host, salt)
+}
+
+/// Lets go of one connection somebody else opened, to make room for a visitor
+/// from `visitor`, and says whether it did, which is whether the visitor now
+/// has room.
+///
+/// Only where the table is what turned the visitor away: a visitor its own
+/// machine's share already turns away is making room for nobody. Only where
+/// one departure is enough, which is where what [`room_to_accept_in`] counts
+/// stands at the ceiling and not past it: letting one go from a table past its
+/// ceiling left it still full, and the visitor was turned away after somebody
+/// had been let go of for it. And one at a time. The connection chosen stops
+/// holding a slot the moment it is chosen, and leaves the table once its
+/// threads have wound down: a matter of moments once its socket is shut, and
+/// up to [`READ_TIMEOUT`] on Windows, where shutting it does not wake the read
+/// waiting on it. Until it has, nobody else is let go of, so the connections
+/// holding a place are at most one more than [`MAX_PEERS`], and only for that
+/// long.
+///
+/// Which one goes is [`to_let_go`], and it may be none. A visitor waiting for
+/// its own introduction is never one: it holds no place to give up.
+fn make_room_in(peers: &mut HashMap<PeerId, Peer>, visitor: IpAddr, salt: u64) -> bool {
+    if peers.values().any(|peer| peer.leaving) {
+        return false;
+    }
+    if held_against_visitors(peers) > MAX_PEERS {
+        return false;
+    }
+    let staying = || peers.values().filter(|peer| !peer.leaving && !peer.waiting);
+    if can_be_refused(visitor) && !room_beside(staying().map(|peer| peer.host), visitor) {
+        return false;
+    }
+    let inbound: Vec<Standing> = peers
+        .iter()
+        .filter(|(_, peer)| !peer.dialled && !peer.waiting)
+        .map(|(id, peer)| Standing {
+            id: *id,
+            host: peer.host,
+            took_block_at: peer.took_block_at,
+            took_transfer_at: peer.took_transfer_at,
+        })
+        .collect();
+    let Some(chosen) = to_let_go(&inbound, visitor, salt) else {
+        return false;
+    };
+    let Some(peer) = peers.get_mut(&chosen) else {
+        return false;
+    };
+    peer.leaving = true;
+    let _ = peer.stream.shutdown(Shutdown::Both);
+    true
+}
+
+/// Where a connection goes into the table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    /// It holds a slot.
+    Seated,
+    /// A visitor let past a full table to introduce itself, holding no slot
+    /// until it has and room has been made for it.
+    Waiting,
+}
+
+/// Visitors to a full table that may wait for their introduction at once.
+///
+/// What the waiting is for: room used to be made the moment a socket was
+/// accepted, before the visitor said a word, so a connection that closed at
+/// once cost a full node a peer for nobody, and so did every surplus dial of a
+/// node dialling [`DIALS_AT_ONCE`] addresses side by side, which it shuts the
+/// moment they answer. What bounds it: a waiting visitor holds two threads and
+/// a read buffer and may send only its introduction, under the small frame cap
+/// a stranger gets, for at most [`WAITING_PATIENCE`].
+const MOST_WAITING: usize = TARGET_PEERS;
+
+/// Seconds a visitor waiting past a full table has to introduce itself.
+///
+/// A node that dials writes its introduction before anything else, so an
+/// honest visitor has said who it is within a round trip.
+const WAITING_PATIENCE: u64 = 10;
+
+/// Where a visitor from `host` goes into `peers`, if anywhere.
+///
+/// Its machine's share first, counting every connection from it that is not
+/// on its way out, whether it holds a place or waits for one. Then a place,
+/// when the table has one. Past a full table it waits for its introduction,
+/// while fewer than [`MOST_WAITING`] are waiting, and room is made for it only
+/// once it has said who it is: see [`Shared::seat`]. When as many are waiting
+/// as may, room is made at once, as it always was: a crowd holding every place
+/// to wait in would otherwise decide that nobody new reaches this node, which
+/// is what making room exists to prevent.
+fn admit_a_visitor(peers: &mut HashMap<PeerId, Peer>, host: IpAddr, salt: u64) -> Option<Place> {
+    let staying = peers
+        .values()
+        .filter(|peer| !peer.leaving)
+        .map(|peer| peer.host);
+    if can_be_refused(host) && !room_beside(staying, host) {
+        return None;
+    }
+    if room_to_accept_in(peers, Some(host)) {
+        return Some(Place::Seated);
+    }
+    if peers.values().filter(|peer| peer.waiting).count() < MOST_WAITING {
+        return Some(Place::Waiting);
+    }
+    room_made_in(peers, host, salt).then_some(Place::Seated)
+}
+
+/// Whether a visitor waiting past a full table, which arrived at `arrived`,
+/// has waited as long as it may for its own introduction.
+fn has_waited_too_long(arrived: u64, now: u64) -> bool {
+    now.saturating_sub(arrived) >= WAITING_PATIENCE
 }
 
 /// Connections kept for having most recently handed over a block this node
@@ -3007,8 +3286,12 @@ impl Shared {
     /// was chosen and the moment the visitor is taken there is a gap, and a
     /// dial made in it took the slot, the visitor was turned away, and the
     /// connection let go of had been let go of for nobody.
+    ///
+    /// A question and not a promise: a dial asks it before it dials, and the
+    /// table is asked again, in the same turn of its lock as the connection
+    /// goes in, by [`attach_peer`].
     fn has_room_for(&self, host: Option<IpAddr>) -> bool {
-        self.room_for(host, false)
+        room_in(&self.peers(), host, false)
     }
 
     /// Whether one more connection from `host`, somebody else's, is welcome
@@ -3016,119 +3299,54 @@ impl Shared {
     ///
     /// A connection on its way out to make room for a visitor holds nothing
     /// here: its slot went to the visitor the moment it was chosen.
+    #[cfg(test)]
     fn has_room_for_visitor(&self, host: Option<IpAddr>) -> bool {
-        self.room_for(host, true)
+        room_in(&self.peers(), host, true)
     }
 
-    /// The table's ceiling and the host's share, counting a connection on its
-    /// way out only when `visiting` is false. See the two above.
-    fn room_for(&self, host: Option<IpAddr>, visiting: bool) -> bool {
-        let peers = self.peers();
-        let holding = || peers.values().filter(|peer| !visiting || !peer.leaving);
-        if holding().count() >= MAX_PEERS {
-            return false;
-        }
-        let Some(host) = host else {
-            return true;
-        };
-        if !can_be_refused(host) {
-            return true;
-        }
-        room_beside(holding().map(|peer| peer.host), host)
-    }
-
-    /// Whether one more connection somebody else opened is welcome.
-    ///
-    /// See [`MOST_FROM_OUTSIDE`] for the figure this leaves a node that has
-    /// reached nobody.
-    ///
-    /// The ceiling above, less the slots this node still needs to reach the
-    /// peers it chooses for itself. There was no number between
-    /// [`TARGET_PEERS`] and [`MAX_PEERS`]: the accept loop and the dialling
-    /// round asked the same question, so once the table was full the dialling
-    /// round could not open anything, and the table filling was not something
-    /// this node decided.
-    ///
-    /// Nothing about filling it is misbehaviour. Forty eight connections that
-    /// greet, are welcomed and say a word every few seconds are never refused
-    /// and never fall quiet, and `MAX_PER_HOST` was two per exact address, so
-    /// that was twenty four addresses: a quarter of a /24, or twenty four out
-    /// of one machine's IPv6 /64. Measured: the victim reported forty eight
-    /// peers, knew thirty three addresses, and never dialled the one its
-    /// operator gave it. For a node with no chain that hands the one
-    /// irreversible choice it makes to whoever filled the table, because every
-    /// claim it hears is theirs and it cannot reach anybody else.
-    ///
-    /// "Has this node room for another connection" is true, and it is the
-    /// question the accept loop needed answered. The dialling round needed
-    /// "has this node room for a connection it chooses".
+    /// Whether one more connection somebody else opened is welcome: see
+    /// [`room_to_accept_in`].
+    #[cfg(test)]
     fn has_room_to_accept(&self, host: Option<IpAddr>) -> bool {
-        let held = {
-            let peers = self.peers();
-            let dialled = peers.values().filter(|peer| peer.dialled).count();
-            peers
-                .values()
-                .filter(|peer| !peer.leaving)
-                .count()
-                .saturating_add(TARGET_PEERS.saturating_sub(dialled))
-        };
-        if held >= MAX_PEERS {
-            return false;
-        }
-        self.has_room_for_visitor(host)
+        room_to_accept_in(&self.peers(), host)
     }
 
-    /// Whether a visitor from `host` is taken: when the table has room for
-    /// it, or when letting one connection go makes that room.
-    ///
-    /// Asked again after one is let go, because one is not always enough: a
-    /// table whose slots held for this node's own dials are taken by
-    /// connections from outside is past its share by more than one.
+    /// Whether a visitor from `host` is taken: see [`room_made_in`].
+    #[cfg(test)]
     fn room_for_a_visitor(&self, host: IpAddr) -> bool {
-        self.has_room_to_accept(Some(host))
-            || (self.make_room_for(host) && self.has_room_to_accept(Some(host)))
+        room_made_in(&mut self.peers(), host, self.neighbourhood_salt)
     }
 
     /// Lets go of one connection somebody else opened, to make room for a
-    /// visitor from `visitor`, and says whether it did.
-    ///
-    /// Only where the table is what turned the visitor away: a visitor its
-    /// own machine's share already turns away is making room for nobody. And
-    /// one at a time. The connection chosen stops holding a slot the moment
-    /// it is chosen, and leaves the table once its threads have wound down,
-    /// which a shut socket makes a matter of moments; until it has, nobody
-    /// else is let go of, so the table holds at most one more than
-    /// [`MAX_PEERS`], and only for those moments.
-    ///
-    /// Which one goes is [`to_let_go`], and it may be none.
+    /// visitor from `visitor`, and says whether it did: see
+    /// [`make_room_in`].
+    #[cfg(test)]
     fn make_room_for(&self, visitor: IpAddr) -> bool {
+        make_room_in(&mut self.peers(), visitor, self.neighbourhood_salt)
+    }
+
+    /// Gives a visitor that waited past a full table for its introduction a
+    /// place, making room for it as room is made for any visitor, and says
+    /// whether it has one.
+    ///
+    /// A connection that was not waiting has its place already. One that was
+    /// and finds no room is ended as a visitor to a full table always was, and
+    /// nobody was let go of before it said who it was: see
+    /// [`admit_a_visitor`]. A waiting connection always came in with a host,
+    /// so one without is never seated.
+    fn seat(&self, id: PeerId, host: Option<IpAddr>) -> bool {
         let mut peers = self.peers();
-        if peers.values().any(|peer| peer.leaving) {
-            return false;
+        if !peers.get(&id).is_some_and(|peer| peer.waiting) {
+            return true;
         }
-        let staying = || peers.values().filter(|peer| !peer.leaving);
-        if can_be_refused(visitor) && !room_beside(staying().map(|peer| peer.host), visitor) {
-            return false;
+        let seated =
+            host.is_some_and(|host| room_made_in(&mut peers, host, self.neighbourhood_salt));
+        if seated {
+            if let Some(peer) = peers.get_mut(&id) {
+                peer.waiting = false;
+            }
         }
-        let inbound: Vec<Standing> = peers
-            .iter()
-            .filter(|(_, peer)| !peer.dialled)
-            .map(|(id, peer)| Standing {
-                id: *id,
-                host: peer.host,
-                took_block_at: peer.took_block_at,
-                took_transfer_at: peer.took_transfer_at,
-            })
-            .collect();
-        let Some(chosen) = to_let_go(&inbound, visitor, self.neighbourhood_salt) else {
-            return false;
-        };
-        let Some(peer) = peers.get_mut(&chosen) else {
-            return false;
-        };
-        peer.leaving = true;
-        let _ = peer.stream.shutdown(Shutdown::Both);
-        true
+        seated
     }
 
     /// Writes down the peers this node went out to and is still talking to as
@@ -3174,7 +3392,9 @@ impl Shared {
     /// The socket is shut rather than the entry taken out of the table, so
     /// what happens next is what happens to any peer that goes away: the
     /// reading loop fails, the writer is freed, and the slot is given up once
-    /// both are finished with it.
+    /// both are finished with it. At once on Linux and macOS; on Windows the
+    /// read already waiting ends at the far end's answer or at
+    /// [`READ_TIMEOUT`], so the slot can stay taken that long.
     fn hang_up(&self, id: PeerId) {
         if let Some(peer) = self.peers().get(&id) {
             let _ = peer.stream.shutdown(Shutdown::Both);
@@ -3294,7 +3514,13 @@ impl Shared {
         let reached = height.unwrap_or(held.anchor);
         let mut owed = owed_this_round(held, reached, peers, patience, now, away);
         if let Owed::GivenUp(stranded) = &mut owed {
-            stranded.out_of_reach = self.out_of_reach.load(Ordering::Relaxed);
+            stranded.out_of_reach = unreachable_lately(
+                &self
+                    .out_of_reach
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+                now,
+            );
         }
         Some(owed)
     }
@@ -4081,6 +4307,24 @@ impl Shared {
         }
     }
 
+    /// Takes out of the book an address this node dialled whose node
+    /// introduced itself without a port, or marks it as heard from when the
+    /// book keeps it anyway, as it keeps a seed.
+    ///
+    /// A node naming port nought has said it is not to be dialled, and the
+    /// specification says a peer MUST NOT write an address down for it. The
+    /// book learned that a dialled address answered only once its peer named
+    /// a port, so this one was never marked, never counted a miss and never
+    /// dropped: it stayed first among the addresses never heard from, where a
+    /// feeler looks, and every feeler after the first went back to it. The
+    /// connection itself is kept; only the address goes.
+    fn forget_what_names_no_port(&self, reached: &SocketAddr, now: u64) {
+        let mut book = self.book();
+        if !book.remove(reached) {
+            book.answered(reached, now);
+        }
+    }
+
     /// Hands `message` to every peer but `except`.
     ///
     /// Queued rather than written here, so one unresponsive peer cannot hold up
@@ -4667,7 +4911,7 @@ impl Node {
             join_asked_again_at: AtomicU64::new(0),
             probation: Mutex::new(probation),
             stranding_patience: AtomicU64::new(STRANDING_PATIENCE),
-            out_of_reach: AtomicU64::new(0),
+            out_of_reach: Mutex::new(Unreachable::default()),
             stranded: Mutex::new(None),
             filling_from: Mutex::new(None),
             threads: Mutex::new(Vec::new()),
@@ -4866,7 +5110,8 @@ impl Node {
         if !attach_peer(&self.shared, stream, Some(address)) {
             return Err(NodeError::NotKept {
                 address,
-                because: "this node is stopping, or the socket could not be set up",
+                because: "this node filled its table while it dialled, is stopping, or \
+                          could not set the socket up",
             });
         }
         Ok(())
@@ -4891,11 +5136,33 @@ impl Node {
     /// reached the network and the trouble must be elsewhere, and a node handed
     /// a ledger counted the same stranger as somebody it had asked for the
     /// blocks it was waiting on.
+    ///
+    /// Whoever opened the connection. One this node dialled is spoken to from
+    /// the moment it is in the table (see [`Peer::worth_speaking_to`]), and it
+    /// was counted from that moment too, whether or not the far end ever said
+    /// a word: a wallet whose book held two addresses that took a connection
+    /// and then said nothing counted two peers from its book, never asked the
+    /// seed, and answered from the chain on its disk.
     pub fn peers_introduced(&self) -> usize {
         self.shared
             .peers()
             .values()
-            .filter(|peer| peer.worth_speaking_to())
+            .filter(|peer| peer.greeted)
+            .count()
+    }
+
+    /// Peers this node went out and reached itself, that have introduced
+    /// themselves: [`Self::peers_introduced`] without the connections somebody
+    /// else opened, and without a feeler, which is let go of once it answers.
+    ///
+    /// A connection somebody else opened is somebody else's choice, and
+    /// whether this node has reached the network is not a question a stranger
+    /// that dials in should answer for it: see what the miner waits for.
+    pub fn peers_reached(&self) -> usize {
+        self.shared
+            .peers()
+            .values()
+            .filter(|peer| peer.dialled && peer.greeted && !peer.feeler)
             .count()
     }
 
@@ -5290,16 +5557,25 @@ impl Node {
         })
     }
 
-    /// Blocks this node was offered and can never reach.
+    /// Blocks this node was offered and can never reach, once they have come
+    /// from [`UNREACHABLE_MACHINES`] machines or more, the last within
+    /// [`UNREACHABLE_MEMORY`] seconds.
     ///
-    /// Zero on a healthy node. Anything else means somebody is following a
+    /// Zero on a healthy node. Anything else means peers are following a
     /// branch that parts from this one further back than this node can reach:
     /// below the point it was handed on, or deeper than it will undo. It
-    /// cannot cross to that branch however much of it arrives. A few such
-    /// blocks are anybody's to send; a run of them from several peers is this
-    /// node on a branch the network has left.
+    /// cannot cross to that branch however much of it arrives. One machine's
+    /// blocks are not said at all: a stranger makes one for the price of a
+    /// hash. A run of them from several is this node on a branch the network
+    /// has left, or a party holding several machines, which nothing here can
+    /// tell apart.
     pub fn out_of_reach(&self) -> u64 {
-        self.shared.out_of_reach.load(Ordering::Relaxed)
+        let met = self
+            .shared
+            .out_of_reach
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        unreachable_lately(&met, unix_now())
     }
 
     /// Peers that said they can supply nothing just above where this node's
@@ -7864,7 +8140,9 @@ fn save_book(shared: &Arc<Shared>) {
 ///
 /// A ceiling reached is not the end of it. A table full of connections that
 /// behave is a node nobody new can reach, so a full table lets go of one of
-/// them first, when there is one it may let go of: see [`to_let_go`].
+/// them, when there is one it may let go of: see [`to_let_go`]. It does so
+/// once the visitor has introduced itself, and not before: see
+/// [`admit_a_visitor`].
 ///
 /// The listener is polled rather than blocked on. A blocking accept only
 /// returns when someone connects, so stopping the node meant opening a
@@ -7889,12 +8167,13 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
                 // Without the IPv6 hat a dual stack listener puts on every IPv4
                 // peer, so every table after this reads one spelling.
                 let host = from.ip().to_canonical();
-                // A full table makes room rather than shutting the door, when
-                // there is somebody it may let go of: see `to_let_go`.
-                if shared.refuses(host, unix_now()) || !shared.room_for_a_visitor(host) {
+                if shared.refuses(host, unix_now()) {
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
+                // Whether there is room, and whether room is made for it, is
+                // asked as the connection goes into the table: see
+                // `admit_a_visitor`.
                 attach_peer(shared, stream, None);
             }
             Err(error) if polling && error.kind() == io::ErrorKind::WouldBlock => {
@@ -9251,17 +9530,6 @@ fn tie_keys(shared: &Shared, their_nonce: u64) -> (u64, u64) {
     (shared.nonce, their_nonce)
 }
 
-/// Takes a connection into the peer table and starts its two threads.
-///
-/// `dialled` names the address this node went out to, and is `None` for a
-/// connection somebody else opened. It is not the same thing as the address
-/// the peer will introduce itself at, and the difference is what a silent
-/// address used to live in.
-///
-/// False means the connection was let go of and this node holds no peer for
-/// it. Nobody read that before, because there was nothing to read: the three
-/// ways out below all looked like the way through, and [`Node::connect`]
-/// reported every one of them to the operator as a peer reached.
 /// Starts the thread that writes everything this node sends to one peer.
 ///
 /// Asked for rather than taken. `thread::spawn` panics when the machine will
@@ -9299,6 +9567,21 @@ fn start_writing(
 // the table entry, the writing thread, the reading thread. Split up, the
 // undoing would sit in one function and what it undoes in another, where the
 // next change to one cannot see the other.
+/// Takes a connection into the peer table and starts its two threads.
+///
+/// `dialled` names the address this node went out to, and is `None` for a
+/// connection somebody else opened. It is not the same thing as the address
+/// the peer will introduce itself at, and the difference is what a silent
+/// address used to live in.
+///
+/// Whether the table has room for it is asked here, as it goes in, and not
+/// only by the caller before: a dial for [`room_in`], a visitor for
+/// [`admit_a_visitor`].
+///
+/// False means the connection was let go of and this node holds no peer for
+/// it. Nobody read that before, because there was nothing to read: the ways
+/// out below all looked like the way through, and [`Node::connect`] reported
+/// every one of them to the operator as a peer reached.
 #[allow(clippy::too_many_lines)]
 fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAddr>) -> bool {
     let initiator = dialled.is_some();
@@ -9366,24 +9649,45 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         };
         let _ = outbound.try_send(hello);
     }
-    shared.peers().insert(
-        id,
-        Peer {
-            outbound: outbound.clone(),
-            dialled: initiator,
-            greeted: false,
-            stream: shutdown_end,
-            host: remote,
-            advertised: None,
-            dialled_to: dialled,
-            keeps: Keeps::default(),
-            claims: None,
-            leaving: false,
-            took_block_at: 0,
-            took_transfer_at: 0,
-            feeler: false,
-        },
-    );
+    // The room asked for and the place taken in one turn of the table's lock.
+    // A dial asked before it dialled and then waited on the chain for its
+    // introduction, and the accept loop filled the table in between: the dial
+    // went in on top of a full table, and the next visitor cost a peer and was
+    // turned away itself.
+    let place = {
+        let mut peers = shared.peers();
+        let place = if initiator {
+            room_in(&peers, remote, false).then_some(Place::Seated)
+        } else {
+            remote.and_then(|host| admit_a_visitor(&mut peers, host, shared.neighbourhood_salt))
+        };
+        if let Some(place) = place {
+            peers.insert(
+                id,
+                Peer {
+                    outbound: outbound.clone(),
+                    dialled: initiator,
+                    greeted: false,
+                    stream: shutdown_end,
+                    host: remote,
+                    advertised: None,
+                    dialled_to: dialled,
+                    keeps: Keeps::default(),
+                    claims: None,
+                    leaving: false,
+                    took_block_at: 0,
+                    took_transfer_at: 0,
+                    feeler: false,
+                    waiting: place == Place::Waiting,
+                },
+            );
+        }
+        place
+    };
+    let Some(place) = place else {
+        let _ = closing_end.shutdown(Shutdown::Both);
+        return false;
+    };
 
     let network = shared.network();
     let written = Arc::clone(&outbound.waiting);
@@ -9412,7 +9716,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     let handle = thread::Builder::new()
         .name(format!("cairn-read-{id}"))
         .spawn(move || {
-            read_loop(&reading, stream, id, &outbound, remote, dialled);
+            read_loop(&reading, stream, id, &outbound, remote, dialled, place);
             drop(outbound);
             // The writer waits on the channel closing, and the channel cannot
             // close while the peer table still holds a sender for it. So the
@@ -9452,7 +9756,8 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     // Under the thread table, so a connection taken while a shutdown is
     // emptying it is not left with a thread nobody joins. A shutdown that got
     // here first has already cleared `running`, and the socket is shut so the
-    // read fails at once rather than waiting out a deadline.
+    // read fails at once rather than waiting out a deadline; on Windows, a read
+    // the reader had already begun waits it out: see `READ_TIMEOUT`.
     let mut threads = shared.threads();
     if !shared.running.load(Ordering::SeqCst) {
         let _ = closing_end.shutdown(Shutdown::Both);
@@ -9478,7 +9783,11 @@ fn note_what_was_not_taken(
     // never moves while these arrive has been handed a chain nobody else is
     // on, and until this there was nowhere that showed.
     if reaction.unreachable.is_some() {
-        shared.out_of_reach.fetch_add(1, Ordering::Relaxed);
+        let mut met = shared
+            .out_of_reach
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        count_unreachable(&mut met, from.map(|sender| sender.ip()), now);
     }
     // A block written under rules this build does not have. It is carrying
     // what its own chain carries, and this node is the one that cannot read
@@ -9644,6 +9953,7 @@ fn read_loop(
     outbound: &Outbound,
     remote: Option<IpAddr>,
     dialled: Option<SocketAddr>,
+    place: Place,
 ) {
     let initiator = dialled.is_some();
     let network = shared.network();
@@ -9654,6 +9964,7 @@ fn read_loop(
     peer.dialled = initiator;
     let mut announced = false;
     let mut last_heard = unix_now();
+    let arrived = last_heard;
     let mut window_start = last_heard;
     let mut in_window = 0u32;
     let mut parting = Parting::default();
@@ -9698,6 +10009,15 @@ fn read_loop(
                 frame
             }
             Ok(Framed::Quiet) => {
+                // A visitor let past a full table to introduce itself holds
+                // no slot and has a few seconds, not the silence a peer is
+                // allowed: see `MOST_WAITING`.
+                if place == Place::Waiting
+                    && !peer.greeted
+                    && has_waited_too_long(arrived, unix_now())
+                {
+                    break;
+                }
                 if !still_there_after_a_quiet_read(shared, &mut peer, outbound, &mut last_heard) {
                     break;
                 }
@@ -9739,6 +10059,7 @@ fn read_loop(
         // Whether this message is the introduction, before it is consumed:
         // what a peer claims is said there and nowhere else.
         let introduction = matches!(message, Message::Hello(_) | Message::Welcome(_));
+        let greeted_before = peer.greeted;
 
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
@@ -9755,10 +10076,26 @@ fn read_loop(
             shared.take_placed(id, &reaction.placed);
         }
 
+        // A visitor that waited past a full table for its introduction is
+        // given its place now, and room is made for it only now: made when
+        // its socket was accepted, it cost a full node a peer for every
+        // connection that closed before a word. One that finds no room is
+        // ended as a visitor to a full table always was, before it is
+        // answered or written down.
+        if introduction && peer.greeted && !greeted_before && !shared.seat(id, remote) {
+            break;
+        }
         if introduction && peer.greeted {
             note_claim(shared, id, &peer);
         }
         shared.remember(&reaction.learned);
+        // A node this one dialled that names no port has said it is not to be
+        // dialled: see `forget_what_names_no_port`.
+        if introduction && peer.greeted && !greeted_before && peer.advertised.is_none() {
+            if let Some(reached) = dialled {
+                shared.forget_what_names_no_port(&reached, last_heard);
+            }
+        }
         if introduction && peer.greeted {
             shared.note_what_it_keeps(id, peer.advertised, peer.keeps);
             shared.note_what_it_claims(id, peer.height, peer.total_work);
@@ -9817,7 +10154,9 @@ fn read_loop(
 
     note_the_ending(shared, remote, dialled, &parting, peer.greeted, unix_now());
     // Always, however the loop ended. It is what frees the writing thread: a
-    // write on a socket just shut fails at once, wherever in a frame it was.
+    // write begun on a socket just shut fails at once, wherever in a frame it
+    // was. One already waiting for the far end to take its bytes is sure to end
+    // only at `WRITE_TIMEOUT` on Windows, where a shut socket need not wake it.
     let _ = stream.shutdown(Shutdown::Both);
 }
 
@@ -11504,6 +11843,7 @@ mod peers_and_loops {
             took_block_at: 0,
             took_transfer_at: 0,
             feeler: false,
+            waiting: false,
         }
     }
 
@@ -11618,8 +11958,9 @@ mod peers_and_loops {
                 },
             );
             let shared = Arc::clone(&node.shared);
-            let reading =
-                thread::spawn(move || read_loop(&shared, near, id, &outbound, remote, dialled));
+            let reading = thread::spawn(move || {
+                read_loop(&shared, near, id, &outbound, remote, dialled, Place::Seated);
+            });
             Self {
                 node,
                 id,
@@ -11993,12 +12334,87 @@ mod peers_and_loops {
             unreachable: Some(5),
             ..Reaction::default()
         };
-        note_what_was_not_taken(&node.shared, &unreachable, None, 2_000);
-        note_what_was_not_taken(&node.shared, &unreachable, None, 2_001);
+        let now = unix_now();
+        let from = |last: u8| Some(SocketAddr::from(([203, 0, 113, last], 9_944)));
+        note_what_was_not_taken(&node.shared, &unreachable, from(1), now);
+        note_what_was_not_taken(&node.shared, &unreachable, from(2), now);
         assert_eq!(
             node.out_of_reach(),
             2,
             "blocks from a branch this node cannot reach went uncounted"
+        );
+    }
+
+    /// Blocks from a branch this node cannot reach are said once they have
+    /// come from two machines lately, and not while they come from one,
+    /// however many there are and however many ports it claims.
+    ///
+    /// They were counted one per block from anybody, and never went down: one
+    /// greeted stranger, for one hash a block at the easiest difficulty, made
+    /// cairnd say on every status line and the explorer on every page that
+    /// the node may be on a branch the network has left. Nothing asked who
+    /// sent them.
+    #[test]
+    fn blocks_out_of_reach_are_said_only_once_two_machines_sent_them_lately() {
+        let mut met = Unreachable::default();
+        let one = IpAddr::from([203, 0, 113, 1]);
+        for _ in 0..50 {
+            count_unreachable(&mut met, Some(one), 1_000);
+        }
+        count_unreachable(&mut met, None, 1_000);
+        assert_eq!(
+            unreachable_lately(&met, 1_000),
+            0,
+            "blocks one machine sent were said as a branch the network is on"
+        );
+        let mut from_one_v6 = Unreachable::default();
+        for last in [1, 2] {
+            let address = IpAddr::from([0x2001, 0xdb8, 0, 1, 0, 0, 0, last]);
+            count_unreachable(&mut from_one_v6, Some(address), 1_000);
+        }
+        assert_eq!(
+            unreachable_lately(&from_one_v6, 1_000),
+            0,
+            "two addresses of one IPv6 machine were counted as two machines"
+        );
+        count_unreachable(&mut met, Some(IpAddr::from([198, 51, 100, 7])), 1_001);
+        assert_eq!(unreachable_lately(&met, 1_001), 52);
+        assert_eq!(
+            unreachable_lately(&met, 1_001 + UNREACHABLE_MEMORY),
+            52,
+            "blocks from two machines were forgotten before their memory was up"
+        );
+        assert_eq!(
+            unreachable_lately(&met, 1_002 + UNREACHABLE_MEMORY),
+            0,
+            "blocks nobody has sent for longer than the memory were still said"
+        );
+        // And the count starts again once the memory has lapsed.
+        count_unreachable(&mut met, Some(one), 1_002 + UNREACHABLE_MEMORY);
+        assert_eq!((met.blocks, met.machines.len()), (1, 1));
+        count_unreachable(&mut met, Some(one), 1_002 + UNREACHABLE_MEMORY * 2);
+        assert_eq!(met.blocks, 2, "a count was started again inside its memory");
+        count_unreachable(&mut met, Some(one), 1_000);
+        assert_eq!(met.blocks, 1, "a clock that went back kept the count");
+    }
+
+    /// The machines counted towards blocks out of reach stop at a ceiling.
+    #[test]
+    fn the_machines_counted_out_of_reach_stop_at_a_ceiling() {
+        let mut met = Unreachable::default();
+        for at in 0..UNREACHABLE_SENDERS + 10 {
+            let host = IpAddr::from([
+                10,
+                0,
+                u8::try_from(at / 256).unwrap(),
+                u8::try_from(at % 256).unwrap(),
+            ]);
+            count_unreachable(&mut met, Some(host), 1_000);
+        }
+        assert_eq!(
+            met.machines.len(),
+            UNREACHABLE_SENDERS,
+            "the table grew past its ceiling"
         );
     }
 
@@ -12499,25 +12915,49 @@ mod peers_and_loops {
             .is_some()
     }
 
-    /// An address nothing listens on, so a dial to it is refused.
-    fn a_vacant_address() -> SocketAddr {
-        vacant_addresses(1)[0]
+    /// `count` addresses nothing listens on, no two the same.
+    fn vacant_addresses(count: usize) -> Vec<SocketAddr> {
+        vacant_addresses_but(count, &[])
     }
 
-    /// `count` addresses nothing listens on, no two the same.
+    /// `count` addresses nothing listens on, no two the same and none of
+    /// `taken`.
     ///
     /// Each listener is held until every one is drawn. Let go as soon as it
     /// was drawn, a port was free for the system to hand out again at the
     /// next draw, and Linux does now and then: sixteen draws gave fifteen
     /// addresses, the book kept fifteen, and a test counting sixteen dials
-    /// failed on a round that had done nothing wrong.
-    fn vacant_addresses(count: usize) -> Vec<SocketAddr> {
-        let held: Vec<TcpListener> = (0..count)
-            .map(|_| TcpListener::bind(local()).unwrap())
-            .collect();
-        held.iter()
-            .map(|listener| listener.local_addr().unwrap())
-            .collect()
+    /// failed on a round that had done nothing wrong. `taken` is for a port
+    /// let go of before the draw began, which holding cannot keep out.
+    fn vacant_addresses_but(count: usize, taken: &[SocketAddr]) -> Vec<SocketAddr> {
+        let mut held = Vec::new();
+        let mut drawn = Vec::new();
+        while drawn.len() < count {
+            let listener = TcpListener::bind(local()).unwrap();
+            let address = listener.local_addr().unwrap();
+            if !taken.contains(&address) {
+                drawn.push(address);
+            }
+            held.push(listener);
+        }
+        drawn
+    }
+
+    /// A node one peer short of its target, with `count` addresses nothing
+    /// listens on in its book, none of them its own.
+    ///
+    /// Drawn once the node is bound, and around its address. A quiet node has
+    /// let go of its own port, a round never dials a node's own address, and
+    /// Linux hands a free port out again at random: drawn before the node, or
+    /// blind to it, one of seventeen could be the node's, and the round dialled
+    /// one fewer than the test counted.
+    fn one_short_knowing_vacant(count: usize) -> (Node, TcpStream, TcpStream, Vec<SocketAddr>) {
+        let (node, socket, far) = one_short_knowing(&[]);
+        let vacant = vacant_addresses_but(count, &[node.shared.address]);
+        for address in &vacant {
+            node.shared.book().insert(*address);
+        }
+        (node, socket, far, vacant)
     }
 
     /// A node one peer short of its target, with `addresses` in its book.
@@ -12548,8 +12988,7 @@ mod peers_and_loops {
     /// runner is for; the one after it stands in for Windows here.
     #[test]
     fn a_round_charges_every_address_that_refuses_it() {
-        let vacant = vacant_addresses(16);
-        let (node, _socket, _far) = one_short_knowing(&vacant);
+        let (node, _socket, _far, vacant) = one_short_knowing_vacant(16);
         dial_from_book(&node.shared, 1_000);
         let ready = node.shared.book().ready(1_000);
         let reached = dialled(&node);
@@ -12573,8 +13012,7 @@ mod peers_and_loops {
     /// passed.
     #[test]
     fn a_round_is_not_rationed_by_addresses_that_are_slow_to_refuse() {
-        let vacant = vacant_addresses(16);
-        let (node, _socket, _far) = one_short_knowing(&vacant);
+        let (node, _socket, _far, vacant) = one_short_knowing_vacant(16);
         let dials = AtomicUsize::new(0);
         dial_from_book_with(&node.shared, 1_000, &|_: &SocketAddr| {
             dials.fetch_add(1, Ordering::SeqCst);
@@ -12600,14 +13038,20 @@ mod peers_and_loops {
     #[test]
     fn a_wave_past_the_first_dials_twice_the_target_at_once() {
         let wide = 2 * TARGET_PEERS;
-        let vacant = vacant_addresses(wide + 1);
-        let (node, _socket, _far) = one_short_knowing(&vacant);
+        let (node, _socket, _far, _vacant) = one_short_knowing_vacant(wide + 1);
         let in_flight = AtomicUsize::new(0);
         let most = AtomicUsize::new(0);
         dial_from_book_with(&node.shared, 1_000, &|_: &SocketAddr| {
             let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             most.fetch_max(now, Ordering::SeqCst);
-            thread::sleep(Duration::from_secs(1));
+            // Each dial waits for the whole wave to be in flight, or for long
+            // enough to say it never will be. A second's sleep counted only
+            // the dials whose threads had started within that second, and a
+            // loaded runner started one late.
+            let deadline = Instant::now() + Duration::from_millis(1_500);
+            while most.load(Ordering::SeqCst) < wide && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
             in_flight.fetch_sub(1, Ordering::SeqCst);
             Err(io::ErrorKind::ConnectionRefused.into())
         });
@@ -12629,11 +13073,15 @@ mod peers_and_loops {
     #[test]
     fn a_round_takes_what_it_is_short_of_and_holds_nothing_against_the_rest() {
         let doors = [a_door(), a_door(), a_door()];
-        // Drawn while the doors are open, so it cannot be one of them.
-        let refusing = a_vacant_address();
+        let (node, _socket, _far) = one_short_knowing(&[]);
+        // Drawn while the doors are open and around the node's own port, so
+        // it is none of them.
+        let refusing = vacant_addresses_but(1, &[node.shared.address])[0];
         let mut known = vec![refusing];
         known.extend(doors.iter().map(|door| door.local_addr().unwrap()));
-        let (node, _socket, _far) = one_short_knowing(&known);
+        for address in &known {
+            node.shared.book().insert(*address);
+        }
         // Heard from, so it is dialled first and the first wave comes back
         // short.
         node.shared.book().answered(&refusing, 900);
@@ -12652,6 +13100,46 @@ mod peers_and_loops {
                 "an address that answered was charged for it"
             );
         }
+    }
+
+    /// The peers a node has reached are its own dials that have introduced
+    /// themselves, less a feeler: what the miner waits for before it mines.
+    ///
+    /// Nothing but the miner read the count, so a count of every greeted
+    /// peer, of every dial, or of feelers too passed: each told a miner it
+    /// was on the network when only a stranger had dialled in, or when its own
+    /// dials had not said a word.
+    #[test]
+    fn the_peers_a_node_has_reached_are_its_own_dials_that_introduced_themselves() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let entry = |dialled: bool, greeted: bool, feeler: bool| Peer {
+            greeted,
+            feeler,
+            ..stand_in(&socket, dialled)
+        };
+        {
+            let mut peers = node.shared.peers();
+            peers.insert(1, entry(true, true, false));
+            peers.insert(2, entry(true, true, false));
+            // Dialled, and never said who it was.
+            peers.insert(3, entry(true, false, false));
+            // Somebody else's dial.
+            peers.insert(4, entry(false, true, false));
+            // A feeler, let go of once it has answered.
+            peers.insert(5, entry(true, true, true));
+        }
+        let reached = node.peers_reached();
+        let introduced = node.peers_introduced();
+        stop_all(&node);
+        assert_eq!(
+            reached, 2,
+            "the peers reached were not the dials that introduced themselves, less the feeler"
+        );
+        assert_eq!(
+            introduced, 4,
+            "the peers introduced were not every connection that said who it was"
+        );
     }
 
     /// A node whose table is full dials nobody.
@@ -13799,8 +14287,11 @@ mod peers_and_loops {
         let crowd = |at: usize| IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1]);
         {
             let mut peers = node.shared.peers();
-            for at in 0..MAX_PEERS {
+            for at in 0..MOST_FROM_OUTSIDE {
                 peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, crowd(at)));
+            }
+            for at in 0..TARGET_PEERS {
+                peers.insert(1_000 + u64::try_from(at).unwrap(), stand_in(&socket, true));
             }
         }
         let visitor = IpAddr::from([192, 0, 2, 1]);
@@ -13827,6 +14318,14 @@ mod peers_and_loops {
             leaving.len(),
             1,
             "room was made by letting go of other than one"
+        );
+        assert!(
+            leaving.iter().all(|id| node
+                .shared
+                .peers()
+                .get(id)
+                .is_some_and(|peer| !peer.dialled)),
+            "room for a visitor was made by letting go of a connection this node dialled"
         );
         assert!(
             node.shared.has_room_for_visitor(Some(visitor)),
@@ -13872,6 +14371,83 @@ mod peers_and_loops {
         );
     }
 
+    /// An address whose node named no port leaves the book, unless it is a
+    /// seed, which the book keeps and now marks as heard from.
+    ///
+    /// A seed is never dropped, so the one kept here was left unmarked and
+    /// stayed first among the addresses a feeler goes to, which is the defect
+    /// this is for. Nothing asked what becomes of a seed that names no port.
+    #[test]
+    fn a_seed_that_names_no_port_is_kept_and_marked_as_heard_from() {
+        let node = quiet();
+        let seed = SocketAddr::from(([198, 51, 100, 1], 9_944));
+        let learned = SocketAddr::from(([198, 51, 100, 2], 9_944));
+        {
+            let mut book = node.shared.book();
+            book.insert_seed(seed);
+            book.insert(learned);
+        }
+        node.shared.forget_what_names_no_port(&seed, 1_000);
+        node.shared.forget_what_names_no_port(&learned, 1_000);
+        let book = node.shared.book();
+        assert!(
+            book.contains(&seed) && book.heard_from(&seed) == 1_000,
+            "a seed whose node names no port was left in the book unmarked, first in line \
+             for every feeler"
+        );
+        assert!(
+            !book.contains(&learned),
+            "a learned address whose node names no port was kept in the book"
+        );
+    }
+
+    /// Room for a visitor is made out of the connections somebody else
+    /// opened, and never out of this node's own dials, however crowded the
+    /// neighbourhood they sit in.
+    ///
+    /// The dials are the peers this node chose, which is what stands between
+    /// it and whoever filled its slots for outsiders. Nothing asked this with
+    /// the dials in the most crowded neighbourhood, where the choice of whom
+    /// to let go would land on one of them if it could.
+    #[test]
+    fn room_for_a_visitor_is_never_made_out_of_this_nodes_own_dials() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        {
+            let mut peers = node.shared.peers();
+            for at in 0..MOST_FROM_OUTSIDE {
+                let alone = IpAddr::from([100 + u8::try_from(at).unwrap(), 1, 0, 1]);
+                peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, alone));
+            }
+            for at in 0..TARGET_PEERS {
+                let crowded = IpAddr::from([198, 51, 100, u8::try_from(at).unwrap()]);
+                peers.insert(
+                    1_000 + u64::try_from(at).unwrap(),
+                    Peer {
+                        host: Some(crowded),
+                        ..stand_in(&socket, true)
+                    },
+                );
+            }
+        }
+        assert!(
+            node.shared.make_room_for(IpAddr::from([192, 0, 2, 1])),
+            "the fixture made no room at all"
+        );
+        let let_go: Vec<bool> = node
+            .shared
+            .peers()
+            .values()
+            .filter(|peer| peer.leaving)
+            .map(|peer| peer.dialled)
+            .collect();
+        assert_eq!(
+            let_go,
+            vec![false],
+            "room for a visitor was made by letting go of a connection this node dialled"
+        );
+    }
+
     /// A full node makes no room for a visitor its own machine's share turns
     /// away.
     #[test]
@@ -13897,16 +14473,17 @@ mod peers_and_loops {
         assert!(!node.shared.peers().values().any(|peer| peer.leaving));
     }
 
-    /// A visitor is not let in on a table still past its share once one
-    /// connection has been let go for it.
+    /// Nobody is let go of for a visitor on a table that one departure would
+    /// leave still past its share, and the visitor is not let in.
     ///
     /// A node four dials short of its target holds four slots for them; when
     /// connections from outside have taken those too, letting one go leaves
-    /// the table past what it takes. The accept loop asked the table again
-    /// after letting one go, and nothing asked why, so a loop that took the
-    /// visitor on the strength of having let somebody go passed.
+    /// the table past what it takes. The accept loop let one go and asked the
+    /// table again, and the visitor was turned away all the same: a peer let
+    /// go of for nobody. Nothing asked it, so a table that did that passed, as
+    /// long as it did not also take the visitor.
     #[test]
-    fn letting_one_go_is_not_room_on_a_table_still_past_its_share() {
+    fn nobody_is_let_go_for_a_visitor_one_departure_cannot_make_room_for() {
         let node = quiet();
         let (socket, _far) = a_socket();
         let crowd = |at: usize| IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1]);
@@ -13925,8 +14502,242 @@ mod peers_and_loops {
             "a visitor was let in on a table still past its share after one connection was let go"
         );
         assert!(
-            node.shared.peers().values().any(|peer| peer.leaving),
-            "the fixture never reached the question: nobody was let go"
+            !node.shared.peers().values().any(|peer| peer.leaving),
+            "a connection was let go of for a visitor that one departure could not make \
+             room for"
+        );
+
+        // At the ceiling exactly, one departure is room, and it is made.
+        let node_at_the_ceiling = quiet();
+        {
+            let mut peers = node_at_the_ceiling.shared.peers();
+            for at in 0..MOST_FROM_OUTSIDE {
+                peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, crowd(at)));
+            }
+        }
+        assert!(
+            node_at_the_ceiling.shared.room_for_a_visitor(visitor),
+            "a table standing at its ceiling made no room for a visitor"
+        );
+    }
+
+    /// A visitor to a full table waits for its introduction without a place
+    /// and without anybody let go of for it, while fewer than
+    /// [`MOST_WAITING`] wait; past that room is made at once, as it always
+    /// was; and its machine's share counts the connections waiting.
+    ///
+    /// Room used to be made the moment a socket was accepted, so every
+    /// connection that closed before a word cost a full node a peer. Nothing
+    /// asked when room was made, so that passed; and nothing asked that a
+    /// crowd of silent sockets cannot shut the door, since none could wait.
+    #[test]
+    fn a_visitor_to_a_full_table_waits_for_its_introduction_before_anybody_goes() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let crowd = |at: usize| IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1]);
+        let salt = node.shared.neighbourhood_salt;
+        {
+            let mut peers = node.shared.peers();
+            for at in 0..MOST_FROM_OUTSIDE {
+                peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, crowd(at)));
+            }
+        }
+        let leaving = |node: &Node| {
+            node.shared
+                .peers()
+                .values()
+                .filter(|peer| peer.leaving)
+                .count()
+        };
+        for at in 0..MOST_WAITING {
+            let host = IpAddr::from([198, 51, 100, u8::try_from(at).unwrap()]);
+            let place = admit_a_visitor(&mut node.shared.peers(), host, salt);
+            assert_eq!(
+                place,
+                Some(Place::Waiting),
+                "a visitor to a full table was not let wait"
+            );
+            node.shared.peers().insert(
+                2_000 + u64::try_from(at).unwrap(),
+                Peer {
+                    waiting: true,
+                    ..from_outside(&socket, host)
+                },
+            );
+        }
+        assert_eq!(
+            leaving(&node),
+            0,
+            "a peer was let go of for a visitor that had said nothing"
+        );
+        assert!(
+            !node
+                .shared
+                .has_room_to_accept(Some(IpAddr::from([192, 0, 2, 9]))),
+            "the fixture is full"
+        );
+        assert_eq!(
+            node.shared.peers().len(),
+            MOST_FROM_OUTSIDE + MOST_WAITING,
+            "the fixture holds every waiting visitor"
+        );
+
+        // Every place to wait in is taken: room is made at once.
+        let late = IpAddr::from([192, 0, 2, 1]);
+        assert_eq!(
+            admit_a_visitor(&mut node.shared.peers(), late, salt),
+            Some(Place::Seated),
+            "a crowd of silent sockets holding every place to wait in shut the door"
+        );
+        assert_eq!(
+            leaving(&node),
+            1,
+            "room for the late visitor was not made by one departure"
+        );
+
+        // A machine already holding its share, one of it waiting, waits for no more.
+        let node = quiet();
+        let host = crowd(1);
+        {
+            let mut peers = node.shared.peers();
+            peers.insert(0, from_outside(&socket, host));
+            peers.insert(
+                1,
+                Peer {
+                    waiting: true,
+                    ..from_outside(&socket, host)
+                },
+            );
+        }
+        assert_eq!(
+            admit_a_visitor(&mut node.shared.peers(), host, salt),
+            None,
+            "a machine was let one past its share by counting only the connections seated"
+        );
+    }
+
+    /// A waiting visitor is given a place, and room is made for it, once it
+    /// has introduced itself; a visitor that was never waiting keeps the one
+    /// it has; and one that finds no room is not seated.
+    ///
+    /// Nothing seated a visitor after its arrival before, so nothing asked it.
+    #[test]
+    fn a_waiting_visitor_is_seated_when_it_introduces_itself() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let crowd = |at: usize| IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1]);
+        let visitor = IpAddr::from([192, 0, 2, 1]);
+        {
+            let mut peers = node.shared.peers();
+            for at in 0..MOST_FROM_OUTSIDE {
+                peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, crowd(at)));
+            }
+            peers.insert(
+                500,
+                Peer {
+                    waiting: true,
+                    ..from_outside(&socket, visitor)
+                },
+            );
+        }
+        assert!(
+            node.shared.seat(7, Some(crowd(7))),
+            "a seated peer lost its place"
+        );
+        assert!(
+            !node.shared.seat(500, None),
+            "a waiting connection with no host to judge was seated"
+        );
+        assert!(
+            node.shared.seat(500, Some(visitor)),
+            "a visitor that introduced itself to a full table was given no place"
+        );
+        let peers = node.shared.peers();
+        assert!(
+            peers.get(&500).is_some_and(|peer| !peer.waiting),
+            "a visitor given a place was left waiting"
+        );
+        assert_eq!(
+            peers.values().filter(|peer| peer.leaving).count(),
+            1,
+            "room for the visitor was not made by one departure"
+        );
+        drop(peers);
+
+        // With one already leaving, nobody else goes and the next is not seated.
+        node.shared.peers().insert(
+            501,
+            Peer {
+                waiting: true,
+                ..from_outside(&socket, IpAddr::from([192, 0, 2, 2]))
+            },
+        );
+        assert!(
+            !node.shared.seat(501, Some(IpAddr::from([192, 0, 2, 2]))),
+            "a second visitor was seated in the one place made"
+        );
+        assert!(
+            node.shared
+                .peers()
+                .get(&501)
+                .is_some_and(|peer| peer.waiting),
+            "a visitor that found no room was marked as seated"
+        );
+
+        // Its machine's share counts the connections holding a place and not
+        // the one waiting, which is the visitor itself.
+        let seat_beside = |seated_from_its_machine: usize| {
+            let node = quiet();
+            let visitor = IpAddr::from([192, 0, 2, 7]);
+            {
+                let mut peers = node.shared.peers();
+                for at in 0..MOST_FROM_OUTSIDE {
+                    let host = if at < seated_from_its_machine {
+                        visitor
+                    } else {
+                        crowd(at)
+                    };
+                    peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, host));
+                }
+                peers.insert(
+                    500,
+                    Peer {
+                        waiting: true,
+                        ..from_outside(&socket, visitor)
+                    },
+                );
+            }
+            let seated = node.shared.seat(500, Some(visitor));
+            let leaving = node
+                .shared
+                .peers()
+                .values()
+                .filter(|peer| peer.leaving)
+                .count();
+            (seated, leaving)
+        };
+        assert_eq!(
+            seat_beside(1),
+            (true, 1),
+            "a visitor whose machine holds one place was counted against its share as well"
+        );
+        assert_eq!(
+            seat_beside(MAX_PER_HOST),
+            (false, 0),
+            "a visitor whose machine already holds its share was seated, or somebody was let \
+             go of for it"
+        );
+    }
+
+    /// A visitor waiting past a full table has [`WAITING_PATIENCE`] seconds
+    /// from its arrival to introduce itself, and not one more.
+    #[test]
+    fn a_waiting_visitor_has_a_few_seconds_to_introduce_itself() {
+        assert!(!has_waited_too_long(1_000, 1_000 + WAITING_PATIENCE - 1));
+        assert!(has_waited_too_long(1_000, 1_000 + WAITING_PATIENCE));
+        assert!(
+            !has_waited_too_long(1_000, 900),
+            "a clock that went back ended the wait"
         );
     }
 

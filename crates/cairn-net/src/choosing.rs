@@ -1136,20 +1136,6 @@ mod tests {
         );
     }
 
-    /// **The one table here that a stranger filled and nothing emptied.**
-    ///
-    /// A failed claim stops counting for the address it came from and not
-    /// only for the connection, which is what stops a peer washing it clean
-    /// by dialling back. The set that remembers those addresses was written
-    /// to and never read out of: one entry per host that claimed a chain and
-    /// could not show it, while the claims beside it were pruned to the
-    /// connected peers every round. What made that worth doing is that the
-    /// window in which it grows is exactly the window in which a node has no
-    /// chain, and how long that lasts is decided by whoever is keeping it
-    /// there. One IPv6 range supplies as many addresses as anyone wants.
-    ///
-    /// Now there is a ceiling, and the whole set goes the moment the choice
-    /// it exists for is made.
     /// A claim that went unshown pauses the machine it came from, whichever
     /// of its addresses that machine claims from next.
     ///
@@ -1197,6 +1183,20 @@ mod tests {
         );
     }
 
+    /// **The one table here that a stranger filled and nothing emptied.**
+    ///
+    /// A failed claim stops counting for the address it came from and not
+    /// only for the connection, which is what stops a peer washing it clean
+    /// by dialling back. The set that remembers those addresses was written
+    /// to and never read out of: one entry per host that claimed a chain and
+    /// could not show it, while the claims beside it were pruned to the
+    /// connected peers every round. What made that worth doing is that the
+    /// window in which it grows is exactly the window in which a node has no
+    /// chain, and how long that lasts is decided by whoever is keeping it
+    /// there. One IPv6 range supplies as many addresses as anyone wants.
+    ///
+    /// Now there is a ceiling, and the whole set goes the moment the choice
+    /// it exists for is made.
     #[test]
     fn the_addresses_of_broken_claims_do_not_pile_up_without_limit() {
         let mut chooser = Chooser::new();

@@ -118,3 +118,61 @@ fn a_node_opened_for_a_wallet_is_not_written_into_its_peers_books() {
          peers write nobody down and the first half of this asks nothing"
     );
 }
+
+/// **A node that dials a wallet's node takes the address out of its book once
+/// the wallet's node has introduced itself without a port, and keeps the
+/// connection.**
+///
+/// The book learned that a dialled address answered only once the peer had
+/// named a port, so an address whose node names none was never marked, never
+/// counted a miss and never dropped. A feeler dials the first address in the
+/// book never heard from, and every other address it reaches moves out of
+/// that place; this one stayed there, so every feeler after the first went
+/// back to it, and the address went on being handed to whoever asked for
+/// addresses, against the rule that a peer writes nothing down for a node
+/// naming port nought. The connection itself is a peer like any other: only
+/// the address goes. Nothing asked this, so a book that kept a wallet's
+/// address for good once it had dialled it passed.
+#[test]
+fn an_address_whose_node_names_no_port_leaves_the_book_of_the_node_that_dialled_it() {
+    let wallets_directory = scratch("dialled-wallet");
+    let owner = SecretKey::from_bytes(&[2; 32]).public_key();
+    let (wallet, _) =
+        Node::open_watching(params(), loopback(), &wallets_directory, &[owner.into()]).unwrap();
+    let dialler = Node::bind(params(), loopback()).unwrap();
+    let plain = Node::bind(params(), loopback()).unwrap();
+    let wallet_address = wallet.address();
+    dialler.connect(wallet_address).unwrap();
+    dialler.connect(plain.address()).unwrap();
+    wait_for("the dialler to read both introductions", || {
+        dialler.peers_introduced() >= 2
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && dialler.known_addresses().contains(&wallet_address) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let kept = dialler.known_addresses().contains(&wallet_address);
+    let plain_kept = dialler.known_addresses().contains(&plain.address());
+    let held = dialler.peers_introduced();
+    dialler.shutdown();
+    plain.shutdown();
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&wallets_directory);
+
+    assert!(
+        !kept,
+        "a node that dialled an address whose node introduced itself without a port \
+         kept the address in its book, never marked as heard from, so every feeler it \
+         sends goes back to it and every answer to a request for addresses may hand it on"
+    );
+    assert_eq!(
+        held, 2,
+        "the connection to a node naming no port was let go of, when only its address \
+         was not to be written down"
+    );
+    assert!(
+        plain_kept,
+        "the address of a plain node, which names its port, left the book of the node that \
+         dialled it as well"
+    );
+}

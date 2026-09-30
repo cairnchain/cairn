@@ -690,17 +690,20 @@ fn probation_line(probation: &Probation, out_of_reach: u64) -> String {
 /// none.
 ///
 /// A count and not a verdict. A block a stranger mines at the lowest
-/// difficulty, far enough below the tip, is counted here too, so the line
-/// says what a run of them means rather than what one does.
+/// difficulty, far enough below the tip, is one of these, so the node counts
+/// them only once they have come from two machines lately, and the line says
+/// what a run of them means rather than what one does. It used to ask the
+/// operator to judge whether they came from several peers, which nothing it
+/// printed could answer.
 fn cannot_switch_to(blocks: u64) -> Option<String> {
     (blocks > 0).then(|| {
         format!(
-            "{blocks} blocks arrived from a chain this node cannot switch to: it parts from \
-             the branch this node follows further back than this node can reach, which the \
-             rules call settled. A few are anybody's to send. If they keep coming from \
-             several peers while the rest of the network is not heard from, this node is on \
-             a branch the network has left, and starting again from an empty directory is \
-             the only way onto theirs."
+            "{blocks} blocks arrived, from at least two machines within the last hour, from \
+             a chain this node cannot switch to: it parts from the branch this node follows \
+             further back than this node can reach, which the rules call settled. Two \
+             machines can still be one party. If they keep coming while the rest of the \
+             network is not heard from, this node is on a branch the network has left, and \
+             starting again from an empty directory is the only way onto theirs."
         )
     })
 }
@@ -974,12 +977,24 @@ fn still_filling(filling: &Filling, directory: &str) -> String {
     } else {
         (String::new(), "")
     };
+    // And where what is missing comes from, which is the same split. A node
+    // whose headers begin at the first block takes none from its peers: it
+    // refuses every run a peer sends (see `Shared::fill_headers`), and writes
+    // its headers from its own chain as it takes each block. It was told it
+    // collects them from its peers, which sent an operator whose disk had
+    // refused a header write to wait on the network for something the network
+    // was never going to send.
+    let source = if filling.from > 0 {
+        "It collects what is missing from its peers as it runs"
+    } else {
+        "What is missing is written from its own chain as it takes blocks, and asked of \
+         nobody, unless its disk refuses the write, which a line of its own says"
+    };
     format!(
         "this node cannot yet show the chain to somebody arriving new. It holds the \
          headers from block {} up to block {}{collecting}, it can prove where {} of them \
-         sit, and the chain is at block {}. It collects what is missing from its peers as \
-         it runs, and nobody can join the network through this node until it has it \
-         all.{disk}{watch}",
+         sit, and the chain is at block {}. {source}, and nobody can join the network \
+         through this node until it has it all.{disk}{watch}",
         filling.from,
         filling.through.saturating_sub(1),
         filling.proved,
@@ -1957,13 +1972,18 @@ mod said_out_loud {
     }
 
     /// The line about filling in names how many headers have been collected,
-    /// and that is the number it tells the operator to watch.
+    /// and that is the number it tells the operator to watch; and a node
+    /// whose headers begin at the first block, which collects nothing, is not
+    /// told it collects from its peers.
     ///
     /// It named only the headers held, the headers proved and the chain,
     /// and the first two do not move until the whole collection has arrived.
     /// A node joined a million and a half blocks up collects for most of an
     /// hour, and for all of it the line said no peer held the part it was
-    /// missing and to connect to another one.
+    /// missing and to connect to another one. And every node it was printed
+    /// for was told it collects what is missing from its peers, which a node
+    /// whose headers begin at the first block never does: it refuses every
+    /// run of headers a peer sends.
     #[test]
     fn the_line_about_filling_in_watches_the_number_that_moves() {
         let midway = Filling {
@@ -1985,6 +2005,11 @@ mod said_out_loud {
             text.contains("the number collected does not"),
             "the line tells the operator to watch numbers a healthy fill leaves alone: {text}"
         );
+        assert!(
+            text.contains("It collects what is missing from its peers"),
+            "a node that joined above the first block is not told it collects from its peers: \
+             {text}"
+        );
 
         let short_at_the_top = Filling {
             from: 0,
@@ -1995,6 +2020,15 @@ mod said_out_loud {
         assert!(
             !text.contains("collected") && !text.contains("no peer this node has found"),
             "a node missing nothing below its headers is told about collecting from peers: {text}"
+        );
+        assert!(
+            !text.contains("from its peers"),
+            "a node whose headers begin at the first block, which takes none from its peers, \
+             is told it collects what is missing from them: {text}"
+        );
+        assert!(
+            text.contains("from its own chain"),
+            "the line does not say where the missing headers of such a node come from: {text}"
         );
     }
 
@@ -2212,8 +2246,8 @@ mod what_an_operator_is_told {
         eprintln!("{}", wrapped(&said).join("\n"));
         assert!(said.contains("4 blocks arrived"), "{said}");
         assert!(
-            said.contains("anybody's to send"),
-            "a count a stranger can raise does not read as a verdict: {said}"
+            said.contains("at least two machines") && said.contains("can still be one party"),
+            "the line does not say what the count took, or that it is not a verdict: {said}"
         );
         assert!(said.contains("empty directory"), "{said}");
     }
