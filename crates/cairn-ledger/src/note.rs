@@ -100,19 +100,59 @@ impl NetworkId {
     /// something every node agrees about. Every block mined under the old
     /// rules is invalid under these, so the network starts over.
     pub const TESTNET_6: Self = Self(0x4341_5259);
-    /// The seventh, named here before it exists.
+    /// The seventh, because a place in the hot set was free to a miner, a
+    /// block did not commit to its signatures, an address showed its key, and
+    /// two hash domains were told apart only by how long what they hashed
+    /// happened to be.
     ///
-    /// A node reads a marker's name from its own build, so a name has to ship
-    /// ahead of the network it names: a node still on testnet-6 when the
-    /// network starts over then says which network its peers moved to rather
-    /// than printing a number. Nothing makes this a network yet, and
-    /// `ConsensusParams::for_network` does not answer to it.
+    /// A transfer could take as many places in the hot set as it liked for
+    /// the price of its bytes alone, and a miner packing its own blocks with
+    /// them paid not even that: pushing every note in the tier out to a cold
+    /// witness cost a stranger real money and cost the miner who did it
+    /// nothing. A header named its body by a root built over every transfer's
+    /// identifier, which by design leaves out witnesses and signatures, so a
+    /// copy that changed only those still matched the same root: a node could
+    /// hold, apply and serve a body its miner never signed. A note's owner
+    /// was the public key itself, decoded straight off the chain, so every
+    /// unspent note stood exposed to whatever could someday break that key,
+    /// and a typo in a pasted address passed for somebody's key about one
+    /// time in sixteen, since the only check was whether the bytes described
+    /// a usable point at all. And two domains, the sampling draw and the
+    /// empty leaf of the cold set, each hashed two kinds of value apart only
+    /// because every caller so far had kept their lengths fixed and
+    /// different, an argument that lived in the callers rather than in the
+    /// hash.
+    ///
+    /// A place in the hot set now costs a price that is destroyed, asked of a
+    /// miner the same as anyone; a header commits to every byte of its body,
+    /// signatures and proofs included, so a copy naming another body is
+    /// refused before it is held; a note is locked to the hash of a key,
+    /// which appears only when the note is spent, written as an address a
+    /// checksum protects; and the draw and the empty leaf hash under domains
+    /// of their own. Each of these changes what a header commits to or what a
+    /// note is, so every block mined under the old rules is invalid under
+    /// these, and the network starts over.
     pub const TESTNET_7: Self = Self(0x4341_525A);
     /// Kept as the name of whichever test network is current.
-    pub const TESTNET: Self = Self::TESTNET_6;
+    pub const TESTNET: Self = Self::TESTNET_7;
+    /// The original throwaway network, retired alongside testnet-6.
+    ///
+    /// Decided after the audit that named testnet-7: a devnet directory or
+    /// peer left over from before the restart met a node that still called
+    /// itself "devnet" and read the same marker, so nothing told the two
+    /// apart, where every renumbered test network already says so plainly.
+    /// Devnet is thrown away routinely, but this restart renumbers it too,
+    /// so a node still on it is told which network that is rather than being
+    /// read as the current one under its old name.
+    pub const DEVNET_1: Self = Self(0x4341_5244);
     /// A throwaway network with the same rules but a much shorter block time,
     /// for running the software on one machine.
-    pub const DEVNET: Self = Self(0x4341_5244);
+    ///
+    /// Renumbered alongside testnet-7, for the same reason: a directory or a
+    /// peer still on the old marker is told plainly which network it is on,
+    /// the way every retired testnet already is, rather than being taken for
+    /// this one.
+    pub const DEVNET: Self = Self(0x4341_5245);
 
     pub const fn new(value: u32) -> Self {
         Self(value)
@@ -146,6 +186,7 @@ impl NetworkId {
             Self::TESTNET_5 => Some("testnet-5"),
             Self::TESTNET_6 => Some("testnet-6"),
             Self::TESTNET_7 => Some("testnet-7"),
+            Self::DEVNET_1 => Some("devnet-1"),
             Self::DEVNET => Some("devnet"),
             _ => None,
         }
@@ -162,7 +203,7 @@ impl NetworkId {
     pub const fn address_prefix(self) -> &'static str {
         match self {
             Self::MAINNET => "cairn",
-            Self::DEVNET => "dcairn",
+            Self::DEVNET | Self::DEVNET_1 => "dcairn",
             _ => "tcairn",
         }
     }

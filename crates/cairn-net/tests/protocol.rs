@@ -275,6 +275,43 @@ fn a_frame_from_another_network_is_refused_on_its_first_bytes() {
     );
 }
 
+/// A frame marked with devnet-1's old marker is refused as another network,
+/// on its first bytes, and that refusal is not held against the peer that
+/// sent it.
+///
+/// Devnet was renumbered alongside testnet-7 so that a directory or a peer
+/// left over from before the restart is told plainly which network it is
+/// on. Nothing distinguishes that marker mismatch from any other one: the
+/// wire check compares the four bytes it reads against the network this
+/// node runs, whichever the two markers are, and the specification says a
+/// node belonging elsewhere is disconnected rather than refused.
+#[test]
+fn a_frame_marked_with_devnet_1s_marker_is_refused_as_another_network_and_not_held_against_the_peer(
+) {
+    let mut framed = Vec::new();
+    write_message(&mut framed, NetworkId::DEVNET_1, &Message::Ping(1)).unwrap();
+
+    let mut cursor = framed.as_slice();
+    let outcome = read_message(&mut cursor, NetworkId::DEVNET, MAX_FRAME_BYTES);
+    assert!(
+        matches!(
+            outcome,
+            Err(WireError::WrongNetwork {
+                found: NetworkId::DEVNET_1,
+                expected: NetworkId::DEVNET,
+            })
+        ),
+        "got {outcome:?}"
+    );
+    assert!(
+        !DropReason::WrongNetwork {
+            theirs: NetworkId::DEVNET_1
+        }
+        .is_misbehaviour(),
+        "a peer that spoke devnet-1's marker was held against as if it had misbehaved"
+    );
+}
+
 #[test]
 fn an_oversized_frame_is_refused_before_anything_is_reserved() {
     let mut framed = Vec::new();
