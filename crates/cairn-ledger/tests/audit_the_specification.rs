@@ -2076,7 +2076,7 @@ fn the_state_root_is_the_eight_fields_folded_in_that_order() {
 
 #[test]
 fn the_published_network_parameters_are_what_the_networks_carry() {
-    let public = ConsensusParams::for_network("testnet-6").expect("the network the draft names");
+    let public = ConsensusParams::for_network("testnet-7").expect("the network the draft names");
     assert_eq!(public.hot_capacity, 131_072);
     assert_eq!(public.max_evictions_per_block, 1_024);
     assert_eq!(public.place_price.as_pebbles(), 6_000);
@@ -2653,7 +2653,7 @@ fn the_limits_the_document_names_without_numbering_are_recorded_here() {
         MAX_COINBASE_EXTRA, MOST_COINBASE_OUTPUTS, MOST_INPUTS, MOST_OUTPUTS,
     };
 
-    let params = ConsensusParams::for_network("testnet-6").unwrap();
+    let params = ConsensusParams::for_network("testnet-7").unwrap();
     assert_eq!(params.max_inputs_per_transfer, 256);
     assert_eq!(params.max_outputs_per_transfer, 256);
     assert_eq!(params.max_coinbase_outputs, 16);

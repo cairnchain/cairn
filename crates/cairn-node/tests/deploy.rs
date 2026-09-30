@@ -258,12 +258,14 @@ data=cairn-data
 network=testnet
 listen=0.0.0.0:1
 named=""
+mine=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --check | --archive) shift ;;
         --data) data=$2; shift 2 ;;
         --network) network=$2; named=1; shift 2 ;;
         --listen) listen=$2; shift 2 ;;
+        --mine) mine=$2; shift 2 ;;
         *) shift 2 ;;
     esac
 done
@@ -286,7 +288,14 @@ case "${listen##*:}" in
     "" | *[!0-9]*) echo "$program: $listen is not an address" >&2; exit 1 ;;
 esac
 echo "$program 0.0.0"
-echo "network      $network (0x00000000)""#;
+echo "network      $network (0x00000000)"
+if [ -n "$mine" ] && [ "$mine" != off ]; then
+    case "$mine" in
+        cairn1* | tcairn1* | dcairn1*) address=$mine ;;
+        *) address="tcairn1converted$mine" ;;
+    esac
+    echo "mining       rewards to $address"
+fi"#;
             // Twice, so that the build a machine is running and the one an
             // update makes are two files, as they are on a machine: `install`
             // refuses to copy a file onto itself.
@@ -723,7 +732,12 @@ echo "network      $network (0x00000000)""#;
     /// address `cairn-wallet address` prints. The installer asked `MINE` to be
     /// sixty four hexadecimal characters before anything was built, so the
     /// form the node now names in its own summary was refused by the script
-    /// that installs it, and nothing ran the script with one.
+    /// that installs it, and nothing ran the script with one. A key that
+    /// passes is not carried into the unit as a key: the build converts it
+    /// and says the address on its `--check` summary, and the installer
+    /// writes that address into the unit in the key's place, so a 0.9 unit
+    /// is rewritten with an address the first time it meets a build that
+    /// has one.
     #[test]
     fn the_installer_takes_an_address_to_mine_to() {
         // The address and the key of the specification's signature vectors,
@@ -736,7 +750,14 @@ echo "network      $network (0x00000000)""#;
             machine.building("testnet-6", "testnet-6");
             machine.installed("--network testnet-6");
 
-            for (what, mine) in [("an address", address), ("a public key", key)] {
+            // An address goes into the unit unchanged; a key goes in as the
+            // address the build's `--check` summary named for it, which the
+            // stand-in build derives as `tcairn1converted<key>`.
+            let expect = [
+                ("an address", address, address.to_owned()),
+                ("a public key", key, format!("tcairn1converted{key}")),
+            ];
+            for (what, mine, written) in expect {
                 let output = machine.run(&[("MINE", mine)]);
                 assert!(
                     output.status.success(),
@@ -744,8 +765,9 @@ echo "network      $network (0x00000000)""#;
                     said(&output)
                 );
                 assert!(
-                    format!("{} ", machine.exec_start()).contains(&format!(" --mine {mine} ")),
-                    "the installer did not write {what} into the line it installed"
+                    format!("{} ", machine.exec_start()).contains(&format!(" --mine {written} ")),
+                    "the installer did not write {what} into the line it installed as {written}: {}",
+                    machine.exec_start()
                 );
             }
 

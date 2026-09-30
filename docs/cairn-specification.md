@@ -118,7 +118,7 @@ what it names, in order, and to nothing else.
 
 Each 32-byte domain constant is BLAKE3's `derive_key` over the context string
 below with empty key material, and every hash under that domain is BLAKE3 keyed
-with that constant. All twenty are given here, because a document that named
+with that constant. All twenty four are given here, because a document that named
 only some of them could not be used to compute an identifier, which is the one
 thing it exists for.
 
@@ -470,8 +470,8 @@ last: in a block, after every transfer's inputs have resolved, as the body
 table in *Blocks* orders them.
 
 Outputs MUST NOT exceed inputs. The difference is the fee. The part of it
-that is the transfer's burn, below, is destroyed; the rest is claimed by the
-block's coinbase or destroyed; there is no third destination.
+that is the transfer's burn, below, is burned; the rest is claimed by the
+block's coinbase or left unclaimed; there is no third destination.
 
 ### Places
 
@@ -485,7 +485,7 @@ adds to the tier. Which inputs those are is settled as the inputs resolve, by
 A transfer's *burn* is `place_price` times its places. A burn that does not
 fit in an amount is refused `ValueOverflow`, which no network here can reach.
 **A transfer MUST give up as fee at least its burn**, and one that does not is
-refused `PlacesUnpaid`. The burn is destroyed: the coinbase may claim the fees
+refused `PlacesUnpaid`. The burn is burned: the coinbase may claim the fees
 less the burns, and no more. So a miner filling its own block with outputs
 pays for every place what anybody else would, and cannot pay it to itself.
 
@@ -505,6 +505,14 @@ out, the displaced owners' payments grew by 596 bytes, a cold witness carrying
 the note, its position and a path of seventeen hashes against a one-byte tag,
 and the price is that times ten, rounded up to the thousand.
 
+A transfer that pays its burn is still not owed a place in the very next
+block: the tier's room plus its eviction cap, less the coinbase's own outputs,
+is all a block has for transfers, and a pool MAY refuse `TooManyPlacesForABlock`
+to a transfer whose places do not fit in what is left. This is pool policy,
+not consensus: a block carrying such a transfer is judged by `PlacesUnpaid`
+and `TooManyEvictions` alone, and a node that pools differently, or not at
+all, still follows the same chain.
+
 ### Coinbase
 
 <table>
@@ -523,7 +531,7 @@ is free bytes for a miner, bounded, and committed to like everything else.
 
 A coinbase MUST NOT pay more than the schedule allows at its height plus the
 fees the block's own transfers gave up, less their burns. Paying less is
-permitted, and the difference is destroyed rather than held anywhere.
+permitted, and the difference is left unclaimed rather than held anywhere.
 
 ## Blocks
 
@@ -736,11 +744,11 @@ reports it, which is why it is written as a rule here rather than left as a
 number an implementation picks.
 
 <table>
-  <thead><tr><th>Parameter</th><th>testnet-6</th><th>devnet</th><th>What it bounds</th></tr></thead>
+  <thead><tr><th>Parameter</th><th>testnet-7</th><th>devnet</th><th>What it bounds</th></tr></thead>
   <tbody>
     <tr><td>hot capacity</td><td class="n">131 072</td><td class="n">64</td><td>notes the hot set holds</td></tr>
     <tr><td>evictions per block</td><td class="n">1 024</td><td class="n">32</td><td>notes one block may push out</td></tr>
-    <tr><td>place price</td><td class="n">6 000</td><td class="n">6 000</td><td>pebbles destroyed for each place a transfer takes</td></tr>
+    <tr><td>place price</td><td class="n">6 000</td><td class="n">6 000</td><td>pebbles burned for each place a transfer takes</td></tr>
     <tr><td>coinbase maturity</td><td class="n">1 024</td><td class="n">32</td><td>blocks a reward waits</td></tr>
   </tbody>
 </table>
@@ -758,7 +766,7 @@ capacity to 64 and the eviction cap to 32 with it, so there too the cap is
 below the tier, and emptying the tier takes at least two blocks. The cap goes
 no lower because a miner building a block keeps room for a full coinbase, 16
 notes, out of it: a cap of 16 or less would leave a full devnet tier carrying
-no payment at all. On testnet-6 the cap is a hundred and twenty eighth of the
+no payment at all. On testnet-7 the cap is a hundred and twenty eighth of the
 tier, so emptying the tier takes at least 128 blocks whatever shape the blocks
 take.
 
@@ -892,7 +900,7 @@ A node MUST refuse a block whose eviction list is longer than
 over is a shared resource: every note pushed out is somebody's money now
 needing a proof to spend, and the pusher chooses whose by choosing nothing,
 since it is always the oldest that falls. The place price puts a price on
-that, and since the burn is destroyed rather than claimed, it is the same
+that, and since the burn is burned rather than claimed, it is the same
 price for a miner filling its own block as for anyone. A price bounds nothing
 for whoever will pay it, so this is the bound on the rate, whatever anyone
 pays.
@@ -1642,8 +1650,8 @@ total grows.
 
 Two things the schedule is and is not. It is a ceiling: a coinbase MUST NOT
 claim more than the reward at its height plus the fees its block's transfers
-gave up less their burns, and it MAY claim less, in which case the difference is destroyed and
-goes nowhere. So the money a chain has actually issued at a height is at most
+gave up less their burns, and it MAY claim less, in which case the difference is left unclaimed
+and goes nowhere. So the money a chain has actually issued at a height is at most
 the running total above and may be under it, and the running total is the one
 thing about a handed-over ledger that can be checked against the rules rather
 than against a commitment its sender wrote.
@@ -2312,7 +2320,7 @@ first. The tie puts a floor under a tip at the band the draw leaves unresolved
 over 2<sup>18</sup>, which on a chain that ran to schedule is at least a
 thousandth of an average block. Measured on a thirty year chain at the two
 networks' opening difficulties, the cheapest tip a forger can present costs
-2<sup>18</sup> hashes on testnet-6 and 2<sup>14</sup> on the devnet; held to the
+2<sup>18</sup> hashes on testnet-7 and 2<sup>14</sup> on the devnet; held to the
 pinned header alone it would cost 2<sup>10.2</sup> and 2<sup>7.4</sup>. It does
 not cost the chain's difficulty, and no tie of this kind can make it: a run
 whose tip fell by the tie is what an honest chain looks like after a loss.
@@ -2320,7 +2328,7 @@ whose tip fell by the tie is what an honest chain looks like after a loss.
 So the figure MUST be quoted against a grinding budget. At 40 per cent the
 inequality above gives 2^-161.9 a tip, which stays under 2^-128 against
 2<sup>33</sup> tips and not against 2<sup>34</sup>, and 2<sup>33</sup> tips
-cost 2<sup>51</sup> hashes on testnet-6 and 2<sup>47</sup> on the devnet at
+cost 2<sup>51</sup> hashes on testnet-7 and 2<sup>47</sup> on the devnet at
 those difficulties. The staircase the draw really is is worth more per question
 than the inequality, so that budget is a floor under the real one and not the
 real one; at the measured 42.96 per cent there is no budget at all, since that
@@ -2331,7 +2339,7 @@ hash rate with noise of its own, and on chains with random block times the
 hardest header of a run stood up to twice as far above the tip as the loss
 alone puts it, so a tie of 32 refused no chain that lost sixteen times its hash
 rate, sixty-four of them on each network. A chain that lost twenty or more
-cannot be weighed on testnet-6 from about eight hours after the loss, for up to
+cannot be weighed on testnet-7 from about eight hours after the loss, for up to
 a day at twenty, about as long as the ceiling on the run's length refuses it
 anyway, and for under six days at any loss beyond what the ceiling refuses; a
 newcomer reads such a chain instead, where a peer keeps it.
@@ -2525,7 +2533,7 @@ burial chose the state root and everything under it.
 
 **One check does not go by that road.** A coinbase claims at most what the
 schedule pays at its height plus the fees its own block's transfers gave up
-less their burns, and a fee the coinbase declines is destroyed, so a chain at a height holds at
+less their burns, and a fee the coinbase declines is left unclaimed, so a chain at a height holds at
 most what the schedule has paid by then and never more. Refusal twelve is that
 subtraction. It is the only place in this exchange where a newcomer is not
 taking somebody's word, and no amount of work gets past it. The supply is also
@@ -2657,6 +2665,12 @@ the same either way; read late it is a rule about what to throw away.
 
 A frame is at most 1 048 576 bytes whatever it carries, so these ceilings bound
 what is built and the frame bounds what is read.
+
+A peer that has not introduced itself may send at most 4 096 bytes before that
+frame is refused as too large, since the only message such a peer may send is
+a handshake. Any future handshake MUST still fit inside that limit: a node
+reads a longer one exactly as it reads an oversized frame from anybody else,
+which is a peer fault and not a version to negotiate over.
 
 A handshake is 76 bytes and carries the protocol version as a `u32`, the
 network as a `u32`, the first block of the branch this node follows, the

@@ -141,11 +141,11 @@ the_settings() {
     # retired name here costs a line of output and nothing else. It is not
     # asked from the build at this point because the build is not built
     # yet.
-    resolve NETWORK "$(carried network)" testnet-6
+    resolve NETWORK "$(carried network)" testnet-7
     resolve PORT "${listen##*:}" 9944
     resolve SEED "$(carried seed)" ""
     # An address to pay block rewards to, or a public key in the form an
-    # address had before 0.10, which the node converts to its address. Mining
+    # address had before 0.11, which the node converts to its address. Mining
     # needs the address money goes to and nothing else: the key that spends
     # it never leaves the machine that holds it, so this stays true even
     # here, where nothing worth stealing may sit.
@@ -418,7 +418,7 @@ if [ -n "$MINE" ] && [ "$MINE" != off ]; then
                 exit 1
                 ;;
             *)
-                # A public key, the form an address had before 0.10. The node
+                # A public key, the form an address had before 0.11. The node
                 # still takes one and converts it to its address.
                 if [ "${#MINE}" -ne 64 ]; then
                     echo "MINE is neither an address nor a 64 character public key: $MINE" >&2
@@ -542,6 +542,23 @@ settle_the_network "$BUILT"
 NOW=$(name_of "$BUILT" "$NETWORK")
 ARGS=$(the_line)
 check_the_line "$BUILT"
+# A public key in the old form of an address is still accepted and converted,
+# but the unit keeps whatever MINE carried in, key included, unless something
+# writes the address back. So the build's own answer is asked, once, and
+# written into the unit in the key's place: a 0.9 unit is rewritten with its
+# address the first time it is installed under a build that has one, and
+# 0.12 can drop the conversion because no unit carries a bare key by then.
+if [ -n "$MINE" ] && [ "$MINE" != off ] && [ -z "$mine_prefix" ]; then
+    # shellcheck disable=SC2086
+    resolved=$( (cd / && "$BUILT" --check $ARGS 2>/dev/null) | awk '/^mining / {print $NF; exit}')
+    case "$resolved" in
+        cairn1* | tcairn1* | dcairn1*)
+            echo "mine     $MINE was a public key; the unit is written with its address $resolved instead"
+            MINE=$resolved
+            ARGS=$(the_line)
+            ;;
+    esac
+fi
 # What the node will do, in the words of the build about to be installed:
 # the line and the cairn.conf beside the chain, read together. The lines
 # printed at the start are what this run was told and carried, which is not

@@ -3301,6 +3301,26 @@ impl Wallet {
         self.drafted(recipient.into(), amount, fee).err()
     }
 
+    /// How much of `fee` the spend of `amount` to `recipient` this wallet
+    /// would build, paying exactly `fee`, destroys rather than hands to
+    /// whoever mines the block.
+    ///
+    /// Asked without building anything, the way [`Wallet::could_not_draft`]
+    /// is: for the confirmation a face shows before it pays, which used to
+    /// say the fee as one number and left how much of it a miner never sees
+    /// unsaid. `None` when the spend could not even be drafted, which a
+    /// caller asks about separately with `could_not_draft`.
+    pub fn burn_of_the_fee(
+        &self,
+        recipient: impl Into<Address>,
+        amount: Amount,
+        fee: Amount,
+    ) -> Option<Amount> {
+        self.drafted(recipient.into(), amount, fee)
+            .ok()
+            .map(|draft| draft.burn)
+    }
+
     fn drafted(
         &self,
         recipient: Address,

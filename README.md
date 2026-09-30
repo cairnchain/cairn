@@ -32,21 +32,38 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-6` opened on 1 September 2026. Its
-money is worth nothing, is meant to be worth nothing, and the network will be
-reset.
+Pre-alpha, and running in public. `testnet-7` opens on the day this restart
+ships (the network table below carries a provisional first block, minted
+while the wave was developed; the coordinator mints the real one, with a
+fresh timestamp, on the day). Its money is worth nothing, is meant to be
+worth nothing, and the network will be reset.
 
-It is the sixth because three audit passes in one day found three things, and
-the last of them was not a hole an attacker exploits but the central mechanism
-not working at all. A ledger whose grace window held a note somebody had spent
-could not be handed to a newcomer, and that window turns over in twelve blocks
-on a busy chain, so joining without reading every block was broken essentially
-always. Nothing complained, because nobody had yet tried to join a chain that
-had seen traffic. Alongside it: a block reward could be spent before its block
-was settled, so a two-block reorganisation could take back money somebody had
-already been paid; and the ledger could not state how much money existed, so a
-defect that minted a pebble would have been agreed by every node and noticed by
-none. All three change what a header commits to.
+It is the seventh because a place in the hot set was free to a miner, a block
+did not commit to its signatures, an address showed its key, and two hash
+domains were told apart only by the length of what they hashed. A transfer
+could take as many places in the hot set as it liked for the price of its
+bytes alone, and a miner packing its own blocks with them paid not even that;
+a header named its body by a root that left out every signature and proof, so
+a copy that changed only those still passed as the same block; a note's owner
+was the public key itself, decoded straight off the chain, so every unspent
+note stood exposed to whatever could someday break that key; and two domains
+each hashed two kinds of value apart only because every caller happened to
+keep their lengths fixed and different. All four change what a header commits
+to or what a note is.
+
+`testnet-6` is retired and nothing on it carries over: it opened on
+1 September 2026, because three audit passes in one day found three things,
+and the last of them was not a hole an attacker exploits but the central
+mechanism not working at all. A ledger whose grace window held a note
+somebody had spent could not be handed to a newcomer, and that window turns
+over in twelve blocks on a busy chain, so joining without reading every block
+was broken essentially always. Nothing complained, because nobody had yet
+tried to join a chain that had seen traffic. Alongside it: a block reward
+could be spent before its block was settled, so a two-block reorganisation
+could take back money somebody had already been paid; and the ledger could
+not state how much money existed, so a defect that minted a pebble would have
+been agreed by every node and noticed by none. All three changed what a
+header commits to.
 
 There is no mainnet. A network exists once its first block does, and that one
 will be mined in the open on the day it is announced.
@@ -122,8 +139,8 @@ paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
-| `testnet-6` | `0000000c0b3f...` | 1788277685 | 60 s |
-| `devnet` | `00000196168c...` | 1788279694 | 5 s |
+| `testnet-7` | `00000009205b...` | 1788276770 | 60 s |
+| `devnet` | `000000414235...` | 1788276770 | 5 s |
 | `mainnet` | not made yet | | |
 
 There is an explorer, which is a node that also serves a website: the chain in

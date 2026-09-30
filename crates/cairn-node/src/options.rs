@@ -83,7 +83,7 @@ cairnd, a Cairn node
                          one, the addresses written into the program for
                          this network are used, which is why a node that
                          was just downloaded finds the network on its own
-  --network <name>       testnet-6 or devnet (default: testnet-6)
+  --network <name>       testnet-7 or devnet (default: testnet-7)
                          devnet has the same rules with a five second block
                          time and a tiny hot set, for one machine.
                          mainnet does not exist yet: a network exists once
@@ -244,7 +244,7 @@ impl Given {
     /// and on a chain that means following a different one. It was applied to
     /// a name this node does not know and not to a name it knows given twice,
     /// where exactly the same thing happens and the example in that sentence
-    /// is the one it happens to: `--network devnet --network testnet-6` ran on
+    /// is the one it happens to: `--network devnet --network testnet-7` ran on
     /// devnet and said nothing about the other.
     ///
     /// Given twice with the same value, nothing is dropped and nothing is
@@ -422,7 +422,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
             if name == "mainnet" {
                 "mainnet does not exist yet: its first block has not been mined".to_owned()
             } else {
-                format!("unknown network `{name}`, try testnet-6 or devnet")
+                format!("unknown network `{name}`, try testnet-7 or devnet")
             }
         })
         .map_err(misread)?;
@@ -783,7 +783,7 @@ mod tests {
         let options = resolve_options(&[]).unwrap().unwrap();
         assert_eq!(options.data, PathBuf::from(DEFAULT_DATA));
         assert_eq!(options.listen.port(), 9_944);
-        assert_eq!(options.params.network_name(), "testnet-6");
+        assert_eq!(options.params.network_name(), "testnet-7");
         assert_eq!(options.params.target_block_time, 60);
         assert!(options.mine_to.is_none());
         // A program somebody just downloaded finds the network on its own,
@@ -1279,12 +1279,12 @@ mod tests {
         assert_eq!(options.seeds.len(), 1);
         assert_eq!(options.status_period, 3);
 
-        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-6"]))
+        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-7"]))
             .unwrap()
             .unwrap();
         assert_eq!(
             options.params.network_name(),
-            "testnet-6",
+            "testnet-7",
             "the command line wins"
         );
     }

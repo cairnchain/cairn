@@ -49,7 +49,7 @@ cairn-explorer, a Cairn node that also serves a website
                          error if a setting is one this build does not
                          accept, which is how a script can find out that a
                          network it was told to use has been retired
-  --network <name>       testnet-6 or devnet (default: testnet-6)
+  --network <name>       testnet-7 or devnet (default: testnet-7)
   --help                 print this and stop
 
 The explorer always keeps the cold set, because answering questions about
@@ -110,7 +110,7 @@ impl Given {
     /// Refuses a setting given twice with two different values.
     ///
     /// Only the first was ever read and the rest were dropped without a word,
-    /// so `--network devnet --network testnet-6` ran on devnet and said nothing
+    /// so `--network devnet --network testnet-7` ran on devnet and said nothing
     /// about the other. `cairnd` and the wallet refuse it, under the rule
     /// [`KNOWN`] states for a name this program does not know: what is passed
     /// over is how an operator runs something other than what they wrote.
@@ -187,7 +187,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-6 or devnet")
+            format!("unknown network `{name}`, try testnet-7 or devnet")
         }
     })?;
 
@@ -429,7 +429,7 @@ mod tests {
     /// it stops `cairnd` and the wallet, and the same value twice does not.
     ///
     /// Only the first value was ever read and the second was dropped without
-    /// a word. Nothing asked this, so `--network devnet --network testnet-6`
+    /// a word. Nothing asked this, so `--network devnet --network testnet-7`
     /// started an explorer on devnet that said nothing about the other name it
     /// was given, and so did a `--keep` given twice.
     #[test]
@@ -438,7 +438,7 @@ mod tests {
             "--network",
             "devnet",
             "--network",
-            "testnet-6",
+            "testnet-7",
         ]))
         .unwrap_err();
         assert!(
@@ -446,7 +446,7 @@ mod tests {
             "a network named twice was taken as the first: {error}"
         );
         assert!(
-            error.contains("devnet") && error.contains("testnet-6"),
+            error.contains("devnet") && error.contains("testnet-7"),
             "the refusal does not say which two it was handed: {error}"
         );
 

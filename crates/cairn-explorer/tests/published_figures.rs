@@ -105,6 +105,7 @@ fn table_row(label: &str) -> String {
 fn in_french(value: usize) -> &'static str {
     match value {
         5 => "cinq",
+        6 => "six",
         8 => "huit",
         64 => "soixante-quatre",
         other => panic!(
@@ -808,8 +809,8 @@ fn the_ledger_a_newcomer_is_handed_is_the_size_the_paper_gives() {
 /// **The papers count the renumberings the network identifiers record.**
 ///
 /// The whitepaper's limitations said the test networks were renumbered three
-/// times and the design paper said the same twice, while `note.rs` carries six
-/// test networks, each taken because a rule changed. Three was true at
+/// times and the design paper said the same twice, while `note.rs` carries
+/// seven test networks, each taken because a rule changed. Three was true at
 /// testnet-4. A count of how often something happened is a figure like any
 /// other, and the identifiers are where it is written down.
 #[test]
@@ -1755,6 +1756,63 @@ fn the_papers_figure_for_a_chain_far_past_the_cliff_is_the_measured_one() {
     );
 }
 
+/// **The specification's limit on a stranger's first frame is the wire's own
+/// constant, not a number copied beside it.**
+///
+/// `MOST_BEFORE_A_NAME` is what a peer that has not introduced itself may
+/// send before a frame is refused as too large: a handshake is the only
+/// message such a peer may send, and the specification says a future one
+/// must still fit inside it. A document that names the number and a build
+/// that changes it without the document noticing is exactly the drift this
+/// test exists to catch.
+#[test]
+fn the_specification_states_the_wire_limit_a_stranger_is_held_to() {
+    assert!(
+        specification_flowing().contains(&format!(
+            "A peer that has not introduced itself may send at most {} bytes",
+            grouped(u64::try_from(cairn_net::wire::MOST_BEFORE_A_NAME).unwrap())
+        )),
+        "the specification does not state the {} byte limit a stranger's frame is held to",
+        cairn_net::wire::MOST_BEFORE_A_NAME
+    );
+}
+
+/// **The specification names `TooManyPlacesForABlock` as pool policy, not a
+/// consensus refusal, and states the limit the same way the pool computes
+/// it.**
+///
+/// A block is judged by `PlacesUnpaid` and `TooManyEvictions` alone; a pool
+/// that refuses a transfer sooner, because it would not fit in the very next
+/// block, is a choice about what to carry and not about what a block may
+/// hold. Left unsaid, a reader of the specification alone would have no way
+/// to tell the two apart.
+#[test]
+fn the_specification_names_the_pools_place_limit_as_policy_not_consensus() {
+    let paper = specification_flowing();
+    assert!(
+        paper.contains("TooManyPlacesForABlock"),
+        "the specification does not name TooManyPlacesForABlock at all"
+    );
+    assert!(
+        paper.contains("the tier's room plus its eviction cap, less the coinbase's own outputs"),
+        "the specification does not state the pool's place limit as the tier's room \
+         plus the eviction cap, less the coinbase's outputs"
+    );
+    assert!(
+        paper.contains("This is pool policy, not consensus"),
+        "the specification does not say TooManyPlacesForABlock is pool policy, not consensus"
+    );
+}
+
+/// The specification with its line breaks taken out, for phrases longer than
+/// a line, the same way [`flowing`] does for the whitepaper.
+fn specification_flowing() -> String {
+    SPECIFICATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The paper with its line breaks taken out, for phrases longer than a line.
 ///
 /// A guard that matched the paper's own wrapping would be a guard against
@@ -1767,6 +1825,7 @@ fn flowing() -> String {
 fn spelled(value: u64) -> &'static str {
     match value {
         5 => "five",
+        6 => "six",
         11 => "eleven",
         15 => "fifteen",
         16 => "sixteen",

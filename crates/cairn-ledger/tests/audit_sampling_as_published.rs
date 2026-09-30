@@ -71,7 +71,7 @@ fn cheapest_spacing_at_the_floor(target: u64) -> u64 {
 /// own blocks now, and the prose has to say that rather than the hours.
 #[test]
 fn the_drift_the_joining_argument_rests_on_is_ten_blocks() {
-    for network in ["testnet", "testnet-6", "devnet"] {
+    for network in ["testnet", "testnet-7", "devnet"] {
         let params = ConsensusParams::for_network(network).unwrap();
         assert_eq!(
             params.max_timestamp_drift,

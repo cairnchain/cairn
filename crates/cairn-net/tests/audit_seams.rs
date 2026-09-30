@@ -212,7 +212,7 @@ fn a_joined_node_can_never_say_which_chain_it_is_on() {
 /// `accept_handshake` guards the comparison with `if let Some(ours) =
 /// first_block(chain)`, and `first_block` reads the rules before the branch.
 /// On any network that names itself the rules pin a first block, so the arm
-/// runs and the comparison happens: this is closed on testnet-6 and on
+/// runs and the comparison happens: this is closed on testnet-7 and on
 /// devnet, which is everything that ships.
 ///
 /// It is open on a rule set that pins nothing, which is `ConsensusParams::

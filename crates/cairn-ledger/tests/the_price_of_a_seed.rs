@@ -1,4 +1,4 @@
-//! What a fresh seed costs a forger on testnet-6 and on the devnet, and what
+//! What a fresh seed costs a forger on testnet-7 and on the devnet, and what
 //! the rule that prices it costs an honest chain that loses hash rate.
 //!
 //! Three readings of the run are measured side by side: no tie between the
@@ -149,7 +149,7 @@ struct Network {
 }
 
 fn networks() -> Vec<Network> {
-    ["testnet-6", "devnet"]
+    ["testnet-7", "devnet"]
         .into_iter()
         .map(|name| Network {
             name,
@@ -349,7 +349,7 @@ fn tied_to_the_run(network: &Network, fall: u64, gaps: &[u128]) -> Price {
 /// about forty hashes, and nothing compared the tip with the run below it.
 /// Held to the pinned header alone, the forger makes the pinned header cheap
 /// and pays about a thousand; held to the hardest header of the run, it has
-/// to carry the band flat and pays a quarter of a million on testnet-6. The
+/// to carry the band flat and pays a quarter of a million on testnet-7. The
 /// figures are pinned because the specification, `SAMPLES` and SECURITY.md
 /// quote them.
 #[test]
@@ -409,7 +409,7 @@ fn a_tip_held_to_the_hardest_header_of_its_run_costs_what_the_documents_state() 
     }
     assert_eq!(
         measured,
-        vec![("testnet-6", 5.3, 10.2, 18.0), ("devnet", 5.3, 7.4, 14.0)],
+        vec![("testnet-7", 5.3, 10.2, 18.0), ("devnet", 5.3, 7.4, 14.0)],
         "the price of a seed moved, and the specification, SAMPLES and SECURITY.md quote it"
     );
 
@@ -602,7 +602,7 @@ fn the_tie_refuses_no_honest_chain_that_lost_sixteen_times_its_hash_rate() {
                     network.name
                 );
             }
-            if loss == 20 && network.name == "testnet-6" {
+            if loss == 20 && network.name == "testnet-7" {
                 assert!(
                     hours(tie) < 24.0,
                     "a loss of twenty was refused for more than the day the documents say"
@@ -610,7 +610,7 @@ fn the_tie_refuses_no_honest_chain_that_lost_sixteen_times_its_hash_rate() {
             }
             longest = longest.max(tie);
         }
-        if network.name == "testnet-6" {
+        if network.name == "testnet-7" {
             assert!(
                 longest < 6 * 24 * 3_600,
                 "a loss was refused for longer than the six days the documents say"

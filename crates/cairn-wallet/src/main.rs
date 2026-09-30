@@ -62,7 +62,7 @@ Network options
                        when they do not bring it two peers within five
                        seconds: a seed learns that a wallet runs at your
                        address, and when
-  --network <name>     testnet-6 or devnet (default: testnet-6); it has to
+  --network <name>     testnet-7 or devnet (default: testnet-7); it has to
                        be the same network the node is on
   --wait <seconds>     how long to spend catching up (default: 30)
   --fee <cairn>        what to pay to be carried. Without one, the least
@@ -847,7 +847,14 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     // `12.5` against `125` is the same one keystroke. The saying and the
     // paying used to be consecutive statements, so nobody could act on what
     // was said.
-    for line in about_to_pay(recipient, amount, fee, wallet.address(), network) {
+    //
+    // The draft just checked by `could_not_draft` succeeds, so this asks the
+    // same question again rather than carrying the answer: two calls that
+    // agree by construction, not two chances to disagree.
+    let burn = wallet
+        .burn_of_the_fee(recipient, amount, fee)
+        .unwrap_or(Amount::ZERO);
+    for line in about_to_pay(recipient, amount, fee, burn, wallet.address(), network) {
         println!("{line}");
     }
     let asking = must_ask(std::io::stdin().is_terminal(), flags.given("yes"));
@@ -931,23 +938,31 @@ fn when_nobody_took_it(sent: &Sent, forgot: bool) -> Option<String> {
 }
 
 /// What `send` says before it pays: who, how much, what carrying it costs,
-/// and what that comes to.
+/// how much of that is destroyed rather than paid to whoever mines the
+/// block, and what it all comes to.
 ///
 /// The total was never said on this face, and the page said it as the person
 /// typed. And a payment to this wallet's own address, which is what pasting
 /// the output of `cairn-wallet address` in place of the recipient's does,
-/// went without a word and showed in the history as the fee sent.
+/// went without a word and showed in the history as the fee sent. The burn
+/// went unsaid too: every place a transfer takes in the hot set destroys a
+/// price nobody, miner included, keeps, and a person watching a fee leave
+/// could not tell how much of it bought a place in the next block and how
+/// much left the supply.
 fn about_to_pay(
     recipient: Address,
     amount: Amount,
     fee: Amount,
+    burn: Amount,
     own: Address,
     network: NetworkId,
 ) -> Vec<String> {
+    let kept = fee.checked_sub(burn).unwrap_or(Amount::ZERO);
     let mut lines = vec![
         String::new(),
         format!("paying    {amount} to {}", recipient.to_text(network)),
         format!("fee       {fee} to carry it"),
+        format!("            {burn} of the fee is destroyed, {kept} goes to whoever mines it"),
     ];
     match amount.checked_add(fee) {
         Some(total) => lines.push(format!("total     {total}")),
@@ -1026,12 +1041,12 @@ fn data_directory(flags: &Flags) -> PathBuf {
 }
 
 fn rules_of(flags: &Flags) -> Result<ConsensusParams, String> {
-    let name = flags.value("network").unwrap_or("testnet-6");
+    let name = flags.value("network").unwrap_or("testnet-7");
     ConsensusParams::for_network(name).ok_or_else(|| {
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-6 or devnet")
+            format!("unknown network `{name}`, try testnet-7 or devnet")
         }
     })
 }
@@ -1771,12 +1786,16 @@ mod tests {
         );
     }
 
-    /// `send` says who is paid, how much, the fee and the total before it
-    /// pays, and says so when the address is this wallet's own.
+    /// `send` says who is paid, how much, the fee, how much of the fee is
+    /// destroyed and how much goes to whoever mines the block, and the total,
+    /// before it pays, and says so when the address is this wallet's own.
     ///
     /// The total was never said on this face, and a payment to this wallet's
     /// own address went without a word. Nothing read these lines, which were
-    /// printed in the middle of sending.
+    /// printed in the middle of sending. Nor did anything say how the fee
+    /// split: every place a transfer takes destroys a price no miner keeps,
+    /// and a person watching a fee leave could not tell how much of it left
+    /// the supply and how much paid for the block.
     #[test]
     fn what_is_about_to_be_paid_is_said_whole() {
         let network = cairn_ledger::note::NetworkId::TESTNET;
@@ -1786,7 +1805,7 @@ mod tests {
         let me = cairn_ledger::note::Address::from(
             cairn_crypto::SecretKey::generate().unwrap().public_key(),
         );
-        let lines = about_to_pay(somebody, pebbles(700), pebbles(7), me, network);
+        let lines = about_to_pay(somebody, pebbles(700), pebbles(7), pebbles(3), me, network);
         assert!(says(
             &lines,
             &format!(
@@ -1800,11 +1819,22 @@ mod tests {
             &format!("fee       {} to carry it", pebbles(7))
         ));
         assert!(
+            says(
+                &lines,
+                &format!(
+                    "{} of the fee is destroyed, {} goes to whoever mines it",
+                    pebbles(3),
+                    pebbles(4)
+                )
+            ),
+            "the burn is not said before paying: {lines:?}"
+        );
+        assert!(
             says(&lines, &format!("total     {}", pebbles(707))),
             "the total is not said before paying"
         );
         assert!(!says(&lines, "own address"), "{lines:?}");
-        let lines = about_to_pay(me, pebbles(700), pebbles(7), me, network);
+        let lines = about_to_pay(me, pebbles(700), pebbles(7), pebbles(3), me, network);
         assert!(
             says(&lines, "That is this wallet's own address"),
             "a payment to this wallet's own address is not said to be one"
