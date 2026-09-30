@@ -205,12 +205,14 @@ another scheme with the same 32 bytes can never name the same owner. An address
 is 32 bytes and a decoder reads it as bytes: nothing about it can be checked
 until a key is presented for it, and a decoder does no curve arithmetic for it.
 
-So a note shows no key. The key appears on the chain once, in the input that
-spends the note, and it is checked there twice: that it hashes to the note's
-owner, as soon as the input has resolved, and that it is a key a signer can
-hold, when the signature is verified (*How a signature is verified*). A note
-can be paid to an address nobody holds a key for, as on any chain that pays to
-the hash of a key; the text form below is what stops one being typed by
+So an unspent note shows no key. The key appears on the chain when a note paid
+to its address is first spent, in the input that spends it, and it is checked
+there twice: that it hashes to the note's owner, as soon as the input has
+resolved, and that it is a key a signer can hold, when the signature is
+verified (*How a signature is verified*). Every other note the same address
+still holds, change included, is committed to that published key from then on.
+A note can be paid to an address nobody holds a key for, as on any chain that
+pays to the hash of a key; the text form below is what stops one being typed by
 mistake.
 
 ### Addresses as text
@@ -480,11 +482,12 @@ had already left the hot set, so every output beside it is a note the transfer
 adds to the tier. Which inputs those are is settled as the inputs resolve, by
 *Which witness a spend must carry*.
 
-A transfer's *burn* is `place_price` times its places. **A transfer MUST give
-up as fee at least its burn**, and one that does not is refused
-`PlacesUnpaid`. The burn is destroyed: the coinbase may claim the fees less
-the burns, and no more. So a miner filling its own block with outputs pays for
-every place what anybody else would, and cannot pay it to itself.
+A transfer's *burn* is `place_price` times its places. A burn that does not
+fit in an amount is refused `ValueOverflow`, which no network here can reach.
+**A transfer MUST give up as fee at least its burn**, and one that does not is
+refused `PlacesUnpaid`. The burn is destroyed: the coinbase may claim the fees
+less the burns, and no more. So a miner filling its own block with outputs
+pays for every place what anybody else would, and cannot pay it to itself.
 
 The burn is a fee, paid once, by whoever makes the transfer, when it is made.
 Nothing is charged to a note for being in the hot set, for how long it stays
@@ -559,8 +562,9 @@ appear in the block. The coinbase's leaf is the hash under the merkle leaf
 domain of its identifier, which is already the hash of its whole encoding. A
 transfer's leaf is the hash under the merkle leaf domain of its commitment, and
 a transfer's commitment is the hash under the transfer commitment domain of its
-whole encoding as it travels: every input with its witness and signature, and
-the outputs. Not its identifier, which leaves signatures and witnesses out: a
+whole encoding as it travels: the version, every input with its witness, key
+and signature, and the outputs, with their counts, as *Transactions* lays them
+out. Not its identifier, which leaves signatures and witnesses out: a
 root over identifiers would name every body that differed from the real one in
 those, and some of them are valid, since inside the grace window a note can be
 spent with or without its proof. An interior node is the hash under the merkle node
@@ -2658,7 +2662,10 @@ A handshake is 76 bytes and carries the protocol version as a `u32`, the
 network as a `u32`, the first block of the branch this node follows, the
 height of its tip, the work behind that tip as a `u128`, the port it listens on as a
 `u16`, a `u64` nonce drawn once when the node started, and two `u8` claims about
-what it kept. A node that does not offer itself to be dialled, as a wallet's
+what it kept. The version is the first field of a handshake, and a reader
+compares it, as *Versions* describes, before decoding anything that follows
+it, so a peer on another version is answered as one and never read as a
+malformed frame. A node that does not offer itself to be dialled, as a wallet's
 does not, names port `0`, and a peer MUST NOT write an address down for it. A decoder MUST refuse either claim byte if it is neither `0` nor
 `1`, because reading anything else as true is guessing on the peer's behalf.
 

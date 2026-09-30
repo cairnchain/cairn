@@ -364,13 +364,13 @@
     },
     "outputs": {
       "plain": "Ce sont les nouveaux billets. Chacun appartient à une adresse et pourra être dépensé exactement une fois, plus tard, par celui qui détient le secret correspondant.",
-      "curious": "Chaque sortie est une valeur verrouillée sur une adresse, qui est l'empreinte d'une clé publique : la clé elle-même n'apparaît que lorsque le billet est dépensé. Son identifiant vient de la transaction qui l'a créée et de sa position dans la liste.",
+      "curious": "Chaque sortie est une valeur verrouillée sur une adresse, qui est l'empreinte d'une clé publique : la clé n'apparaît que lorsqu'un billet payé à cette adresse est dépensé pour la première fois, et tout billet qui y reste ensuite, monnaie rendue comprise, se retrouve derrière elle. Son identifiant vient de la transaction qui l'a créée et de sa position dans la liste.",
       "technical": "Un identifiant de billet est l'identifiant de la transaction source et un indice. L'ordre sur les identifiants est défini pour que l'ensemble des billets ait une énumération canonique unique, dont dépend l'engagement d'état."
     },
     "address": {
       "plain": "Une adresse est un nom public que vous pouvez distribuer sans risque. N'importe qui peut voir ce qu'elle détient. Seule la personne qui a le secret correspondant peut la dépenser, et ce secret n'apparaît jamais ici ni nulle part sur ce site.",
       "curious": "Cette page est construite à partir d'un index sur toute la chaîne, un service que l'explorateur rend et que le protocole refuse délibérément : aucun nœud ne garde de table associant les propriétaires à leurs billets.",
-      "technical": "Clés Ed25519, refusées à la construction si elles ne sont pas encodées de façon canonique, si elles sont de petit ordre ou hors du sous-groupe d'ordre premier : deux suites d'octets ne peuvent jamais désigner une même clé, et rien ne peut être payé à une clé que personne ne détient. Une signature est vérifiée par l'équation sans cofacteur, contre un R canonique et qui n'est pas de petit ordre : un nœud accepte exactement les signatures que tous les autres acceptent."
+      "technical": "Une adresse est l'empreinte d'une clé publique, si bien que n'importe quoi peut être payé à une adresse dont personne ne détient la clé, comme sur toute chaîne qui paie à l'empreinte d'une clé ; c'est la somme de contrôle qui empêche d'en taper une par erreur. Les clés Ed25519 sont refusées si elles ne sont pas encodées de façon canonique, si elles sont de petit ordre ou hors du sous-groupe d'ordre premier, les trois demandées à la clé qu'une entrée présente en dépensant. Une signature est vérifiée par l'équation sans cofacteur, contre un R canonique et qui n'est pas de petit ordre : un nœud accepte exactement les signatures que tous les autres acceptent."
     },
     "holdings": {
       "plain": "Les billets que cette adresse détient, un par un. Un solde n'est que leur somme.",

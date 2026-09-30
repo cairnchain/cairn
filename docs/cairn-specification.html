@@ -278,12 +278,14 @@
     </p>
 
     <p>
-      So a note shows no key. The key appears on the chain once, in the input that
-      spends the note, and it is checked there twice: that it hashes to the note's
-      owner, as soon as the input has resolved, and that it is a key a signer can
-      hold, when the signature is verified (<em>How a signature is verified</em>). A note
-      can be paid to an address nobody holds a key for, as on any chain that pays to
-      the hash of a key; the text form below is what stops one being typed by
+      So an unspent note shows no key. The key appears on the chain when a note paid
+      to its address is first spent, in the input that spends it, and it is checked
+      there twice: that it hashes to the note's owner, as soon as the input has
+      resolved, and that it is a key a signer can hold, when the signature is
+      verified (<em>How a signature is verified</em>). Every other note the same address
+      still holds, change included, is committed to that published key from then on.
+      A note can be paid to an address nobody holds a key for, as on any chain that
+      pays to the hash of a key; the text form below is what stops one being typed by
       mistake.
     </p>
 
@@ -607,11 +609,12 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     </p>
 
     <p>
-      A transfer's <em>burn</em> is <code>place_price</code> times its places. <strong>A transfer MUST give
-      up as fee at least its burn</strong>, and one that does not is refused
-      <code>PlacesUnpaid</code>. The burn is destroyed: the coinbase may claim the fees less
-      the burns, and no more. So a miner filling its own block with outputs pays for
-      every place what anybody else would, and cannot pay it to itself.
+      A transfer's <em>burn</em> is <code>place_price</code> times its places. A burn that does not
+      fit in an amount is refused <code>ValueOverflow</code>, which no network here can reach.
+      <strong>A transfer MUST give up as fee at least its burn</strong>, and one that does not is
+      refused <code>PlacesUnpaid</code>. The burn is destroyed: the coinbase may claim the fees
+      less the burns, and no more. So a miner filling its own block with outputs
+      pays for every place what anybody else would, and cannot pay it to itself.
     </p>
 
     <p>
@@ -706,8 +709,9 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       domain of its identifier, which is already the hash of its whole encoding. A
       transfer's leaf is the hash under the merkle leaf domain of its commitment, and
       a transfer's commitment is the hash under the transfer commitment domain of its
-      whole encoding as it travels: every input with its witness and signature, and
-      the outputs. Not its identifier, which leaves signatures and witnesses out: a
+      whole encoding as it travels: the version, every input with its witness, key
+      and signature, and the outputs, with their counts, as <em>Transactions</em> lays them
+      out. Not its identifier, which leaves signatures and witnesses out: a
       root over identifiers would name every body that differed from the real one in
       those, and some of them are valid, since inside the grace window a note can be
       spent with or without its proof. An interior node is the hash under the merkle node
@@ -3301,7 +3305,10 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       network as a <code>u32</code>, the first block of the branch this node follows, the
       height of its tip, the work behind that tip as a <code>u128</code>, the port it listens on as a
       <code>u16</code>, a <code>u64</code> nonce drawn once when the node started, and two <code>u8</code> claims about
-      what it kept. A node that does not offer itself to be dialled, as a wallet's
+      what it kept. The version is the first field of a handshake, and a reader
+      compares it, as <em>Versions</em> describes, before decoding anything that follows
+      it, so a peer on another version is answered as one and never read as a
+      malformed frame. A node that does not offer itself to be dialled, as a wallet's
       does not, names port <code>0</code>, and a peer MUST NOT write an address down for it. A decoder MUST refuse either claim byte if it is neither <code>0</code> nor
       <code>1</code>, because reading anything else as true is guessing on the peer's behalf.
     </p>

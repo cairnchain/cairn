@@ -150,7 +150,7 @@ rather than treating every updated peer as a liar and following whoever did not
 update either.
 
 A newcomer joins by opening 4 096 headers drawn against accumulated work, about
-three megabytes against the hundred and ninety-seven gigabytes of reading it
+three megabytes against the two hundred and twenty-nine gigabytes of reading it
 replaces. That holds against a forger up to 40% of the world's work, and what
 it guarantees is a depth: such a forger cannot put a newcomer on a branch
 differing from the real one by more than about 633 blocks, ten hours.
