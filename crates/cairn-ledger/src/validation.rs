@@ -81,14 +81,17 @@ const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
 /// fills and flushes a public network's tier through the pool and measures
 /// what the displaced owners' spends grow by. The rule is
 /// `ceil(delta_w * MIN_FEE_PER_WEIGHT / 1000) * 1000`, with `delta_w` the
-/// median growth in bytes and ten pebbles a byte. Measured on 29 September
-/// 2026: a payment of one input grew from 191 bytes to 787 for all sixteen
-/// displaced owners, the cold witness of a note in a tree of height seventeen
-/// against a one-byte tag, so `delta_w` is 596 and the price
-/// `ceil(5.96) * 1000`. The pool's older price of a place, 5 120, and an
-/// ordinary payment's floor land within a third of it, which is the check
-/// that the order is right. Mainnet derives it again, by the same rule, on a
-/// forest of the depth it expects.
+/// median growth in bytes and ten pebbles a byte. Measured on 30 September
+/// 2026, on the note format whose inputs carry their keys: a payment of one
+/// input grew from 223 bytes to 819 for all sixteen displaced owners, the
+/// cold witness of a note in a tree of height seventeen against a one-byte
+/// tag, so `delta_w` is 596 and the price `ceil(5.96) * 1000`. The witness is
+/// all that grows, so the figure did not move with the key: the day before,
+/// on the format without one, it was 191 to 787. The pool's older price of a
+/// place, 5 120, and an ordinary payment's floor under that older weight,
+/// 7 350, land within a third of it, which is the check that the order is
+/// right. Mainnet derives it again, by the same rule, on a forest of the
+/// depth it expects.
 pub const PLACE_PRICE: Amount = price_of(6_000);
 
 /// A price written in pebbles, as an amount, for the same reason and in the

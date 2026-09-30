@@ -319,13 +319,19 @@ fn emptying_the_hot_set_costs_a_miner_the_place_price_of_every_note() {
     assert_eq!(needed, 128);
 
     // And the honest comparison, which is what decides whether any of this
-    // matters. A chain of full blocks of ordinary payments nets about six
-    // hundred and eighty six new notes a block on its own, so the tier turns
-    // over completely in about that many blocks with nobody attacking
+    // matters. A chain of full blocks of ordinary payments nets about five
+    // hundred and eighty seven new notes a block on its own, so the tier
+    // turns over completely in about that many blocks with nobody attacking
     // anything, and pays the same price for every place. The cap is what
     // keeps the two rates within striking distance of each other: the attack
-    // buys an acceleration of about half again, not an order of magnitude.
-    let honest_per_block = live.max_block_bytes / 191;
+    // buys an acceleration of under double, not an order of magnitude. The
+    // payment is measured rather than written down, since its size is the
+    // note format's and moved when an input began carrying its key.
+    let payment = Transfer::new(
+        vec![Input::hot(NoteId::new(cairn_primitives::Hash32::ZERO, 0))],
+        vec![Note::new(pebbles(1), victim.public_key()); 2],
+    );
+    let honest_per_block = live.max_block_bytes / payment.encode().len();
     let honest_blocks = live.hot_capacity.div_ceil(honest_per_block);
     println!(
         "\n  against that: a full chain of ordinary payments nets {honest_per_block} notes a\n  \
