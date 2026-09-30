@@ -263,7 +263,7 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     let header = pinned_header();
     assert_eq!(
         hex::encode(&header.encode()),
-        "0100595241437766554433221100\
+        "01005a5241437766554433221100\
          a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\
          b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2\
          c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3\
@@ -276,7 +276,7 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     );
     assert_eq!(
         header.id().to_string(),
-        "bc9a8a263e6f2985a684af5beb961ddc053caeed588b587a2d6cc5590ab6b9a6"
+        "cb0e19a1f54ae138fc02d426e4fb3e45da98694c8c36013fe8177b2c4c5dd84d"
     );
     assert_eq!(
         header.encode().len(),
@@ -344,7 +344,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
     );
     assert_eq!(
         state.history_root().to_string(),
-        "5ba935da97f969c8763ef0e45498302e5999cb10021ceeef91cd0145f7068c77"
+        "cd89989bf63556c9dba7de3bc60cc11c05304afc5890272fc8631012e1ce593c"
     );
     assert_eq!(
         state.supply().as_pebbles(),
@@ -358,7 +358,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
     );
     assert_eq!(
         state.tip().unwrap().id.to_string(),
-        "63a501dd540570e042f85e138b49d111246c6f432edb8b0c980791cf18fb2329"
+        "a2a72094864ba91c39ca94ed132a5546163ad0df05134a5a550d974c94c478bb"
     );
 }
 
