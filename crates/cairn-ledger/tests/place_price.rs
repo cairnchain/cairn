@@ -400,3 +400,29 @@ fn giving_room_back_costs_nothing() {
         "a coinbase paying the whole reward over sixteen notes was charged for them"
     );
 }
+
+/// A burn too large for an amount is refused `ValueOverflow`, the refusal the
+/// specification's *Places* now names for it.
+///
+/// Unreachable on any network shipped here: 6 000 pebbles times at most 256
+/// places is nowhere near the ceiling. This asks a price no network here
+/// uses, so the refusal is exercised at all rather than left as a code
+/// reading nothing here demonstrates a consequence for.
+#[test]
+fn a_burn_too_large_for_an_amount_is_refused_value_overflow() {
+    let params = rules().with_place_price(Amount::MAX_MONEY);
+    let mut bench = Bench::new(params);
+    let owner = wallet(2);
+    let notes = bench.spread(&owner, 4);
+    let spent = notes[0];
+
+    // One hot input, three outputs: two places, and two times the maximum
+    // amount overflows what an amount can hold.
+    let transfer = spend_hot(&params, &[spent], &owner, 3, 0);
+    assert_eq!(
+        check(&bench, &transfer),
+        Err(TransferError::ValueOverflow),
+        "a burn that does not fit in an amount should be refused ValueOverflow, \
+         which is what the specification now says it is"
+    );
+}

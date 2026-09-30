@@ -53,6 +53,11 @@ use cairn_ledger::sampling::{draw, levels_for, MOST_FALL, MOST_TAIL, SAMPLES};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::hash::{hash, Domain};
 
+/// What #259's re-measurement told SECURITY.md, read here rather than
+/// trusted: 03-Q1 found the figure attested only by a pull request body,
+/// with no test tying it to what SECURITY.md's own prose says.
+const SECURITY: &str = include_str!("../../../SECURITY.md");
+
 /// Thirty years at a block a minute, the chain every published figure is for.
 const BLOCKS: u64 = 30 * 365 * 24 * 60;
 /// Seeds the draw is taken over, each standing for one tip.
@@ -406,6 +411,20 @@ fn a_tip_held_to_the_hardest_header_of_its_run_costs_what_the_documents_state() 
         measured,
         vec![("testnet-6", 5.3, 10.2, 18.0), ("devnet", 5.3, 7.4, 14.0)],
         "the price of a seed moved, and the specification, SAMPLES and SECURITY.md quote it"
+    );
+
+    // SECURITY.md's own account of the price a tie to the pinned header
+    // alone would have left, which was attested only by a pull request body
+    // (03-Q1). Checked against the same measurement above rather than a
+    // second literal, so a run that moves the numbers fails here too.
+    let testnet_pinned = measured[0].2;
+    let devnet_pinned = measured[1].2;
+    assert!(
+        SECURITY.contains(&format!(
+            "would have left 2^{testnet_pinned:.1} and 2^{devnet_pinned:.1}"
+        )),
+        "SECURITY.md does not say a tie to the pinned header alone would have left \
+         2^{testnet_pinned:.1} and 2^{devnet_pinned:.1}, which this measurement gives"
     );
 }
 

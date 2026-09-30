@@ -114,6 +114,37 @@ fn in_french(value: usize) -> &'static str {
     }
 }
 
+/// The thirty-year download total, as README.md writes it in words.
+///
+/// The same rule as `in_french`: a number nobody has taught this test the
+/// words for stops the test rather than quietly agreeing with a README that
+/// has moved on and this test has not.
+fn in_english_gigabytes(value: u64) -> &'static str {
+    match value {
+        229 => "two hundred and twenty-nine",
+        other => panic!(
+            "the thirty-year download is {other} GB now, and this test has no words for \
+             it; README.md needs the same words, spelled out the way it always has"
+        ),
+    }
+}
+
+/// The thirty-year download total this build's transfer format encodes, in
+/// the words README.md should give it.
+///
+/// Computed rather than matched as a fixed string, the way the French papers'
+/// guard already recomputes the same total for design.md and prior-art.md: a
+/// literal-string check on the README passed whether or not the number was
+/// right, and it stopped being right when the transfer format grew and
+/// nobody told the assertion.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn arrival_gigabytes_in_words() -> &'static str {
+    let mut bench = Bench::new(8);
+    let busy = bench.block(64).encode().len() as u64;
+    let gigabytes = (THIRTY_YEARS * busy) as f64 / 1e9;
+    in_english_gigabytes(gigabytes.round() as u64)
+}
+
 /// The number beside the section whose heading is `heading`.
 ///
 /// Section numbers are counted by `cairn-docs` and never typed, except in the
@@ -1127,9 +1158,14 @@ fn the_papers_weighing_is_the_size_this_build_encodes() {
         PAPER.contains(&format!("{stated} to weigh the\n      chain")),
         "the paper's arrival note does not say weighing costs {stated}"
     );
+    // The other half of the same sentence: what weighing replaces.
+    let words = arrival_gigabytes_in_words();
     assert!(
-        README.contains("about\nthree megabytes against the hundred and ninety-seven gigabytes"),
-        "the README does not say what weighing costs in the same figure"
+        README.contains(&format!(
+            "about\nthree megabytes against the {words} gigabytes"
+        )),
+        "the README does not say the thirty-year download is {words} gigabytes, which is \
+         what this build's transfer format now encodes"
     );
     // The README priced joining twice, a page apart: this figure, and "twelve
     // megabytes for a thirty year chain, against 2 067 GB of reading" higher
@@ -1732,6 +1768,7 @@ fn spelled(value: u64) -> &'static str {
     match value {
         5 => "five",
         11 => "eleven",
+        15 => "fifteen",
         16 => "sixteen",
         24 => "twenty four",
         32 => "thirty two",
@@ -2100,5 +2137,29 @@ fn the_papers_price_a_flood_of_the_hot_set_from_the_constants() {
         paper.contains(&format!("about {} pebbles a place", grouped(rounded)))
             && paper.contains(&format!("one of the {tenth} rewards it earns a day")),
         "the paper's rejected price is not a block reward over the tier, {rounded}"
+    );
+
+    // A coinbase's outputs are places that pay no price, so a miner's own
+    // coinbase is a second, unpriced channel beside the one measured above:
+    // every output past the one that claims the reward.
+    let free = spelled((live.max_coinbase_outputs - 1) as u64);
+    assert!(
+        paper.contains(&format!("up to {free} extra outputs"))
+            && paper.contains(&format!("mining alone up to {free}")),
+        "the paper's limitations do not give the miner's free coinbase places, {free}"
+    );
+    assert!(
+        threats.contains(&format!(
+            "up to {free} extra outputs beyond the reward's own"
+        )) && threats.contains(&format!(
+            "bounds the free outputs at {free} but does not burn"
+        )),
+        "the threat model's miner row does not give the free coinbase places, {free}"
+    );
+    assert!(
+        threats.contains(&format!(
+            "exempt for up to {free} extra outputs a block, free"
+        )),
+        "the threat model's eviction-cap row does not give the miner's free channel, {free}"
     );
 }

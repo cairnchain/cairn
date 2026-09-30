@@ -816,6 +816,62 @@ fn the_preimage_tables_are_the_bytes_the_code_hashes() {
     );
 }
 
+/// **The transfer commitment sentence names every field an input carries.**
+///
+/// "Whole encoding as it travels" is exact: the code hashes
+/// `transfer.encode()`, and `spec_transactions_root` above hashes the same
+/// bytes and agrees with it. The list after the colon, written before #261
+/// added a key to every input, did not: "every input with its witness and
+/// signature, and the outputs" left the key out. A second implementer who
+/// built the preimage from that list rather than from the input's own table
+/// computed a different `transactions_root` for any block carrying a
+/// transfer.
+///
+/// Read the input's own field table rather than writing its fields out a
+/// second time here: a field added there and not carried into this sentence
+/// fails here too.
+#[test]
+fn the_transfer_commitment_sentence_names_every_field_an_input_carries() {
+    let fields = spec_rows_after(
+        "spending it. The key is 32 bytes, read as bytes, and decoded only to verify the",
+    );
+    let names: Vec<&str> = fields.iter().map(|(name, _, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["note_id", "witness", "key", "signature"],
+        "the input's own field table changed shape; this test's marker text may have \
+         moved with it"
+    );
+
+    // Joined across the source's line wrapping, so where the sentence breaks
+    // across lines does not decide whether this test can read it.
+    let sentence = SPECIFICATION
+        .split_once("a transfer's commitment is the hash under the transfer commitment domain of")
+        .expect("the transfer commitment sentence")
+        .1
+        .split_once("Not its identifier")
+        .expect("the sentence that follows it")
+        .0
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // note_id is not named on its own: it is what "every input" already
+    // carries. The other three are new since #261 added the key.
+    assert!(
+        sentence.contains("every input"),
+        "the transfer commitment sentence no longer names the inputs at all"
+    );
+    for word in ["witness", "key", "signature"] {
+        assert!(
+            sentence.contains(word),
+            "the transfer commitment sentence does not name the input's `{word}` field, \
+             so a second implementer building the preimage from the sentence alone \
+             leaves it out and computes another `transactions_root`"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 3. Proof of work.
 // ---------------------------------------------------------------------------
