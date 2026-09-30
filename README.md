@@ -32,11 +32,9 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-7` opens on the day this restart
-ships (the network table below carries a provisional first block, minted
-while the wave was developed; the coordinator mints the real one, with a
-fresh timestamp, on the day). Its money is worth nothing, is meant to be
-worth nothing, and the network will be reset.
+Pre-alpha, and running in public. `testnet-7` opened on 30 September 2026.
+Its money is worth nothing, is meant to be worth nothing, and the network
+will be reset.
 
 It is the seventh because a place in the hot set was free to a miner, a block
 did not commit to its signatures, an address showed its key, and two hash
@@ -139,7 +137,7 @@ paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
-| `testnet-7` | `00000009205b...` | 1788276770 | 60 s |
+| `testnet-7` | `0000000cd9f0...` | 1790800858 | 60 s |
 | `devnet` | `000000414235...` | 1788276770 | 5 s |
 | `mainnet` | not made yet | | |
 

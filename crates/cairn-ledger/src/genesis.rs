@@ -25,20 +25,13 @@ use crate::note::NetworkId;
 /// network started over for: a place in the hot set was free to a miner, a
 /// block did not commit to its signatures, and an address showed its key.
 ///
-/// Provisional. Minted the way `cargo run --release -p cairn-ledger
-/// --example mint_genesis -- testnet-7 "Cairn testnet-7. An address names a
-/// key without showing it."` mints one, on the code this unit lands with, so
-/// that the rest of the wave has a real first block to build tests and
-/// figures against. Timestamped 29 days before it was mined rather than at
-/// the moment of minting, the gap testnet-6's own genesis had against the
-/// date this was written, since a newcomer wall-clock test built against
-/// `NetworkId::TESTNET`'s real pinned genesis (`cairn-net/tests/
-/// pinned_network.rs`) needs room to mine forward without the chain running
-/// into the future the moment it starts. The restart procedure mints it
-/// again, on the code that actually merges, with the real time of minting,
-/// within hours of the merge, since the opening timestamp becomes `opens_at`
-/// and the retarget reads the gap to block 1.
-const TESTNET_7: &str = "01005a524143000000000000000000000000000000000000000000000000000000000000000000000000000000009fd0810f2dfd125eac261c2d8a11af1644baacdb3ad952372bc442f2bf4637700b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e222f0966a000000000000000800000000000000080000000000000000000000001830520b0000000001000000000000000000000000003b000000436169726e20746573746e65742d372e20416e2061646472657373206e616d65732061206b657920776974686f75742073686f77696e672069742e00000000";
+/// Minted on 30 September 2026 at 20:40:58 UTC, the evening testnet-7
+/// opened, with `cargo run --release -p cairn-ledger --example mint_genesis
+/// -- testnet-7 "Cairn testnet-7. An address names a key without showing
+/// it."` on the code the wave merged with. Its timestamp is `opens_at`, and
+/// the retarget reads the gap from it to block 1, so it was minted within
+/// hours of the merge.
+const TESTNET_7: &str = "01005a524143000000000000000000000000000000000000000000000000000000000000000000000000000000009fd0810f2dfd125eac261c2d8a11af1644baacdb3ad952372bc442f2bf4637700b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e2da73bd6a00000000000000080000000000000008000000000000000000000000370d05010000000001000000000000000000000000003b000000436169726e20746573746e65742d372e20416e2061646472657373206e616d65732061206b657920776974686f75742073686f77696e672069742e00000000";
 
 /// The first block of the throwaway network.
 ///
@@ -46,12 +39,15 @@ const TESTNET_7: &str = "01005a5241430000000000000000000000000000000000000000000
 /// alongside testnet-7 because devnet's marker moved too (`NetworkId::DEVNET`
 /// is no longer `NetworkId::DEVNET_1`), which changes every byte after it.
 ///
-/// Provisional, the same way and for the same reason as testnet-7's,
-/// timestamped the same 29 days back for the same reason
-/// (`cairn-net/tests/pinned_network.rs` mines forward from this exact
-/// block): minted the way `cargo run --release -p cairn-ledger --example
-/// mint_genesis -- devnet "Cairn devnet. Throwaway by design."` mints one, on
-/// the code this unit lands with.
+/// Minted with `cargo run --release -p cairn-ledger --example mint_genesis
+/// -- devnet "Cairn devnet. Throwaway by design."` on the code the wave
+/// merged with, and timestamped 29 days before it was mined, on purpose:
+/// `cairn-net/tests/pinned_network.rs` mines a long devnet chain forward from
+/// this exact block at the pace of a slow machine and holds every block of it
+/// behind the wall clock, which a first block dated the day it was minted
+/// leaves no room for. Nobody runs a devnet for longer than an afternoon, so
+/// its opening date is read by nothing but that test and the retarget, which
+/// takes one easy block for the gap and no more.
 const DEVNET: &str = "01004552414300000000000000000000000000000000000000000000000000000000000000000000000000000000dfe46a6f2e26f175ffa4d4a6b2522ca93a3fa73c7a1ef971637289623c5d03270b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e222f0966a0000000000008000000000000000800000000000000000000000000002a8510000000000010000000000000000000000000022000000436169726e206465766e65742e205468726f77617761792062792064657369676e2e00000000";
 
 fn encoded(network: NetworkId) -> Option<&'static str> {
@@ -126,9 +122,9 @@ mod tests {
         let first = block(NetworkId::TESTNET_7).unwrap();
         assert_eq!(
             cairn_primitives::hex::encode(first.id().as_bytes()),
-            "00000009205bf350cdc3b2512a8db8b526c5f8b7779c1e4f9cf661c9cf0b7514"
+            "0000000cd9f098b5467d2cfa0c70b3c2a874fde9d436e6fc92bc26002ddc15bb"
         );
-        assert_eq!(opens_at(NetworkId::TESTNET_7), 1_788_276_770);
+        assert_eq!(opens_at(NetworkId::TESTNET_7), 1_790_800_858);
     }
 
     #[test]
