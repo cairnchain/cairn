@@ -989,14 +989,54 @@ fn a_record_of_payments_that_does_not_read_back_is_said() {
     let _ = std::fs::remove_dir_all(&funded.directory);
 
     assert!(
-        said.is_some_and(|said| said.contains("pending.dat.unread")),
+        said.as_ref()
+            .is_some_and(|said| said.contains("pending.dat.unread")),
         "a record of payments that did not read back was passed over"
+    );
+    assert!(
+        said.is_some_and(|said| !said.contains("before an address")),
+        "a damaged record was said to be one from before the address"
     );
     assert_eq!(
         kept.as_deref(),
         Some(b"not a record".as_slice()),
         "and was not kept"
     );
+}
+
+/// A record of payments written before an address was the hash of a key is
+/// set aside and said to be that, as the account from before it is.
+///
+/// Such a record is whole and stamped, and every payment in it was made on a
+/// test network that has been retired, so none of them can arrive here. The
+/// account's own file from that time is named as such and the person told
+/// nothing is lost; this one was said to have not read back, the words a
+/// damaged record gets, with nothing to tell the two apart.
+#[test]
+fn a_record_of_payments_from_before_the_address_is_said_to_be_that() {
+    let (wallet, funded) = funded("unkept-old", 1, params());
+    wallet.shutdown();
+    drop(wallet);
+    let mut old = b"cairn pending v1".to_vec();
+    old.extend_from_slice(&[0; 8]);
+    let stamp = cairn_primitives::hash::hash(cairn_primitives::hash::Domain::WalletHistory, &old);
+    old.extend_from_slice(stamp.as_bytes());
+    std::fs::write(funded.data().join("pending.dat"), &old).unwrap();
+
+    let again = funded.open();
+    let said = again.payments_unkept();
+    again.shutdown();
+    drop(again);
+    let kept = std::fs::read(funded.data().join("pending.dat.unread")).ok();
+    let _ = std::fs::remove_dir_all(&funded.directory);
+
+    let said = said.expect("a record that did not read back was passed over");
+    assert!(
+        said.contains("before an address was the hash of a key")
+            && said.contains("pending.dat.unread"),
+        "a record of payments from before the address was not said to be one: {said}"
+    );
+    assert_eq!(kept, Some(old), "and was not kept");
 }
 
 /// Of two payments waiting, the one its node will not take back is let go of

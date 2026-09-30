@@ -44,8 +44,11 @@ pub(crate) const PENDING_FILE: &str = "pending.dat";
 /// The second form, since a payment's recipient became an address rather
 /// than a key. A record in the first form is about a network this build does
 /// not follow, and it is set aside unread like any record that does not read
-/// back.
+/// back, and named as what it is.
 const MAGIC: &[u8; 16] = b"cairn pending v2";
+
+/// The first form's magic, from before a payment's recipient was an address.
+const BEFORE_THE_ADDRESS: &[u8; 16] = b"cairn pending v1";
 
 /// Payments the record keeps.
 ///
@@ -287,6 +290,11 @@ impl Decode for Mark {
 pub enum NotReadBack {
     /// Moved out of the way under this name, where it can still be read.
     Moved(PathBuf),
+    /// The same, for a record written and stamped by a wallet from before a
+    /// note's owner was the hash of a key. Whole, and about a test network
+    /// that has been retired: none of the payments it lists can arrive on the
+    /// chain this build follows.
+    MovedFromBeforeTheAddress(PathBuf),
     /// Left where it was, because it would not move. Nothing is written over
     /// it: the payments this wallet hands over from now on are kept in memory
     /// only.
@@ -473,18 +481,25 @@ impl Pending {
             }
             Err(_) => return (Self::default(), Some(set_aside(path))),
         };
-        match Self::verified(&bytes) {
-            Some(pending) => (pending, None),
-            None => (Self::default(), Some(set_aside(path))),
+        if let Some(pending) = Self::verified(&bytes) {
+            return (pending, None);
+        }
+        // Told apart as `history.dat`'s is: a stamp that holds over the first
+        // form's magic is a record that is whole and about a retired network,
+        // which is news of its own and not the news a damaged one is.
+        let before_the_address =
+            stamped(&bytes).is_some_and(|body| body.starts_with(BEFORE_THE_ADDRESS));
+        match set_aside(path) {
+            NotReadBack::Moved(name) if before_the_address => (
+                Self::default(),
+                Some(NotReadBack::MovedFromBeforeTheAddress(name)),
+            ),
+            other => (Self::default(), Some(other)),
         }
     }
 
     fn verified(bytes: &[u8]) -> Option<Self> {
-        let (body, stamp) = bytes.split_at_checked(bytes.len().checked_sub(HASH_LEN)?)?;
-        if hash(Domain::WalletHistory, body).as_bytes() != stamp {
-            return None;
-        }
-        let rest = body.strip_prefix(MAGIC.as_slice())?;
+        let rest = stamped(bytes)?.strip_prefix(MAGIC.as_slice())?;
         Self::decode(rest).ok()
     }
 
@@ -560,6 +575,12 @@ impl Decode for Pending {
     }
 }
 
+/// The body of `bytes` when the stamp after it is the one written over it.
+fn stamped(bytes: &[u8]) -> Option<&[u8]> {
+    let (body, stamp) = bytes.split_at_checked(bytes.len().checked_sub(HASH_LEN)?)?;
+    (hash(Domain::WalletHistory, body).as_bytes() == stamp).then_some(body)
+}
+
 /// Moves a record that did not read back to a name of its own, the first of
 /// `pending.dat.unread`, `pending.dat.unread-1` and so on that is free.
 fn set_aside(path: &Path) -> NotReadBack {
@@ -626,8 +647,8 @@ mod tests {
         );
         assert_eq!(
             set_aside,
-            Some(NotReadBack::Moved(kept)),
-            "a record from before the address was not set aside by name"
+            Some(NotReadBack::MovedFromBeforeTheAddress(kept)),
+            "a record from before the address was not set aside, and named, as one"
         );
         assert!(
             moved,

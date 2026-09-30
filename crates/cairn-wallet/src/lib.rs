@@ -2407,6 +2407,14 @@ impl Wallet {
                  pay the same thing again until the chain shows whether it arrived.",
                 path.display()
             )),
+            Some(pending::NotReadBack::MovedFromBeforeTheAddress(path)) => Some(format!(
+                "This wallet's record of the payments it handed over was written by a version of \
+                 this wallet from before an address was the hash of a key, and every payment it \
+                 lists was made on a test network that has since been retired, so none of them \
+                 can arrive on this chain. It has been moved aside, to {}, and nothing will write \
+                 over it. Nothing is lost on this chain and the key file is not touched.",
+                path.display()
+            )),
             Some(pending::NotReadBack::Stuck) => Some(
                 "This wallet's record of the payments it handed over did not read back and could \
                  not be moved out of the way, so it is left as it is and nothing is written over \
