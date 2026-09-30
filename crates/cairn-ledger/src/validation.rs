@@ -986,10 +986,12 @@ impl Pending {
     /// here, as a signature that does not verify. Only whoever chose to be
     /// paid at the hash of bytes that are not a key can present one, and
     /// nobody can sign under it.
+    ///
+    /// The point is decoded once for both questions. Reading the key and then
+    /// verifying with it decoded it twice, since a `PublicKey` keeps the bytes
+    /// and decodes them again to verify.
     fn holds(&self) -> bool {
-        PublicKey::from_bytes(&self.key)
-            .and_then(|key| key.verify(self.message.as_bytes(), &self.signature))
-            .is_ok()
+        PublicKey::verify_bytes(&self.key, self.message.as_bytes(), &self.signature).is_ok()
     }
 }
 

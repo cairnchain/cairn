@@ -190,6 +190,68 @@ fn bytes_that_hash_to_the_owner_and_are_not_a_key_do_not_spend_the_note() {
     );
 }
 
+/// **Every key an input can present whose hash is the owner is judged as it
+/// was when the key was read apart from its verification: refused as a
+/// signature that does not verify unless it is a key that signed.**
+///
+/// The key's refusals and the signature's are asked in one decoding of the
+/// point since `PublicKey::verify_bytes`, where they took two. Each refusal
+/// the key can meet is here with the one verdict it gets, beside a key whose
+/// signature does not hold and one whose signature does, so a one-pass check
+/// that let a kind of key through, or refused a good one, fails. The
+/// torsion-carrying key, which needs curve arithmetic to build, is asked
+/// against the two-step answer in `cairn-crypto`.
+#[test]
+fn every_kind_of_key_an_owner_can_be_paid_at_is_judged_as_before() {
+    let params = params();
+    let mut state = LedgerState::new();
+    let signer = wallet(4);
+    let mut not_a_point = [0_u8; 32];
+    not_a_point[0] = 2;
+    let mut small_order = [0_u8; 32];
+    small_order[0] = 1;
+    let refused = Err(TransferError::InvalidSignature { input_index: 0 });
+    let cases = [
+        (
+            "not canonically encoded",
+            [0xFF_u8; 32],
+            &wallet(5),
+            refused.clone(),
+        ),
+        ("not a point", not_a_point, &wallet(5), refused.clone()),
+        ("of small order", small_order, &wallet(5), refused.clone()),
+        (
+            "signed by another key",
+            signer.public_key().to_bytes(),
+            &wallet(5),
+            refused,
+        ),
+        (
+            "signed by itself",
+            signer.public_key().to_bytes(),
+            &signer,
+            Ok(()),
+        ),
+    ];
+    let none = (BTreeSet::new(), BTreeMap::new());
+    for (kind, key, signing, verdict) in cases {
+        let paid = Note::new(params.initial_reward, Address::of_ed25519(&key));
+        let paying = mine(&mut state, &params, paid, Vec::new());
+        let id = NoteId::new(paying.coinbase.id(), 0);
+        let mut spend = Transfer::new(
+            vec![Input::hot(id)],
+            vec![Note::new(paid.value, wallet(2).public_key())],
+        );
+        spend.sign_input(params.network, 0, &paid, signing);
+        spend.inputs[0].key = key;
+        assert_eq!(
+            check_transfer(&spend, &state, &none.0, &none.1, &params).map(|_| ()),
+            verdict,
+            "a key {kind} was not judged as it was"
+        );
+    }
+}
+
 /// **An address is the hash of the scheme byte and the key, under the address
 /// domain, and nothing else.**
 ///
