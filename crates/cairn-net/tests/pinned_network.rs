@@ -4,7 +4,7 @@
 //! which pins nothing, so a newcomer there starts with no chain at all. The
 //! two real networks pin theirs, and a node on either lays that block down the
 //! moment it opens a directory. Its chain is then not empty, and everything
-//! that decides whether a node joins asked whether it was: so on testnet-6 and
+//! that decides whether a node joins asked whether it was: so on testnet-7 and
 //! on the devnet every newcomer read the whole chain block by block, and the
 //! handover ran only in tests.
 //!
@@ -153,7 +153,6 @@ fn asks_at_the_handshake(chain: &mut ChainStore) -> bool {
         version: PROTOCOL_VERSION,
         network,
         genesis: Hash32::ZERO,
-        tip: Hash32::from_bytes([1; 32]),
         height: JOIN_RATHER_THAN_READ + 40,
         total_work: chain.total_work().saturating_mul(1_000).max(1_000_000),
         listen: 0,

@@ -259,7 +259,6 @@ fn valid_messages() -> Vec<Vec<u8>> {
         version: PROTOCOL_VERSION,
         network: NetworkId::TESTNET,
         genesis: blocks[0].id(),
-        tip: tip.id(),
         height: 2,
         total_work: 3,
         keeps: Keeps {

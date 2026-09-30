@@ -117,47 +117,48 @@ pub const fn must_make_room(count: usize, taken: usize) -> bool {
 
 /// What one more note in the hot set adds to a transfer's weight, in bytes.
 ///
-/// A transfer is not priced by its bytes alone, because bytes are not the
+/// A transfer is not ranked by its bytes alone, because bytes are not the
 /// resource this design exists to protect. Every note a transfer creates
-/// beyond what it spends takes a place in the hot set, and on a busy chain the
-/// tier is full, so the place is taken from whoever holds the oldest note
-/// there: their money now needs a proof to spend. Priced by bytes, a transfer
-/// creating two hundred and fifty six notes churned the tier more than four
-/// times cheaper than the payments it displaced, because an output is forty
-/// bytes and a payment is nearly two hundred.
+/// beyond what it spends takes a place in the hot set, and a block may push
+/// only so many notes out of it, so a place spends a block's room as surely
+/// as a byte does. Ranked by bytes, a transfer creating two hundred and fifty
+/// six notes would win a contested block's places at a fifth of what the
+/// payments it displaced offered for theirs.
+///
+/// The place itself is paid for by the consensus place price, which is
+/// destroyed and so costs a miner what it costs anyone. This weight is the
+/// other half: what is left of a fee after that burn is what a miner keeps,
+/// and it is compared against bytes and places together.
 ///
 /// Five hundred and twelve is the measured cost of holding a hot note, rounded
 /// down to a power of two; `cairn-ledger/examples/footprint.rs` measures it.
-/// Charging a place what the place costs is a judgement rather than a theorem,
-/// but it buys the property that matters: pushing a note out of the tier costs
-/// about what an ordinary payment costs, however the pusher shapes the
-/// transfer. `cairn-ledger/examples/blocksize.rs` works the ratio out from
-/// measured sizes.
 pub const NOTE_WEIGHT: usize = 512;
 
-/// The least a transfer pays per unit of weight, in pebbles.
+/// The least a transfer pays per byte, in pebbles, beside the burn of its
+/// places.
 ///
 /// Zero used to be accepted, and on a quiet chain zero was also mined, since a
-/// block with room takes what is offered. That made churning the hot set free
-/// exactly when notes stay hot the longest and the churn does the most
-/// relative harm. The floor's job is to exist, not to deter on its own: no
-/// fixed number can, because nobody knows what a pebble will buy. Deterrence
-/// comes from the weight above when blocks are contested, and from the
-/// eviction cap in the consensus rules always.
+/// block with room takes what is offered. The floor's job is to exist, not to
+/// deter on its own: no fixed number can, because nobody knows what a pebble
+/// will buy. What prices a place is the consensus place price, which every
+/// transfer pays whoever mines it; this is what carrying the bytes costs on
+/// top.
 ///
-/// Ten is a judgement: an ordinary payment weighs about seven hundred, so it
-/// pays a few thousand pebbles, dust against anything worth a block's room,
-/// while pushing the whole tier out costs whole CAIRN even on an empty chain.
-/// This is local policy, not consensus: a block carrying cheaper transfers is
-/// still valid, this node just will not pool or build one.
+/// Ten is a judgement: an ordinary payment is about two hundred bytes, so its
+/// bytes cost two thousand pebbles, dust against anything worth a block's
+/// room. It is also the rate the place price is measured at: a place costs
+/// what the extra bytes of a cold witness cost at this rate, so the two are
+/// changed together or not at all. This is local policy, not consensus: a
+/// block carrying cheaper transfers is still valid, this node just will not
+/// pool or build one.
 pub const MIN_FEE_PER_WEIGHT: u64 = 10;
 
 /// Fixed point scale for fee against weight, so the pool can order transfers
 /// without dividing pebbles away.
 const RATE_SCALE: u128 = 1 << 16;
 
-/// What carrying a transfer takes from the network: its bytes, plus a charge
-/// for every place it takes in the hot set.
+/// The places a transfer takes in the hot set: its outputs less the notes it
+/// spends out of the hot set, or none when it gives room back.
 ///
 /// `freed` is how many of the spent notes were actually in the hot set, so
 /// only those are credited with giving a place back. Counting inputs instead
@@ -166,40 +167,57 @@ const RATE_SCALE: u128 = 1 << 16;
 /// witness, a hundred bytes and no proof, and it frees nothing, because it
 /// left the tier already. A transfer re-spending a handful of those and
 /// paying them straight back to itself was charged for no places at all while
-/// pushing that many notes out, which churned the tier at about a fifth of an
-/// ordinary payment's price: the discount this weight exists to close, back
-/// through the one door left open. A cold input carries its proof, so its
-/// bytes already cover the place it does not free.
+/// pushing that many notes out. The consensus rules count the same way, so a
+/// place the pool charges for is a place the burn charges for.
 ///
-/// This makes the weight depend on the state, which the earlier note here
-/// gave as the reason not to do it: a price that moves under the wallet
-/// quoting it cannot be paid on purpose. It moves by one place, five thousand
-/// one hundred and twenty pebbles, and only for a note that falls between the
-/// quote and the node reading it. A wallet already asks for the number and is
-/// told the number when it is short, which is the answer to a price that
-/// moves, and being unable to state the price of the one shape worth gaming
-/// is not.
+/// This makes the price depend on the state, which an earlier note here gave
+/// as the reason not to do it: a price that moves under the wallet quoting it
+/// cannot be paid on purpose. It moves by one place price, and only for a
+/// note that falls between the quote and the block. A wallet quotes a place
+/// over the floor for each note that can fall, and is told the number when it
+/// is short, which is the answer to a price that moves.
 ///
-/// A transfer that spends more hot notes than it creates weighs its bytes and
-/// nothing more: consolidation gives the tier room back, and this is where
-/// that is worth something.
+/// Counted by the ledger's [`cairn_ledger::validation::places_taken`], which
+/// is the count the block burns for, so the two cannot drift apart.
+#[must_use]
+pub fn places_taken(transfer: &Transfer, freed: usize) -> usize {
+    cairn_ledger::validation::places_taken(transfer.outputs.len(), freed)
+}
+
+/// What carrying a transfer takes from a block: its bytes, plus a share of
+/// the block's eviction room for every place it takes in the hot set.
+///
+/// What a transfer is ranked by, against what is left of its fee once its
+/// places are paid for. A transfer that spends more hot notes than it creates
+/// weighs its bytes and nothing more: consolidation gives the tier room back,
+/// and this is where that is worth something.
 #[must_use]
 pub fn transfer_weight(transfer: &Transfer, bytes: usize, freed: usize) -> usize {
-    let places = transfer.outputs.len().saturating_sub(freed);
-    bytes.saturating_add(places.saturating_mul(NOTE_WEIGHT))
+    bytes.saturating_add(places_taken(transfer, freed).saturating_mul(NOTE_WEIGHT))
 }
 
-/// The least a transfer of this weight pays to be pooled at all.
+/// The least a transfer of `bytes` taking `places` pays to be pooled at all:
+/// ten pebbles a byte, plus the burn its places owe under `rules`.
+///
+/// The burn half is not the pool's to set. A transfer paying less than it is
+/// refused by every block, so a pool holding one holds something no miner can
+/// carry.
 #[must_use]
-pub fn fee_floor(weight: usize) -> Amount {
-    let pebbles = u64::try_from(weight)
+pub fn fee_floor(bytes: usize, places: usize, rules: &ConsensusParams) -> Amount {
+    let for_bytes = u64::try_from(bytes)
         .unwrap_or(u64::MAX)
         .saturating_mul(MIN_FEE_PER_WEIGHT);
-    Amount::from_pebbles(pebbles).unwrap_or(Amount::MAX_MONEY)
+    let burn = rules.burn_for(places).unwrap_or(Amount::MAX_MONEY);
+    Amount::from_pebbles(for_bytes.saturating_add(burn.as_pebbles())).unwrap_or(Amount::MAX_MONEY)
 }
 
-/// What a transfer pays for each unit of what it takes, as a fixed point
-/// number every node computes identically.
+/// What a transfer leaves its miner for each unit of what it takes, as a
+/// fixed point number every node computes identically.
+///
+/// `kept` is the fee less the burn of the transfer's places, which is what a
+/// miner may claim for carrying it. Ranking by the whole fee would put a
+/// transfer paying mostly for places, which the miner cannot claim, ahead of
+/// one paying the miner more.
 ///
 /// Three fallbacks in four lines and none of them can be taken, which is
 /// worth saying because they do not all mean the same thing if they ever are.
@@ -216,21 +234,22 @@ pub fn fee_floor(weight: usize) -> Amount {
 /// rather than decoration, and why removing it as unreachable would be the
 /// wrong reading. The other two are the shapes clippy requires in place of a
 /// bare cast and a bare division.
-fn rate(fee: Amount, weight: usize) -> u128 {
+fn rate(kept: Amount, weight: usize) -> u128 {
     let weight = u128::try_from(weight.max(1)).unwrap_or(1);
-    u128::from(fee.as_pebbles())
+    u128::from(kept.as_pebbles())
         .saturating_mul(RATE_SCALE)
         .checked_div(weight)
         .unwrap_or(0)
 }
 
-/// The least fee that ranks a transfer of `weight` above one paying `rate`.
+/// The least a transfer of `weight` leaves its miner to rank above one
+/// paying `rate`.
 ///
 /// For a wallet quoting into a full pool, which makes room only for a better
 /// rate than the cheapest it holds: a quote at the floor into a pool kept full
-/// at the floor is refused, and what it takes to be taken is this. [`rate`]
-/// rounds down, so the answer is the smallest fee whose rate, rounded down,
-/// is past `rate`.
+/// at the floor is refused, and what it takes to be taken is this, on top of
+/// the burn of its places. [`rate`] rounds down, so the answer is the smallest
+/// amount whose rate, rounded down, is past `rate`.
 #[must_use]
 pub fn fee_to_outrank(rate: u128, weight: usize) -> Amount {
     let weight = u128::try_from(weight.max(1)).unwrap_or(1);
@@ -251,6 +270,8 @@ pub fn fee_to_outrank(rate: u128, weight: usize) -> Amount {
 struct Pooled {
     transfer: Transfer,
     fee: Amount,
+    /// The part of the fee its places destroy, worked out again with the fee.
+    burn: Amount,
     /// The wire form, which is what the fee is measured against.
     bytes: usize,
     /// What holding it costs, which is what `MAX_POOL_BYTES` bounds.
@@ -263,8 +284,8 @@ struct Pooled {
     /// the rules, and bounding memory by the smaller one is a bound on the
     /// wrong thing.
     cost: usize,
-    /// Bytes plus the hot set places taken, which is what the fee is measured
-    /// against.
+    /// Bytes plus the hot set places taken, which is what the part of the fee
+    /// a miner keeps is measured against.
     ///
     /// This used to say it was fixed by the transfer's shape and never worked
     /// out again, which is what [`transfer_weight`] says it is not: a note
@@ -278,6 +299,19 @@ struct Pooled {
     /// grace window, and picked ahead of payments that really did pay more
     /// for what they took.
     weight: usize,
+}
+
+impl Pooled {
+    /// What a miner carrying it may claim: the fee less the burn.
+    fn kept(&self) -> Amount {
+        kept(self.fee, self.burn)
+    }
+}
+
+/// A fee less its burn, which is never negative for a transfer the rules
+/// accept: a fee below its burn is refused as `PlacesUnpaid`.
+fn kept(fee: Amount, burn: Amount) -> Amount {
+    fee.checked_sub(burn).unwrap_or(Amount::ZERO)
 }
 
 /// How far back the followed branch can be undone.
@@ -492,17 +526,30 @@ pub struct Outdated {
 impl ChainError {
     /// Whether this failure condemns the header itself.
     ///
-    /// A block's identifier is taken over its header, and a header does not
-    /// commit to the signatures that make its body valid. Two different blocks
-    /// can therefore share an identifier, so only a failure the header alone
+    /// A block's identifier is taken over its header, and anybody can send a
+    /// real header with a body that is not its own. Two different blocks can
+    /// therefore share an identifier, so only a failure the header alone
     /// settles may be remembered against one: a timestamp out of range, a
     /// parent that is not there, work that was not done.
     ///
-    /// Anything the body decides (a signature, a root that does not match, a
-    /// coinbase that overpays) says nothing about another body carrying the
-    /// same identifier. Remembering that would let anyone lock the real block
-    /// out of a node by sending a corrupted twin first, at the cost of copying
-    /// it: the twin inherits the real block's work, so it is free.
+    /// A root that does not match is a verdict on a twin: the door asks it
+    /// of every body before anything else looks at one, and it says nothing
+    /// about the real body under the same identifier. Remembering it would
+    /// let anyone lock the real block out of a node by sending a corrupted
+    /// twin first, at the cost of copying it: the twin inherits the real
+    /// block's work, so it is free.
+    ///
+    /// Every other verdict on a body is reached only by a body whose root
+    /// matches its header, and the root covers every byte of the body, so
+    /// barring a collision of the hash it is the one body that header names.
+    /// Those that depend on nothing but the parent state and the body (a
+    /// signature, a key that is not the owner's, places left unpaid, a
+    /// coinbase that overpays, a state root that does not match) could be
+    /// remembered against the identifier for that reason. They are not, and
+    /// a mined block that fails one is validated again whenever a peer
+    /// offers it, which is what declining to remember costs. A verdict that
+    /// depends on the reader must never be: a proof this node no longer
+    /// holds (`MissingProof`), and the two below.
     ///
     /// Listed rather than excluded, so a failure added later is not condemned
     /// by default. Refusing to remember costs one validation. Remembering
@@ -1138,8 +1185,8 @@ impl ChainStore {
     /// keep their proofs current.
     ///
     /// Set before any block is applied, since what is learned is learned as
-    /// the notes fall.
-    pub fn watch_owner(&mut self, owner: cairn_crypto::PublicKey) {
+    /// the notes fall. An owner is an address; a key stands for its own.
+    pub fn watch_owner(&mut self, owner: impl Into<cairn_ledger::note::Address>) {
         self.state.watch_owner(owner);
     }
 
@@ -1495,7 +1542,7 @@ impl ChainStore {
     pub fn pooled_rates(&self) -> impl Iterator<Item = (&Hash32, u128)> {
         self.pool
             .iter()
-            .map(|(id, held)| (id, rate(held.fee, held.weight)))
+            .map(|(id, held)| (id, rate(held.kept(), held.weight)))
     }
 
     /// Transfers the last rewind offered back to the pool.
@@ -1526,7 +1573,7 @@ impl ChainStore {
             return;
         };
         self.pool_by_rate
-            .remove(&(rate(held.fee, held.weight), *id));
+            .remove(&(rate(held.kept(), held.weight), *id));
         for input in &held.transfer.inputs {
             // Only if it is still this transfer's place. A replacement is put
             // in before the transfer it displaces is taken out nowhere, but
@@ -1542,8 +1589,8 @@ impl ChainStore {
     ///
     /// A transfer is checked against the state as it stands, so a node never
     /// holds one it already knows cannot be included. It pays at least the
-    /// floor for its weight, or it is refused with the floor named, so the
-    /// refusal reaches whoever set the fee.
+    /// floor for its bytes and places, or it is refused with the floor named,
+    /// so the refusal reaches whoever set the fee.
     ///
     /// A transfer spending a note another pooled transfer already spends can
     /// replace it, by paying for everything it displaces and then the floor
@@ -1610,15 +1657,31 @@ impl ChainStore {
         // ceiling.
         let cost = pooled_cost(bytes, transfer.inputs.len());
 
-        let weight = transfer_weight(&transfer, bytes, outcome.spent_hot.len());
-        let floor = fee_floor(weight);
+        let freed = outcome.spent_hot.len();
+        let places = places_taken(&transfer, freed);
+
+        // The same blockade in places rather than bytes. A full tier leaves a
+        // block its eviction cap less the coinbase for transfers, sixteen on
+        // devnet, and a transfer may make two hundred and fifty six notes:
+        // one taking more was taken, ranked on the fee it promised, and never
+        // carried or paid while the tier stayed full.
+        let most = self.places_for_transfers();
+        if places > most {
+            return Err(TransferError::TooManyPlacesForABlock {
+                places,
+                limit: most,
+            });
+        }
+
+        let weight = transfer_weight(&transfer, bytes, freed);
+        let floor = fee_floor(bytes, places, &self.params);
         if outcome.fee < floor {
             return Err(TransferError::FeeBelowFloor {
                 fee: outcome.fee,
                 floor,
             });
         }
-        let offered = rate(outcome.fee, weight);
+        let offered = rate(kept(outcome.fee, outcome.burn), weight);
         let (conflicts, conflict_bytes) =
             self.displaced_by(&transfer, outcome.fee, offered, floor)?;
 
@@ -1674,6 +1737,7 @@ impl ChainStore {
             Pooled {
                 transfer,
                 fee: outcome.fee,
+                burn: outcome.burn,
                 bytes,
                 cost,
                 weight,
@@ -1723,7 +1787,26 @@ impl ChainStore {
         max_block_bytes.saturating_sub(Self::BLOCK_OVERHEAD_BYTES)
     }
 
-    /// Transfers a miner can put in the next block, and the fees they carry.
+    /// How many notes the next block may add to the hot set for its
+    /// transfers before it would push out more than the rules let one block
+    /// push.
+    ///
+    /// Room the tier itself still has counts, and the coinbase is allowed for
+    /// as if it were full, because it is not known yet. What `selection`
+    /// packs to, and what `accept_transfer` and `prune_pool` hold a transfer
+    /// to, so the pool keeps nothing the node's own miner could never pick.
+    #[must_use]
+    pub fn places_for_transfers(&self) -> usize {
+        self.params
+            .hot_capacity
+            .saturating_sub(self.state.hot_len())
+            .saturating_add(self.params.max_evictions_per_block)
+            .saturating_sub(self.params.max_coinbase_outputs)
+    }
+
+    /// Transfers a miner can put in the next block, and what of their fees
+    /// its coinbase may claim: what they gave up, less what their places
+    /// burn.
     ///
     /// Walked from the best rate down, and within the same rate in identifier
     /// order, so two nodes holding the same pool build the same block. Order
@@ -1754,16 +1837,7 @@ impl ChainStore {
         // What is left for transfers once the rest of the block is allowed for.
         let mut room = Self::room_for_transfers(self.params.max_block_bytes);
 
-        // How many notes the block may still add to the hot set before it
-        // would push out more than the rules let one block push. Room the tier
-        // itself still has counts, and the coinbase is allowed for as if it
-        // were full, because it is not known yet.
-        let mut places = self
-            .params
-            .hot_capacity
-            .saturating_sub(self.state.hot_len())
-            .saturating_add(self.params.max_evictions_per_block)
-            .saturating_sub(self.params.max_coinbase_outputs);
+        let mut places = self.places_for_transfers();
 
         for transfer in ordered {
             if chosen.len() >= limit {
@@ -1816,7 +1890,9 @@ impl ChainStore {
             } else {
                 places = places.saturating_add(freed.saturating_sub(created));
             }
-            let Some(total) = fees.checked_add(outcome.fee) else {
+            // Less the burn, which the coinbase may not claim: a miner adding
+            // the whole fee to its reward builds a block every node refuses.
+            let Some(total) = fees.checked_add(kept(outcome.fee, outcome.burn)) else {
                 continue;
             };
             fees = total;
@@ -1868,7 +1944,7 @@ impl ChainStore {
                 continue;
             };
             displaced = displaced.saturating_add(u128::from(held.fee.as_pebbles()));
-            best = best.max(rate(held.fee, held.weight));
+            best = best.max(rate(held.kept(), held.weight));
             bytes = bytes.saturating_add(held.cost);
         }
         let asked = displaced.saturating_add(u128::from(floor.as_pebbles()));
@@ -1903,8 +1979,9 @@ impl ChainStore {
     /// nothing here assumes which.
     fn prune_pool(&mut self) {
         let params = self.params;
+        let most = self.places_for_transfers();
         let state = &self.state;
-        let mut kept: BTreeSet<(u128, Hash32)> = BTreeSet::new();
+        let mut ranked: BTreeSet<(u128, Hash32)> = BTreeSet::new();
         let mut spenders: BTreeMap<NoteId, Hash32> = BTreeMap::new();
         let mut bytes = 0usize;
         self.pool.retain(|id, held| {
@@ -1930,21 +2007,29 @@ impl ChainStore {
                 // [`transfer_weight`] sets out and the note here used to deny.
                 // Only the bytes are settled by the transfer itself.
                 Ok(outcome) => {
-                    let weight =
-                        transfer_weight(&held.transfer, held.bytes, outcome.spent_hot.len());
+                    let freed = outcome.spent_hot.len();
+                    let weight = transfer_weight(&held.transfer, held.bytes, freed);
                     // And the floor is asked again, because the floor is asked
-                    // of a weight and the weight is not the one it was asked of
-                    // before. A transfer that arrived now would be refused;
-                    // one that came back through `repool` after a
-                    // reorganisation is refused, by `accept_transfer`, on these
-                    // same numbers. Merely having waited was the one way past
-                    // it, and waiting is what a note falling takes.
-                    if outcome.fee < fee_floor(weight) {
+                    // of the places taken and those are not the ones it was
+                    // asked of before. A transfer that arrived now would be
+                    // refused; one that came back through `repool` after a
+                    // reorganisation is refused, by `accept_transfer`, on
+                    // these same numbers. Merely having waited was the one way
+                    // past it, and waiting is what a note falling takes.
+                    let places = places_taken(&held.transfer, freed);
+                    if outcome.fee < fee_floor(held.bytes, places, &params) {
+                        return false;
+                    }
+                    // And the places against what a block has for them, for
+                    // the same reason: a note that fell gives no place back,
+                    // so a transfer taken at the limit is past it now.
+                    if places > most {
                         return false;
                     }
                     held.fee = outcome.fee;
+                    held.burn = outcome.burn;
                     held.weight = weight;
-                    kept.insert((rate(outcome.fee, weight), *id));
+                    ranked.insert((rate(kept(outcome.fee, outcome.burn), weight), *id));
                     for input in &held.transfer.inputs {
                         spenders.insert(input.note_id, *id);
                     }
@@ -1954,7 +2039,7 @@ impl ChainStore {
                 Err(_) => false,
             }
         });
-        self.pool_by_rate = kept;
+        self.pool_by_rate = ranked;
         self.pool_spenders = spenders;
         self.pool_bytes = bytes;
     }
@@ -2136,13 +2221,12 @@ impl ChainStore {
         // Already held and on the branch this node follows: it was applied, so
         // it was valid, and whatever body arrives under that identifier this
         // node is already following the one it checked. An identifier is taken
-        // over a header and a header does not commit to the signatures in its
-        // body, so anyone can copy a block, break one signature, and send the
-        // twin; it costs them nothing, since the twin inherits the work of the
-        // block it copies. Asking the branch first is what stops the copy
-        // taking the place of a block already on it: the twin used to fall
-        // through, pass the work and floor checks, and have `hold` write its
-        // body over the real one, after which `block_at` answered with the
+        // over a header alone, so anyone can copy a block, change its body,
+        // and send the twin; it costs them nothing, since the twin inherits the
+        // work of the block it copies. Asking the branch first is what stops
+        // the copy taking the place of a block already on it: the twin used to
+        // fall through, pass the work and floor checks, and have `hold` write
+        // its body over the real one, after which `block_at` answered with the
         // forgery for a height the node was still following. That accessor is
         // what a node serves blocks from and writes its log from.
         //
@@ -2318,12 +2402,16 @@ impl ChainStore {
         // peer that delivered the block above it was the one blamed.
         //
         // Whether a body is the one its header names needs no ledger: it is
-        // the root over the coinbase and every transfer. Asked here, a copy
-        // with any other coinbase, transfers or order is refused on arrival
-        // and charged to whoever sent it. A copy that changes only signatures
-        // or proofs, which a transfer's identifier leaves out, still passes,
-        // and what answers that is `cairn-net` refusing the sender of a body
-        // that fails a switch.
+        // the root over the coinbase and the commitment to every transfer,
+        // which covers every byte of the body. Asked here, a copy with any
+        // other coinbase, transfers, order, signatures or proofs is refused on
+        // arrival and charged to whoever sent it. A copy that changed only
+        // signatures or proofs used to pass, since the root was taken over
+        // transfer identifiers and those leave both out, and some such copies
+        // were valid: inside the grace window a note can be spent with or
+        // without its proof. A body held aside that fails a switch is now a
+        // mined block that is invalid, and `cairn-net` refuses whoever handed
+        // it in.
         let root = block.transactions_root();
         if root != block.header.transactions_root {
             return Err(ChainError::InvalidBlock {
@@ -2667,7 +2755,7 @@ impl ChainStore {
                     .pool_bytes
                     .saturating_add(pooled_cost(bytes, transfer.inputs.len()));
                 if must_make_room(self.pool.len(), taken) {
-                    let offered = rate(outcome.fee, weight);
+                    let offered = rate(kept(outcome.fee, outcome.burn), weight);
                     let cheapest = self.pool_by_rate.iter().next().map(|(at, _)| *at);
                     if cheapest.is_some_and(|least| offered <= least) {
                         continue;

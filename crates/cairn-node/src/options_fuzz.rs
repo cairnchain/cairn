@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use cairn_crypto::SecretKey;
 use cairn_fuzz::{mutate, Campaign, Rng};
 
-use super::{parse_config, parse_key, parse_size, KNOWN, ONLY_ON_THE_COMMAND_LINE};
+use super::{parse_config, parse_mining_address, parse_size, KNOWN, ONLY_ON_THE_COMMAND_LINE};
 
 /// Settings a file may carry.
 fn settable() -> Vec<&'static str> {
@@ -334,34 +334,52 @@ fn the_node_and_the_explorer_read_a_size_with_one_function() {
     );
 }
 
-/// A key the node is told to mine to is read exactly as the wallet reads an
-/// address, for any text at all.
+/// An address the node is told to mine to is read exactly as the wallet reads
+/// one, for any text at all.
 ///
-/// A person copies the address a wallet shows into `--mine`, and a key the
-/// node accepted that the wallet would not show, or the other way round, is a
-/// reward paid somewhere nobody can spend. The wallet trims what it is handed,
-/// because an address arrives pasted, and the node reads what the command line
-/// or the file already trimmed; beyond that they must agree. Nothing held the
-/// two readings together.
+/// A person copies the address a wallet shows into `--mine`, and an address
+/// the node accepted that the wallet would not show, or the other way round,
+/// is a reward paid somewhere nobody can spend. The wallet trims what it is
+/// handed, because an address arrives pasted, and the node reads what the
+/// command line or the file already trimmed; beyond that they must agree.
+/// Nothing held the two readings together.
+///
+/// Where they differ on purpose is a public key in the old form: the node
+/// converts one to its address, for the release that changed the form, and
+/// the wallet refuses to pay to one. So a string the node read as a key is
+/// left out of the comparison, and everything else it read is held to the
+/// wallet's reading.
 #[test]
-fn a_key_the_node_mines_to_is_an_address_the_wallet_reads() {
-    let campaign = Campaign::named("node: keys");
+fn an_address_the_node_mines_to_is_an_address_the_wallet_reads() {
+    let campaign = Campaign::named("node: addresses");
     let seed = campaign.seed();
-    let keys: Vec<String> = (1..=4u8)
+    let network = cairn_ledger::note::NetworkId::TESTNET;
+    let addresses: Vec<String> = (1..=4u8)
         .map(|n| {
-            cairn_primitives::hex::encode(SecretKey::from_bytes(&[n; 32]).public_key().as_bytes())
+            cairn_ledger::note::Address::from(SecretKey::from_bytes(&[n; 32]).public_key())
+                .to_text(network)
         })
         .collect();
     let mut agreed_yes = 0usize;
     let ran = campaign.run(4_000, |case, rng| {
         let text = match rng.below(5) {
-            0 => rng.pick(&keys).cloned().unwrap_or_default(),
-            1 => rng.pick(&keys).cloned().unwrap_or_default().to_uppercase(),
-            2 => cairn_primitives::hex::encode(&rng.array::<32>()),
+            0 => rng.pick(&addresses).cloned().unwrap_or_default(),
+            1 => rng
+                .pick(&addresses)
+                .cloned()
+                .unwrap_or_default()
+                .to_uppercase(),
+            2 => cairn_primitives::bech32m::encode("tcairn", &rng.array::<32>()),
             3 => {
-                let from = rng.pick(&keys).cloned().unwrap_or_default().into_bytes();
-                let corpus: Vec<Vec<u8>> =
-                    keys.iter().map(|key| key.clone().into_bytes()).collect();
+                let from = rng
+                    .pick(&addresses)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_bytes();
+                let corpus: Vec<Vec<u8>> = addresses
+                    .iter()
+                    .map(|address| address.clone().into_bytes())
+                    .collect();
                 String::from_utf8_lossy(&mutate(rng, &from, &corpus)).into_owned()
             }
             _ => {
@@ -373,8 +391,11 @@ fn a_key_the_node_mines_to_is_an_address_the_wallet_reads() {
             }
         };
         let text = text.trim();
-        let node = parse_key(text).ok();
-        let wallet = cairn_wallet::parse_address(text).ok();
+        let node = parse_mining_address(text, network)
+            .ok()
+            .filter(|to| !to.was_a_key)
+            .map(|to| to.address);
+        let wallet = cairn_wallet::parse_address(text, network).ok();
         assert_eq!(
             node, wallet,
             "case {case} of seed {seed:#x}: the node and the wallet read `{text}` differently"
@@ -382,5 +403,8 @@ fn a_key_the_node_mines_to_is_an_address_the_wallet_reads() {
         agreed_yes += usize::from(node.is_some());
     });
     assert!(ran.cases >= 1_000, "the campaign ran {} cases", ran.cases);
-    assert!(agreed_yes > 0, "no text was ever read as a key by either");
+    assert!(
+        agreed_yes > 0,
+        "no text was ever read as an address by either"
+    );
 }

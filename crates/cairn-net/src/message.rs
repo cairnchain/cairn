@@ -43,7 +43,7 @@ use cairn_primitives::Hash32;
 ///
 /// The network number does not move with it, and the difference is worth
 /// stating. A network starts over when a rule makes blocks already mined
-/// invalid. This one does not: every block of testnet-6 is as valid under these
+/// invalid. This one does not: every block of testnet-7 is as valid under these
 /// rules as it was under the last, the chain a node follows is the same chain,
 /// and what changed is one exchange between two nodes. That is what a protocol
 /// version is for, and reaching for a network number here would throw away a
@@ -61,7 +61,18 @@ use cairn_primitives::Hash32;
 /// same network number and dated after the opening, was weighed on its work
 /// alone. The field changes the weighing's encoding, so a node on eight could
 /// not read a weighing from nine, and would take it for a peer that is broken.
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// Ten comes with testnet-7. A note's owner is the hash of a key and an input
+/// carries the key it spends with, so a note, a transfer and a block of ten
+/// do not decode as nine's, nor the other way round; a block's transaction
+/// root is taken over each transfer's whole encoding, so a node on nine
+/// refuses every block of ten that carries a transfer; the draw hashes under a
+/// domain of its own, so the two ask a chain different questions; and the
+/// handshake no longer carries the tip nothing read, so neither can read the
+/// rest of the other's introduction. Each reads the version that opens it,
+/// which is why an introduction's version is compared before anything after
+/// it is decoded: see [`Message::from_frame`].
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Identifiers one announcement may carry.
 pub const MAX_ANNOUNCED: usize = 512;
@@ -184,6 +195,9 @@ fn claimed(reader: &mut Reader<'_>) -> Result<bool, CodecError> {
 }
 
 /// What a node tells a peer about itself when the connection opens.
+///
+/// The version comes first, and of an introduction from another version it
+/// is the only field read: see [`Message::from_frame`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handshake {
     pub version: u32,
@@ -191,11 +205,9 @@ pub struct Handshake {
     /// The first block of the branch this node follows. Two nodes that
     /// disagree here are on unrelated chains and have nothing to exchange.
     pub genesis: Hash32,
-    /// The tip the sender follows. Sent, and read by nothing: a node judges a
-    /// peer's chain by what it serves, not by what it says here. Kept rather
-    /// than dropped because removing a field is a change to the handshake,
-    /// which waits for the next `PROTOCOL_VERSION`.
-    pub tip: Hash32,
+    /// The height of the tip the sender follows. The tip's identifier used to
+    /// travel beside it and nothing read it, since a node judges a peer's chain
+    /// by what it serves and not by what it says here.
     pub height: u64,
     /// Work behind the tip, which is what decides who is behind whom.
     pub total_work: u128,
@@ -224,7 +236,6 @@ impl Encode for Handshake {
         self.version.encode_to(out);
         self.network.encode_to(out);
         self.genesis.encode_to(out);
-        self.tip.encode_to(out);
         self.height.encode_to(out);
         self.total_work.encode_to(out);
         self.listen.encode_to(out);
@@ -239,7 +250,6 @@ impl Decode for Handshake {
             version: u32::decode_from(reader)?,
             network: NetworkId::decode_from(reader)?,
             genesis: Hash32::decode_from(reader)?,
-            tip: Hash32::decode_from(reader)?,
             height: u64::decode_from(reader)?,
             total_work: u128::decode_from(reader)?,
             listen: u16::decode_from(reader)?,
@@ -559,6 +569,52 @@ impl Message {
             | Self::GetHeaders { .. } => 0,
         };
         carried.saturating_add(OVERHEAD)
+    }
+
+    /// Reads the body of one frame, an introduction's version before the rest
+    /// of it.
+    ///
+    /// A handshake's version is its first field, and what follows it is laid
+    /// out as the sender's version lays it out. Nine carried the tip's
+    /// identifier that ten dropped, so either read the other's introduction
+    /// 32 bytes short or long, and a frame that cannot be read is a peer that
+    /// is broken or probing, whose host is refused. That is the one refusal a
+    /// node on another version must not meet, so the version is compared
+    /// first, and an introduction from any other is read no further: it comes
+    /// back as a handshake naming that version and nothing else, which is
+    /// refused on its version alone.
+    ///
+    /// Anything else, this version's introductions included, is read whole by
+    /// [`Decode::decode`].
+    ///
+    /// # Errors
+    ///
+    /// When the body is not a message this version reads, or an introduction
+    /// too short to name its version.
+    pub fn from_frame(body: &[u8]) -> Result<Self, CodecError> {
+        let mut reader = Reader::new(body);
+        let tag = u8::decode_from(&mut reader)?;
+        if tag <= 1 {
+            let version = u32::decode_from(&mut reader)?;
+            if version != PROTOCOL_VERSION {
+                let named = Handshake {
+                    version,
+                    network: NetworkId::new(0),
+                    genesis: Hash32::ZERO,
+                    height: 0,
+                    total_work: 0,
+                    listen: 0,
+                    nonce: 0,
+                    keeps: Keeps::default(),
+                };
+                return Ok(if tag == 0 {
+                    Self::Hello(named)
+                } else {
+                    Self::Welcome(named)
+                });
+            }
+        }
+        Self::decode(body)
     }
 
     const fn tag(&self) -> u8 {

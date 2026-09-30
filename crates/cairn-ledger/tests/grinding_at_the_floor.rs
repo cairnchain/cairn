@@ -17,7 +17,7 @@
 //! deepest question lands, so that the pinned header is cheap too, is refused
 //! all the same; an honest chain that lost sixteen times its hash rate is still
 //! weighed, and one that lost forty eight is not until its run has passed the
-//! loss. What the rule is worth in hashes, on testnet-6 and the devnet, is
+//! loss. What the rule is worth in hashes, on testnet-7 and the devnet, is
 //! measured in `the_price_of_a_seed.rs`. The walk and the budget the
 //! documents quote are held here too.
 
@@ -426,7 +426,7 @@ fn a_tip_walked_down_to_the_floor_is_refused_and_so_is_every_nonce_of_it() {
 /// where the deepest question lands, climbs out of it to carry the rest of
 /// the work, and walks back down to a tip within the fall of the cheap
 /// header. Tied to the pinned header, that tip was weighed; measured at
-/// testnet-6's difficulty in `the_price_of_a_seed.rs`, it costs a forger a
+/// testnet-7's difficulty in `the_price_of_a_seed.rs`, it costs a forger a
 /// thousand hashes rather than a quarter of a million. Held to the hardest
 /// header of the run it is refused, and the draw is ground until it pins the
 /// cheap stretch so that the case is the one the rule has to answer.

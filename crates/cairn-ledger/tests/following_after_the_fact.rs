@@ -341,7 +341,7 @@ fn crowded_follower() -> Crowded {
         .grace_window()
         .into_iter()
         .flatten()
-        .filter(|(_, _, note)| note.owner == owner.public_key())
+        .filter(|(_, _, note)| note.owner == owner.public_key().into())
         .map(|(id, position, _)| (id, position))
         .min_by_key(|(_, position)| *position)
         .expect("the owner was paid in the first block");

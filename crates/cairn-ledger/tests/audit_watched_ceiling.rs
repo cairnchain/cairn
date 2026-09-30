@@ -478,7 +478,7 @@ fn the_paths_kept_are_the_windows_and_the_followed_notes_and_no_others() {
         .iter()
         .flatten()
         .filter(|(id, _, note)| {
-            note.owner == alice.public_key() && state.watched_position(id).is_none()
+            note.owner == alice.public_key().into() && state.watched_position(id).is_none()
         })
         .count();
     assert!(

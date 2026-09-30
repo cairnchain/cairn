@@ -9,10 +9,9 @@ use std::cell::RefCell;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use cairn_chain::{ChainStore, Outdated};
-use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::emission::reward_at;
-use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::note::{Address, NetworkId, Note, NoteId};
 use cairn_ledger::pow::work_of;
 use cairn_ledger::transaction::{Transfer, Witness};
 use cairn_ledger::validation::ConsensusParams;
@@ -24,7 +23,7 @@ use cairn_net::Node;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{hex, Amount, Hash32};
 
-use crate::index::{read_to_the_end, Head, Held, Index, NoteRecord, Reading, Size};
+use crate::index::{read_to_the_end, Head, Held, Index, NoteRecord, Reading, Size, Totals};
 use cairn_http::{Mark, Writer};
 use cairn_http::{Request, Response};
 
@@ -165,9 +164,12 @@ impl std::fmt::Debug for Explorer {
 
 impl Explorer {
     pub(crate) fn new(node: Node) -> Self {
+        // The index needs the rules for what a block burned, and they are the
+        // chain's, fixed by the network the node was started on.
+        let rules = node.with_chain(|chain| *chain.params());
         Self {
             node,
-            index: Mutex::new(Index::new()),
+            index: Mutex::new(Index::under(rules)),
             waiting: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -660,6 +662,13 @@ impl Context<'_> {
         self.chain.params()
     }
 
+    /// An address as a person reads it on this network. An address has no
+    /// other way to be printed, so every owner on every page goes through
+    /// here and carries its network's prefix and checksum.
+    fn text_of(&self, owner: &Address) -> String {
+        owner.to_text(self.params().network)
+    }
+
     /// Whether this reading is the one whose answer is sent.
     ///
     /// What it guards is the work, not the shape: a field left out of the
@@ -902,6 +911,7 @@ fn status(context: &Context<'_>) -> Response {
     // and nothing would say which, and the chain's own answer is the one a
     // header commits to.
     json.field_str("issued", &state.supply().as_pebbles().to_string());
+    field_burned_in_all(&mut json, context, &totals);
     // What the index made of the same chain, kept so the two can be compared
     // rather than trusted. They are computed from different things: the
     // ledger from emission accounting, this from the notes themselves.
@@ -1495,14 +1505,93 @@ fn block_summary(json: &mut Writer, context: &Context<'_>, block: &Block) {
             .to_string(),
     );
     match block.coinbase.outputs.first() {
-        Some(output) => json.field_str("miner", &output.owner.to_string()),
+        Some(output) => json.field_str("miner", &context.text_of(&output.owner)),
         None => json.field_null("miner"),
     }
-    match block_fees(context, block) {
+    let fees = block_fees(context, block);
+    match fees {
         Some(fees) => json.field_str("fees", &fees.as_pebbles().to_string()),
         None => json.field_null("fees"),
     }
+    field_destroyed(json, context, block, fees);
     json.end_object();
+}
+
+/// What the chain read so far has destroyed, and what it left unclaimed, as
+/// two figures and never one.
+///
+/// Destroyed is the place price burned for every place a transfer took, which
+/// the index adds up block by block; nothing else is destroyed. Unclaimed is
+/// what the schedule paid out and the fees gave up, less what coinbases
+/// claimed and the burns: a first block that pays nobody, and every reward
+/// or fee a miner left on the table. It was never issued, and a miner chose
+/// it, so it is said apart. Both are left out, as null, by an index that did
+/// not read the chain from its first block, which cannot tell a hot spend
+/// from one out of the grace window.
+fn field_burned_in_all(json: &mut Writer, context: &Context<'_>, totals: &Totals) {
+    let burned = context.index.burned();
+    match burned {
+        Some(burned) => json.field_str("destroyed", &burned.as_pebbles().to_string()),
+        None => json.field_null("destroyed"),
+    }
+    let through = context.index.covers().map(|(_, through)| through);
+    let unclaimed = burned.zip(through).and_then(|(burned, through)| {
+        context
+            .params()
+            .emitted_by(through)
+            .checked_add(totals.fees)?
+            .checked_sub(totals.paid_to_miners)?
+            .checked_sub(burned)
+    });
+    match unclaimed {
+        Some(unclaimed) => json.field_str("unclaimed", &unclaimed.as_pebbles().to_string()),
+        None => json.field_null("unclaimed"),
+    }
+}
+
+/// What a block destroyed, and apart from it what its coinbase left
+/// unclaimed.
+///
+/// Destroyed is the burn of the places its transfers took, as the index
+/// worked it out when it read the block, against its copy of the hot set.
+/// It used to be the reward and fees the block was owed less what its
+/// coinbase claimed, which also counts what a miner chose not to take and,
+/// on a first block paying nobody, a reward that was never issued. That
+/// difference less the burn is what the coinbase left unclaimed, which is its
+/// own field. Either is null where it is not known: above what the index has
+/// read, on an index that did not start at the first block, on an index that
+/// has not yet read this block, or without the fees.
+fn field_destroyed(json: &mut Writer, context: &Context<'_>, block: &Block, fees: Option<Amount>) {
+    let params = context.params();
+    // The index keeps a burn per height and can be half a second behind a
+    // switch, when its figure at this height is the block the node left.
+    let height = block.header.height;
+    let burned = if context.index.height_of(&block.id()) == Some(height) {
+        context.index.burned_at(height)
+    } else {
+        None
+    };
+    match burned {
+        Some(burned) => json.field_str("destroyed", &burned.as_pebbles().to_string()),
+        None => json.field_null("destroyed"),
+    }
+    let owed = fees.and_then(|fees| {
+        reward_at(
+            block.header.height,
+            params.halving_interval,
+            params.initial_reward,
+            params.tail_reward,
+        )
+        .checked_add(fees)
+    });
+    let unclaimed = owed
+        .zip(burned)
+        .zip(block.coinbase.total_output())
+        .and_then(|((owed, burned), claimed)| owed.checked_sub(burned)?.checked_sub(claimed));
+    match unclaimed {
+        Some(unclaimed) => json.field_str("unclaimed", &unclaimed.as_pebbles().to_string()),
+        None => json.field_null("unclaimed"),
+    }
 }
 
 /// What senders paid in this block, measured from the transfers rather than
@@ -1610,10 +1699,12 @@ fn block(context: &Context<'_>, request: &Request, reference: &str) -> Response 
         None => json.field_null("next"),
     }
 
-    match block_fees(context, &block) {
+    let fees = block_fees(context, &block);
+    match fees {
         Some(fees) => json.field_str("fees", &fees.as_pebbles().to_string()),
         None => json.field_null("fees"),
     }
+    field_destroyed(&mut json, context, &block, fees);
     json.field_str(
         "reward",
         &reward_at(
@@ -1702,7 +1793,7 @@ fn output_object(json: &mut Writer, context: &Context<'_>, id: &NoteId, note: &N
     json.field_u64("index", u64::from(id.index));
     json.field_str("note", &note_reference(id));
     json.field_str("value", &note.value.as_pebbles().to_string());
-    json.field_str("owner", &note.owner.to_string());
+    json.field_str("owner", &context.text_of(&note.owner));
     if let Some(record) = context.index.note(id) {
         json.field_bool("spent", !record.is_unspent());
         match record.spent_by {
@@ -1806,7 +1897,7 @@ fn transfer_object(json: &mut Writer, context: &Context<'_>, transfer: &Transfer
         if let Some((value, owner)) = spent {
             consumed = consumed.and_then(|total| total.checked_add(value));
             json.field_str("value", &value.as_pebbles().to_string());
-            json.field_str("owner", &owner.to_string());
+            json.field_str("owner", &context.text_of(&owner));
         } else {
             consumed = None;
             json.field_null("value");
@@ -2007,16 +2098,16 @@ fn holdings(
 }
 
 fn address(context: &Context<'_>, reference: &str, request: &Request) -> Response {
-    let Some(owner) = parse_owner(reference) else {
-        return Response::error(400, "not an address");
+    let Some(owner) = parse_owner(reference, context.params().network) else {
+        return Response::error(400, "not an address on this network");
     };
     let offset = offset_of(request);
 
     let mut json = Writer::new();
     json.begin_object();
-    json.field_str("address", &owner.to_string());
+    json.field_str("address", &context.text_of(&owner));
 
-    let Some(record) = context.index.owner(&owner) else {
+    let Some(record) = context.index.owner(owner) else {
         json.field_str("balance", "0");
         json.field_str("received", "0");
         json.field_str("spent", "0");
@@ -2160,7 +2251,7 @@ fn note(context: &Context<'_>, reference: &str) -> Response {
     json.field_str("source", &id.source.to_string());
     json.field_u64("index", u64::from(id.index));
     json.field_str("value", &record.value.as_pebbles().to_string());
-    json.field_str("owner", &record.owner.to_string());
+    json.field_str("owner", &context.text_of(&record.owner));
     json.field_u64("createdAt", record.created_at);
     json.field_str("tier", tier_of(context, &id, &record));
     match record.spent_at {
@@ -2235,7 +2326,7 @@ fn holders(context: &Context<'_>) -> Response {
     json.begin_array();
     for (owner, balance) in context.index.richest() {
         json.begin_object();
-        json.field_str("address", &owner.to_string());
+        json.field_str("address", &context.text_of(owner));
         json.field_str("balance", &balance.as_pebbles().to_string());
         json.end_object();
     }
@@ -2257,14 +2348,15 @@ fn holders(context: &Context<'_>) -> Response {
 /// Works out what someone pasted into the search box.
 ///
 /// The answer carries what the index had read when it was worked out, because
-/// the last step of the walk below is a guess and the guess is only as good as
-/// the index. A transaction identifier the index has not reached falls past
-/// every lookup and lands on `parse_owner`, which succeeds for any thirty two
-/// bytes that make a point, so the site announced somebody's transaction as an
-/// address and took them to a page saying it held nothing. The guess is still
-/// made, because an address that has never been paid is not in the index either
-/// and looking it up is a reasonable thing to want. What is no longer left out
-/// is that it was a guess made off part of a chain.
+/// what the walk below cannot find it can only call unknown, and that is only
+/// as good as the index. A transaction identifier the index has not reached
+/// falls past every lookup. It used to land on `parse_owner`, which took any
+/// thirty two bytes that made a point, so the site announced somebody's
+/// transaction as an address and took them to a page saying it held nothing.
+/// An address is written with its network's prefix and a checksum now, so
+/// hexadecimal is never read as one, and what is left is an identifier this
+/// site has not read yet. What is not left out is that the answer was made off
+/// part of a chain.
 fn search(context: &Context<'_>, request: &Request) -> Response {
     let query = request.parameter("q").unwrap_or_default();
     let query = query.trim();
@@ -2286,10 +2378,11 @@ fn search(context: &Context<'_>, request: &Request) -> Response {
 
 /// What the text turns out to be, and where that lives.
 ///
-/// A block identifier, a transaction identifier and an address are all thirty
-/// two bytes, so the text alone cannot say which it is. Each is looked up in
-/// turn and the first that exists wins; an address is last because it is the
-/// only one that needs nothing to exist.
+/// A block identifier and a transaction identifier are both thirty two bytes
+/// of hexadecimal, so the text alone cannot say which it is, and each is
+/// looked up in turn: the first that exists wins. An address is written for
+/// this network with a checksum, so the text does say when it is one; it is
+/// last because it is the only one that needs nothing to exist.
 fn matched(context: &Context<'_>, query: &str) -> Option<(&'static str, String)> {
     // Any height the chain reaches is a block, whether or not this site can
     // still show it; the block page says which. Asking for the body here was a
@@ -2323,8 +2416,8 @@ fn matched(context: &Context<'_>, query: &str) -> Option<(&'static str, String)>
         }
     }
 
-    let owner = parse_owner(query)?;
-    Some(("address", format!("/address/{owner}")))
+    let owner = parse_owner(query, context.params().network)?;
+    Some(("address", format!("/address/{}", context.text_of(&owner))))
 }
 
 /// How a note is written down: the transaction that made it, then which output.
@@ -2336,9 +2429,9 @@ fn parse_hash(text: &str) -> Option<Hash32> {
     hex::decode_array::<32>(text).map(Hash32::from_bytes)
 }
 
-fn parse_owner(text: &str) -> Option<PublicKey> {
-    let bytes = hex::decode_array::<32>(text)?;
-    PublicKey::from_bytes(&bytes).ok()
+/// An address written for `network`, as a wallet on that network prints it.
+fn parse_owner(text: &str, network: NetworkId) -> Option<Address> {
+    Address::from_text(text, network).ok()
 }
 
 fn parse_note(text: &str) -> Option<NoteId> {
@@ -2716,7 +2809,7 @@ mod tests {
     fn records() -> (NoteRecord, NoteRecord) {
         let unspent = NoteRecord {
             value: Amount::from_pebbles(1).unwrap(),
-            owner: SecretKey::from_bytes(&[7; 32]).public_key(),
+            owner: SecretKey::from_bytes(&[7; 32]).public_key().into(),
             created_at: 1,
             spent_at: None,
             spent_by: None,
@@ -2865,26 +2958,33 @@ mod owners_under_a_generator {
     /// them takes and the other does not is an address the explorer says has
     /// nothing, or answers for somebody else. The wallet trims what it is
     /// handed and a path has nothing to trim; beyond that they must agree.
-    /// Nothing held the two readings together. The node's reading of the key
-    /// it mines to is held to the wallet's the same way, in `cairnd`.
+    /// Nothing held the two readings together. The node's reading of the
+    /// address it mines to is held to the wallet's the same way, in `cairnd`.
     #[test]
     fn an_owner_in_a_path_is_an_address_the_wallet_reads() {
         let campaign = Campaign::named("explorer: owners");
         let seed = campaign.seed();
-        let keys: Vec<String> = (1..=4u8)
+        let network = cairn_ledger::note::NetworkId::TESTNET;
+        let addresses: Vec<String> = (1..=4u8)
             .map(|n| {
-                cairn_primitives::hex::encode(
-                    SecretKey::from_bytes(&[n; 32]).public_key().as_bytes(),
-                )
+                cairn_ledger::note::Address::from(SecretKey::from_bytes(&[n; 32]).public_key())
+                    .to_text(network)
             })
             .collect();
-        let corpus: Vec<Vec<u8>> = keys.iter().map(|key| key.clone().into_bytes()).collect();
+        let corpus: Vec<Vec<u8>> = addresses
+            .iter()
+            .map(|address| address.clone().into_bytes())
+            .collect();
         let mut read = 0usize;
         let ran = campaign.run(4_000, |case, rng| {
             let text = match rng.below(5) {
-                0 => rng.pick(&keys).cloned().unwrap_or_default(),
-                1 => rng.pick(&keys).cloned().unwrap_or_default().to_uppercase(),
-                2 => cairn_primitives::hex::encode(&rng.array::<32>()),
+                0 => rng.pick(&addresses).cloned().unwrap_or_default(),
+                1 => rng
+                    .pick(&addresses)
+                    .cloned()
+                    .unwrap_or_default()
+                    .to_uppercase(),
+                2 => cairn_primitives::bech32m::encode("tcairn", &rng.array::<32>()),
                 3 => {
                     let from = rng.pick(&corpus).cloned().unwrap_or_default();
                     String::from_utf8_lossy(&mutate(rng, &from, &corpus)).into_owned()
@@ -2898,8 +2998,8 @@ mod owners_under_a_generator {
                 }
             };
             let text = text.trim();
-            let ours = parse_owner(text);
-            let wallet = cairn_wallet::parse_address(text).ok();
+            let ours = parse_owner(text, network);
+            let wallet = cairn_wallet::parse_address(text, network).ok();
             assert_eq!(
                 ours, wallet,
                 "case {case} of seed {seed:#x}: the explorer and the wallet read `{text}` \

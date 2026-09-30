@@ -479,22 +479,28 @@ const COST_CHAIN: u32 = 8;
 const COST_PER_INPUT: u32 = 4;
 /// What one output of a transfer costs to take.
 ///
-/// Priced because it is not free, and the price above said nothing about it.
-/// An output is a note, and reading a note off the wire decompresses its
-/// owner's key off the curve and checks it for its subgroup, before anything
-/// has looked at the price. Measured beside a signature check on one machine:
-/// forty seven microseconds an output against fifty one a verification. So a
-/// transfer of one input and two hundred and fifty six outputs cost four
-/// units and twelve milliseconds, and a unit spent on that shape bought a
-/// hundred and twenty six times the processor a unit spent on an ordinary
-/// payment did. The widest shape was the cheapest way to make this node
-/// compute, which is the defect [`COST_PER_INPUT`] was written against,
-/// reached through the other list.
+/// Priced because it was not free, and the price above said nothing about it.
+/// An output is a note, and while a note's owner was a key, reading one off
+/// the wire decompressed that key off the curve and checked it for its
+/// subgroup, before anything had looked at the price. Measured beside a
+/// signature check on one machine: forty seven microseconds an output against
+/// fifty one a verification. So a transfer of one input and two hundred and
+/// fifty six outputs cost four units and twelve milliseconds, and a unit spent
+/// on that shape bought a hundred and twenty six times the processor a unit
+/// spent on an ordinary payment did. The widest shape was the cheapest way to
+/// make this node compute, which is the defect [`COST_PER_INPUT`] was written
+/// against, reached through the other list.
 ///
-/// The same price as an input, since the work is about the same. At the block
-/// ceiling this network allows, relaying every transfer the chain can carry
-/// then costs one peer's window between a tenth and a quarter of it, by shape,
-/// and a sixth for ordinary payments.
+/// An owner is an address now, and reading one is a copy. The decompression
+/// did not go away: it moved to the input that spends the note, which carries
+/// the key and has it decoded where its signature is verified, so an input
+/// costs a decoding and a verification where [`COST_PER_INPUT`] prices the
+/// verification alone. Kept at the price of an input rather than moved in the
+/// same change, since an ordinary payment of one input and two outputs still
+/// pays twelve, about what taking it in costs. At the block ceiling this
+/// network allows, relaying every transfer the chain can carry then costs one
+/// peer's window between a sixteenth and a quarter of it, by shape, and a
+/// seventh for ordinary payments.
 const COST_PER_OUTPUT: u32 = 4;
 /// What a block this node did not ask for costs, on top of its bytes.
 ///
@@ -725,14 +731,16 @@ impl PeerState {
     /// saying whether it was there.
     ///
     /// A frame is decoded before anything in it can be priced, and decoding
-    /// is not free: every note in it is an owner's key decompressed off the
+    /// is not free: it builds everything the frame describes. While a note's
+    /// owner was a key, every note in it was also a key decompressed off the
     /// curve and checked for its subgroup, about fifty microseconds each. The
     /// price used to be asked only after that, in [`on_message`], so eight
     /// hundred kilobytes of note owners from a peer that had introduced itself
     /// cost this node nine tenths of a second of processor for the price of
     /// one message against the flood ceiling, and a window that was spent
     /// slowed none of it: a refusal was silence, and the next frame was
-    /// decoded like the last.
+    /// decoded like the last. An owner is an address now and costs a copy to
+    /// read; the charge is what keeps a frame's building paid for all the same.
     ///
     /// So a frame is charged what its bytes cost first, at the rate a block
     /// served is, and one this peer cannot pay for is not decoded at all. The
@@ -1068,7 +1076,6 @@ pub fn local_handshake(chain: &ChainStore, keeps: Keeps, listen: u16, nonce: u64
         version: PROTOCOL_VERSION,
         network: chain.params().network,
         genesis: first_block(chain).unwrap_or(Hash32::ZERO),
-        tip: chain.tip().unwrap_or(Hash32::ZERO),
         height: chain.height().unwrap_or_default(),
         total_work: chain.total_work(),
         keeps,
@@ -1078,11 +1085,6 @@ pub fn local_handshake(chain: &ChainStore, keeps: Keeps, listen: u16, nonce: u64
 }
 
 fn accept_handshake(chain: &ChainStore, theirs: &Handshake) -> Result<(), DropReason> {
-    if theirs.version != PROTOCOL_VERSION {
-        return Err(DropReason::WrongVersion {
-            theirs: theirs.version,
-        });
-    }
     if theirs.network != chain.params().network {
         return Err(DropReason::WrongNetwork {
             theirs: theirs.network,
@@ -1121,7 +1123,17 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     if peer.greeted {
         return Reaction::close(DropReason::RepeatedHandshake);
     }
-    // Before anything else, and before the address is written down: a node
+    // The version before any other field, because an introduction from
+    // another version is read no further than its version (see
+    // `Message::from_frame`), and what the rest of it says, the nonce below
+    // included, is not what that peer sent. A node reaching itself speaks its
+    // own version, so it still meets the check after this one.
+    if theirs.version != PROTOCOL_VERSION {
+        return Reaction::close(DropReason::WrongVersion {
+            theirs: theirs.version,
+        });
+    }
+    // Before the rest, and before the address is written down: a node
     // that reaches itself would otherwise spend one of its few connections on
     // itself, and keep its own address in the book to try again later.
     if theirs.nonce == local.nonce {
@@ -1797,10 +1809,10 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // A block below this one failed, not this one. It was held aside
         // unjudged, which is every block of a branch lighter than the one
         // followed, and this delivery made its branch the heaviest, so the
-        // switch read its body and the body did not hold. An identifier is
-        // taken over a header alone, so that body can be a copy another peer
-        // sent ahead of the real block, and the peer here, which built on or
-        // relayed the real one, is the last to blame for it.
+        // switch read its body and the body did not hold. A body is held only
+        // if it is the one its header names, so the block below is a mined
+        // block that is invalid, and the peer known to have relayed it is the
+        // one that handed it in, which need not be the peer here.
         //
         // It used to be the one blamed: disconnected and its host refused,
         // while the sender of the body had been answered `SideBranch`. So the
@@ -1918,10 +1930,10 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
         }
         // Priced by the inputs it presents and the outputs it creates, for the
         // reason every list here is priced by what it carries: what it carries
-        // is what this node does with it, and here that is a note resolved and
-        // a signature verified for each input, and a key off the curve for
-        // each output, which the decode has already done by the time this is
-        // asked.
+        // is what this node does with it, and here that is a note resolved, a
+        // key hashed and decoded, and a signature verified for each input, and
+        // a note built for each output. `COST_PER_OUTPUT` says why an output
+        // still costs what an input does.
         Message::Transaction(transfer) => {
             let presented = u32::try_from(transfer.inputs.len()).unwrap_or(u32::MAX);
             let created = u32::try_from(transfer.outputs.len()).unwrap_or(u32::MAX);
@@ -2808,12 +2820,14 @@ mod what_a_frame_costs {
         mine_block(block, 1 << 22).unwrap()
     }
 
-    /// A transfer is priced by the keys its decode checks as well as by the
-    /// signatures its inputs carry.
+    /// A transfer is priced by its outputs as well as by the signatures its
+    /// inputs carry.
     ///
-    /// Every output is an owner's key, decompressed off the curve and checked
-    /// for its subgroup while the frame is decoded, and that costs about what
-    /// verifying a signature does. The price counted the inputs alone, so a
+    /// Every output was an owner's key, decompressed off the curve and checked
+    /// for its subgroup while the frame was decoded, and that cost about what
+    /// verifying a signature does. An owner is an address now and the key is
+    /// decoded at the input that spends it, and the price per output stayed:
+    /// `COST_PER_OUTPUT` says why. The price counted the inputs alone, so a
     /// transfer of one input and two hundred and fifty six outputs was charged
     /// what an ordinary payment is: a unit spent on the widest shape bought a
     /// hundred and twenty eight times the keys a unit spent on a payment did,

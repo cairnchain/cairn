@@ -110,6 +110,11 @@ fn spend_them_all(ids: &[NoteId], note: &Note, wrong: Option<usize>) -> Transfer
         };
         transfer.sign_input(params.network, u32::try_from(index).unwrap(), note, &owner);
     }
+    // The wrong one carries the owner's key, so its key hashes to the owner
+    // and it is its signature that does not hold.
+    if let Some(index) = wrong {
+        transfer.inputs[index].key = wallet(1).public_key().to_bytes();
+    }
     transfer
 }
 

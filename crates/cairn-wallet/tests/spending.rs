@@ -158,6 +158,97 @@ fn a_transfer_the_wallet_signs_is_one_a_block_will_carry() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// On a network that burns a price for every place in the hot set, a payment
+/// at the wallet's floor is pooled and mined, and its blank quote carries that
+/// price over the floor for the note that can fall.
+///
+/// The wallet priced a place at the pool's old weight, five hundred and twelve
+/// bytes at ten pebbles, and knew nothing of a price the rules ask. Its floor
+/// was below what every pool now refuses, so a payment at the floor it quoted
+/// was turned away, and its margin for a falling note was below the burn that
+/// note adds, so a payment quoted for exactly that case became one no block
+/// may carry.
+#[test]
+fn a_payment_at_the_quote_is_pooled_and_mined_where_a_place_is_priced() {
+    let price = cairn_ledger::validation::PLACE_PRICE;
+    let rules = params().with_place_price(price);
+    let directory = scratch("priced");
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[31; 32]);
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    let (wallet, _) = Wallet::open(&key_file, rules, &directory.join("data")).unwrap();
+    let mut forge = Forge {
+        params: rules,
+        state: LedgerState::new(),
+        clock: 1_000,
+    };
+    for _ in 0..2 {
+        let block = forge.mine(&secret.public_key(), Vec::new());
+        wallet.node().submit_block(block).unwrap();
+    }
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+
+    let least = wallet.floor_for(recipient, cairn("1"));
+    let quoted = wallet.fee_for(recipient, cairn("1"));
+    assert_eq!(
+        quoted.checked_sub(least),
+        Some(price),
+        "the quote's margin for the one note that can fall is not the place price"
+    );
+    // What the confirmation says before paying: the burn of the one place the
+    // payment takes, and nothing for a spend that cannot be drafted.
+    assert_eq!(
+        wallet.burn_of_the_fee(recipient, cairn("1"), least),
+        Some(price),
+        "the part of the fee said to be burned is not the price of the place the payment takes"
+    );
+    assert_eq!(
+        wallet.burn_of_the_fee(recipient, Amount::ZERO, least),
+        None,
+        "a spend that cannot be drafted was said to burn something"
+    );
+    let sent = wallet
+        .send(recipient, cairn("1"), least)
+        .expect("a payment at the wallet's own floor was refused by its own pool");
+    assert_eq!(sent.fee, least);
+
+    // A miner takes it from the pool and claims what the rules let it keep.
+    let (chosen, kept) = wallet
+        .node()
+        .with_chain(|chain| chain.selection(rules.max_transfers_per_block));
+    assert_eq!(chosen.len(), 1, "the payment reached the pool");
+    assert_eq!(
+        kept.checked_add(price),
+        Some(least),
+        "the burn is the price"
+    );
+    let height = forge.state.next_height().unwrap();
+    forge.clock += 600;
+    let claimed = rules.reward_at(height).checked_add(kept).unwrap();
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(
+            claimed,
+            SecretKey::from_bytes(&[7; 32]).public_key(),
+        )],
+    );
+    let before = forge.state.supply();
+    let block = assemble_block(&forge.state, coinbase, chosen, &rules, forge.clock, 0)
+        .expect("a block carrying the payment and claiming what it may is valid");
+    let block = mine_block(block, ATTEMPTS).unwrap();
+    connect_block(&mut forge.state, &block, &rules, NOW).unwrap();
+    wallet.node().submit_block(block).unwrap();
+    assert_eq!(
+        forge.state.supply().as_pebbles(),
+        before.as_pebbles() + rules.reward_at(height).as_pebbles() - price.as_pebbles(),
+        "the burn did not leave the supply"
+    );
+
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// A wallet that spends more than it has, or that quietly spends something it
 /// cannot prove, is worse than one that refuses.
 #[test]
@@ -268,7 +359,7 @@ fn a_payment_that_takes_a_note_whole_is_priced_without_change() {
         vec![Note::new(held.note.value, recipient)],
     );
     let bytes = shape.encode().len();
-    let fee = cairn_chain::fee_floor(cairn_chain::transfer_weight(&shape, bytes, 1));
+    let fee = cairn_chain::fee_floor(bytes, cairn_chain::places_taken(&shape, 1), wallet.params());
     let amount = held.note.value.checked_sub(fee).unwrap();
 
     let sent = wallet.send(recipient, amount, fee).expect(
@@ -341,7 +432,7 @@ fn the_address_is_the_key_file_and_nothing_else() {
     cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
 
     let (wallet, _) = Wallet::open(&key_file, params(), &directory.join("data")).unwrap();
-    assert_eq!(wallet.address(), secret.public_key());
+    assert_eq!(wallet.address(), secret.public_key().into());
     assert_eq!(
         format!("{wallet:?}"),
         "Wallet(<key withheld>)",

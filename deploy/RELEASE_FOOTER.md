@@ -48,5 +48,5 @@ whole: whoever could replace an archive could replace the list beside it.
 
 ## This is a test network
 
-`testnet-6` money is worth nothing, is meant to be worth nothing, and the
+`testnet-7` money is worth nothing, is meant to be worth nothing, and the
 network will be reset. Nothing on it carries over.

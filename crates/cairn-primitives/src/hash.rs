@@ -129,6 +129,7 @@ domains! {
     CoinbaseId => coinbase_id, "cairn v1 coinbase id";
     BlockHeaderId => block_header_id, "cairn v1 block header id";
     SignatureMessage => signature_message, "cairn v1 signature message";
+    Address => address, "cairn v1 address";
     MerkleLeaf => merkle_leaf, "cairn v1 merkle leaf";
     MerkleNode => merkle_node, "cairn v1 merkle node";
     MerkleEmpty => merkle_empty, "cairn v1 merkle empty";
@@ -149,6 +150,9 @@ domains! {
     HeaderHistoryLeaf => header_history_leaf, "cairn v1 header history leaf";
     SamplingSeed => sampling_seed, "cairn v1 sampling seed";
     GraceWindow => grace_window, "cairn v1 grace window";
+    TransferCommitment => transfer_commitment, "cairn v1 transfer commitment";
+    SamplingDraw => sampling_draw, "cairn v1 sampling draw";
+    ForestEmpty => forest_empty, "cairn v1 forest empty";
     WalletHistory => wallet_history, "cairn v1 wallet history";
 }
 
@@ -235,10 +239,10 @@ mod tests {
     /// The guards around this list check that no string has changed and that
     /// none is missing, which is the completeness half; distinctness is the
     /// half the independence claim actually rests on, and it was checked for
-    /// two pairs out of two hundred and ten. A twenty second domain copied
-    /// from the row above it builds, passes every test in the workspace and
-    /// passes clippy under `-D warnings`, and hashes identically to the domain
-    /// it was copied from.
+    /// two pairs out of two hundred and ten. A new domain copied from the row
+    /// above it builds, passes every test in the workspace and passes clippy
+    /// under `-D warnings`, and hashes identically to the domain it was copied
+    /// from.
     ///
     /// Two written safety arguments rest on this and on nothing else.
     /// `merkle.rs` buys back the injectivity that promoting an odd node costs

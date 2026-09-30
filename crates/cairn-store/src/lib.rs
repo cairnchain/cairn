@@ -587,8 +587,8 @@ impl BlockLog {
     /// check in.
     ///
     /// Two more checks, and both read bytes that are here already. A header
-    /// names its transactions through `transactions_root`, so the body answers
-    /// to its own header. And a block carries its parent's identifier, which
+    /// names every byte of its body through `transactions_root`, signatures
+    /// and proofs included, so the body answers to its own header. And a block carries its parent's identifier, which
     /// makes this file the same hash chain the header log is, so the record
     /// after this one has to name it; a block encodes its header first and a
     /// header is a fixed width, so that neighbour costs one seek and
@@ -624,7 +624,9 @@ impl BlockLog {
         // Before the neighbour, because the neighbour covers the header alone
         // and the header is not the record: with the link check by itself the
         // 1681 wrong answers fell to 572, and every one of those 572 was a
-        // byte of a transaction.
+        // byte of a transaction. The root once covered only what a transfer's
+        // identifier does, so a byte of a signature or a proof still came
+        // back as the block; it covers each transfer's whole encoding now.
         if block.transactions_root() != block.header.transactions_root {
             return Err(StoreError::Unrooted { height });
         }
@@ -638,9 +640,11 @@ impl BlockLog {
     /// it.
     ///
     /// For a caller that has to price a block before it pays for reading it:
-    /// [`BlockLog::read_at`] decodes the whole record, and decoding a block
-    /// decompresses a key off the curve for every owner in it, which for a
-    /// full block is tens of milliseconds. This is two offsets off the index.
+    /// [`BlockLog::read_at`] reads and decodes the whole record and hashes its
+    /// transactions to hold them to the header. While a note's owner was a
+    /// key, decoding also decompressed a key off the curve for every owner in
+    /// it, tens of milliseconds for a full block. This is two offsets off the
+    /// index.
     ///
     /// The index is derived and can be wrong, so this is the index's word and
     /// not the record's. `read_at` checks the one against the other and

@@ -142,23 +142,23 @@ fn main() {
     churn(&params, each, per_block);
 }
 
-/// What a transfer's fee is measured against per new note, kept here as a
+/// The least a pooled transfer pays per byte, in pebbles, kept here as a
 /// plain number so this example does not reach into the chain crate.
-const NOTE_WEIGHT: usize = 512;
-
-/// The least a pooled transfer pays per unit of weight, in pebbles. The same
-/// plain-number copy, for the same reason.
 const MIN_FEE_PER_WEIGHT: u64 = 10;
 
-/// What churning the hot set costs an attacker, before and after it was
-/// priced.
+/// What churning the hot set costs whoever does it.
 ///
 /// The attack is a transfer that spends one note and creates as many as the
 /// rules allow: every note past the first pushes somebody's oldest note out of
 /// a full tier, at forty bytes each against the two hundred an ordinary
-/// payment pays for its one. This measures that discount, what the fee weight
-/// does to it, and where the consensus cap leaves the worst case.
+/// payment pays for its one. Priced by bytes that was a discount, and a miner
+/// paid nothing at all, since a fee comes back to whoever mines it. Each place
+/// now burns the place price, which no coinbase may claim, so this works out
+/// what that makes a place cost, a miner included, and where the consensus cap
+/// leaves the rate.
 fn churn(params: &ConsensusParams, ordinary_bytes: usize, per_block: usize) {
+    let live = ConsensusParams::for_network("testnet").expect("the public network");
+    let price = live.place_price.as_pebbles();
     let owner = SecretKey::from_bytes(&[1; 32]).public_key();
     let stuffed = Transfer::new(
         vec![Input::hot(NoteId::new(Hash32::ZERO, 0))],
@@ -167,56 +167,54 @@ fn churn(params: &ConsensusParams, ordinary_bytes: usize, per_block: usize) {
     let stuffed_bytes = stuffed.encode().len();
     let stuffed_notes = params.max_outputs_per_transfer - 1;
 
-    let ordinary_weight = ordinary_bytes + NOTE_WEIGHT;
-    let stuffed_weight = stuffed_bytes + stuffed_notes * NOTE_WEIGHT;
+    // What each pays at the floor: ten pebbles a byte, and the burn of every
+    // place, which is the same for a miner as for anybody.
+    let ordinary_floor = ordinary_bytes as u64 * MIN_FEE_PER_WEIGHT + price;
+    let stuffed_floor = stuffed_bytes as u64 * MIN_FEE_PER_WEIGHT + stuffed_notes as u64 * price;
 
     println!("\nWhat pushing one note out of the hot set costs whoever does it:\n");
-    println!("{:>26}  {:>10}  {:>10}", "", "by bytes", "by weight");
+    println!("{:>26}  {:>10}  {:>10}", "", "by bytes", "at floor");
     println!("{}", "-".repeat(50));
     println!(
         "{:>26}  {:>10}  {:>10}",
         "an ordinary payment",
         with_commas(ordinary_bytes),
-        with_commas(ordinary_weight),
+        with_commas(ordinary_floor as usize),
     );
     println!(
         "{:>26}  {:>10}  {:>10}",
         "a transfer stuffed full",
         with_commas(stuffed_bytes / stuffed_notes),
-        with_commas(stuffed_weight / stuffed_notes),
+        with_commas((stuffed_floor / stuffed_notes as u64) as usize),
     );
     println!(
         "\nPriced by bytes, stuffing outputs churned the tier {:.1} times cheaper\n\
-         than the payments it displaced. Priced by weight, the discount is\n\
-         {:.2}: pushing a note out costs what a payment costs, however the\n\
-         transfer is shaped.",
+         than the payments it displaced. With a place burning {} pebbles the\n\
+         discount is {:.2}: pushing a note out costs about what a payment costs,\n\
+         however the transfer is shaped, and the burn is destroyed, so a miner\n\
+         pays it too.",
         ordinary_bytes as f64 / (stuffed_bytes as f64 / stuffed_notes as f64),
-        ordinary_weight as f64 / (stuffed_weight as f64 / stuffed_notes as f64),
+        with_commas(price as usize),
+        ordinary_floor as f64 / (stuffed_floor as f64 / stuffed_notes as f64),
     );
 
     // Halving how long everyone's notes stay hot means doubling the eviction
     // rate, which at full blocks means matching the honest traffic's own note
     // creation, note for note.
     let notes_per_hour = per_block * 3600 / params.target_block_time as usize;
-    let weight_per_hour = notes_per_hour * stuffed_weight / stuffed_notes;
-    let floor_per_hour = weight_per_hour as u64 * MIN_FEE_PER_WEIGHT;
+    let floor_per_hour = notes_per_hour as u64 * stuffed_floor / stuffed_notes as u64;
     println!(
         "\nHalving how long everyone's notes stay hot, at full blocks, takes\n\
-         {} extra new notes an hour. That used to be free: zero-fee\n\
-         transfers were pooled and mined. Priced by weight those notes cost\n\
-         {} pebbles an hour ({:.2} CAIRN) at the floor, and on a contested\n\
-         chain they cost outbidding an hour of everyone else's payments, at\n\
-         about {} weight against their {}. On a full chain the cap below\n\
-         refuses the rate outright, so the halving cannot be bought at all.",
+         {} extra new notes an hour. That used to be free to a miner. At the\n\
+         place price those notes cost {} pebbles an hour ({:.2} CAIRN), most of\n\
+         it destroyed, and on a full chain the cap below refuses the rate\n\
+         outright, so the halving cannot be bought at all.",
         with_commas(notes_per_hour),
         with_commas(floor_per_hour as usize),
         floor_per_hour as f64 / 1e8,
-        with_commas(weight_per_hour),
-        with_commas(notes_per_hour * ordinary_weight),
     );
 
-    // What no fee bounds: a miner stuffing its own blocks pays itself. The
-    // consensus cap is what holds there.
+    // What the cap bounds: the rate, whatever anybody pays for it.
     let stuffed_per_block = params.max_block_bytes / stuffed_bytes;
     let evictions_uncapped = stuffed_per_block * stuffed_notes;
     let uncapped_minutes = params.hot_capacity as f64 / evictions_uncapped as f64
@@ -225,18 +223,21 @@ fn churn(params: &ConsensusParams, ordinary_bytes: usize, per_block: usize) {
     let capped_minutes = params.hot_capacity as f64 / params.max_evictions_per_block as f64
         * params.target_block_time as f64
         / 60.0;
+    let flush = params.hot_capacity as u64 * price;
     println!(
-        "\nA miner filling its own blocks pays no fee at all: {} stuffed\n\
-         transfers fit a block and push out {} notes, emptying the whole\n\
-         tier in {:.0} minutes. The consensus cap of {} evictions a block\n\
-         makes that {:.0} minutes at any price, against the {:.0} minutes a\n\
-         full chain of honest payments takes.",
+        "\nA miner filling its own blocks pays the burn like anyone: {} stuffed\n\
+         transfers fit a block and push out {} notes, which would empty the\n\
+         whole tier in {:.0} minutes. The consensus cap of {} evictions a block\n\
+         makes that {:.0} minutes at any price, against the {:.0} minutes a full\n\
+         chain of honest payments takes, and the whole tier burns {:.2} CAIRN\n\
+         whoever pushes it out.",
         with_commas(stuffed_per_block),
         with_commas(evictions_uncapped),
         uncapped_minutes,
         with_commas(params.max_evictions_per_block),
         capped_minutes,
         params.hot_capacity as f64 / per_block as f64 * params.target_block_time as f64 / 60.0,
+        flush as f64 / 1e8,
     );
 }
 
@@ -346,6 +347,7 @@ fn cold_input(owner: cairn_crypto::PublicKey) -> Input {
                 siblings: vec![Hash32::ZERO; PROOF_HASHES],
             },
         })),
+        key: owner.to_bytes(),
         signature: Signature::unsigned(),
     }
 }

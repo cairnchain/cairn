@@ -7,14 +7,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cairn_crypto::{PublicKey, Signature};
+use cairn_crypto::{PublicKey, Signature, PUBLIC_KEY_LEN};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
 
 use crate::emission;
 
 use crate::block::{Activation, Block, BlockHeader, BLOCK_VERSION};
-use crate::note::{NetworkId, Note, NoteId};
+use crate::note::{Address, NetworkId, Note, NoteId};
 use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, MIN_DIFFICULTY};
 use crate::state::{cold_leaf, BlockUndo, ColdSpend, LedgerState, StateTransition};
 use crate::transaction::{
@@ -58,6 +58,52 @@ const TAIL_REWARD: Amount = reward_of(emission::TAIL_REWARD_PEBBLES);
 /// the single most valuable optimisation remaining, and it would buy room to
 /// raise this.
 const DEFAULT_HOT_CAPACITY: usize = 1 << 17;
+
+/// Pebbles destroyed for each place a transfer takes in the hot set, on every
+/// named network.
+///
+/// A place is taken from somebody: on a full tier every note a transfer adds
+/// pushes the oldest untouched one out, and its owner then spends it with a
+/// cold witness, which is bytes they pay for. So the price answers to that
+/// harm: pushing a note out costs the pusher at least what spending it
+/// afterwards costs the note's owner, in extra bytes at the pool's floor rate.
+/// It is paid once, as part of the fee, by whoever takes the place, when the
+/// transfer is made. Nothing is ever charged to a note for sitting where it
+/// is.
+///
+/// The burn is destroyed rather than paid to the miner, and that is the whole
+/// point of it. A fee paid to the block's miner is a price for everybody but
+/// the miner, who pays it to itself: before this, a miner filled its own
+/// blocks with outputs for nothing and emptied the tier at the eviction cap's
+/// pace for free.
+///
+/// Measured rather than chosen, by `cairn-chain/examples/flood.rs`, which
+/// fills and flushes a public network's tier through the pool and measures
+/// what the displaced owners' spends grow by. The rule is
+/// `ceil(delta_w * MIN_FEE_PER_WEIGHT / 1000) * 1000`, with `delta_w` the
+/// median growth in bytes and ten pebbles a byte. Measured on 30 September
+/// 2026, on the note format whose inputs carry their keys: a payment of one
+/// input grew from 223 bytes to 819 for all sixteen displaced owners, the
+/// cold witness of a note in a tree of height seventeen against a one-byte
+/// tag, so `delta_w` is 596 and the price `ceil(5.96) * 1000`. The witness is
+/// all that grows, so the figure did not move with the key: the day before,
+/// on the format without one, it was 191 to 787. The pool's older price of a
+/// place, 5 120, and an ordinary payment's floor under that older weight,
+/// 7 350, land within a third of it, which is the check that the order is
+/// right. Mainnet derives it again, by the same rule, on a forest of the
+/// depth it expects.
+pub const PLACE_PRICE: Amount = price_of(6_000);
+
+/// A price written in pebbles, as an amount, for the same reason and in the
+/// same way as [`reward_of`]: a constant the monetary ceiling cannot hold stops
+/// the build.
+#[allow(clippy::panic)]
+const fn price_of(pebbles: u64) -> Amount {
+    match Amount::from_pebbles(pebbles) {
+        Some(amount) => amount,
+        None => panic!("a place price above the monetary ceiling could never be paid"),
+    }
+}
 
 /// Seconds a block is meant to take, which is the network's value and the
 /// one the specification states.
@@ -165,9 +211,10 @@ pub struct ConsensusParams {
     /// How fast the hot set turns over is a shared resource: every note pushed
     /// out is somebody's money now needing a proof to spend, and the pusher
     /// chooses who by choosing nothing, since it is always the oldest that
-    /// falls. Fees make that churn cost something, but a fee is only a price,
-    /// and a miner includes its own transfers for free. This is the bound that
-    /// holds whatever anyone pays.
+    /// falls. [`Self::place_price`] makes that churn cost something, the same
+    /// for a miner as for anybody, since what it charges is destroyed. But a
+    /// price is only a price, and whoever will pay it can buy any rate. This
+    /// is the bound on the rate, whatever anyone pays.
     ///
     /// The number is a judgement. Full blocks of ordinary payments push out
     /// about six hundred and eighty six notes each, so honest traffic never
@@ -178,11 +225,24 @@ pub struct ConsensusParams {
     /// works both figures out from measured sizes.
     ///
     /// Those two sentences are about this number and [`Self::hot_capacity`]
-    /// together, and only the public networks hold both: devnet takes the tier
-    /// down and inherits this, so there the cap is larger than the tier and
-    /// one block empties it. Said where devnet is built, and pinned for every
-    /// network in `tests/network_rules.rs`.
+    /// together. Devnet takes the tier down to sixty four and the cap down to
+    /// thirty two with it, so there the cap is below the tier as it is
+    /// everywhere, and one block can no longer empty it. Said where devnet is
+    /// built, and pinned for every network in `tests/network_rules.rs`.
     pub max_evictions_per_block: usize,
+    /// Pebbles destroyed for each place a transfer takes in the hot set.
+    ///
+    /// A transfer's places are its outputs less the inputs it spends out of
+    /// the hot set, or none if it spends more than it makes. Its fee must be
+    /// at least this times its places, and that much of the fee is destroyed:
+    /// the coinbase may claim the reward and the fees less their burns, so a
+    /// miner filling its own block pays the price like anyone else. See
+    /// [`PLACE_PRICE`] for where the number comes from.
+    ///
+    /// A fee, paid once, by whoever takes the place, when the transfer is
+    /// made. A note is never charged for staying in the hot set or for leaving
+    /// it, and spending a note gives its place back for nothing.
+    pub place_price: Amount,
     /// Blocks a handed over ledger must sit below the tip it belongs to.
     ///
     /// See [`crate::handover::BURIAL`] for what it buys. Here because it is a
@@ -312,8 +372,8 @@ const _: () = assert!(
 ///
 /// [`MOST_INPUTS`] and the ceilings beside it let a frame be turned away for
 /// the price of reading its declared length, instead of after every note in it
-/// has been built and every public key in it decompressed. That is only sound
-/// while they sit at or above what the rules allow. Every shipped network is
+/// has been built. That is only sound while they sit at or above what the
+/// rules allow. Every shipped network is
 /// [`ConsensusParams::testnet`] with a few fields replaced, and none of the
 /// replacements raises one of these, so checking it covers all of them.
 ///
@@ -361,34 +421,31 @@ impl ConsensusParams {
     /// build different chains while believing they are on the same one. So the
     /// rules belong to the network and are chosen by naming it, never set one
     /// at a time by whoever starts the node.
-    // The mainnet arm answers like the unknown one on purpose, and saying so
-    // out loud is the point: it is a name that will mean something and does
-    // not yet.
-    #[allow(clippy::match_same_arms)]
     pub fn for_network(name: &str) -> Option<Self> {
         match name {
-            // Not yet made. A network exists once its first block does, and
-            // that block will be mined in the open on the day it is announced.
-            "mainnet" => None,
-            // The network line here changes nothing today and is not
-            // redundant. `NetworkId::TESTNET` is an alias for `TESTNET_6`, and
-            // `Self::testnet()` below spreads that alias in, so naming
-            // `TESTNET_6` again writes the value that was already there:
-            // deleting the line is an equivalent mutation, measured.
+            // The network comes in with `Self::testnet()`, whose
+            // `NetworkId::TESTNET` is an alias for `TESTNET_7`. A line naming
+            // `TESTNET_7` here wrote the value that was already there, which
+            // is a mutant nothing can kill, and the mutation gate cannot be
+            // told to leave a deleted field alone; so the line is not here.
             //
-            // It stops being one the day the alias moves to the next testnet,
-            // which is the day this arm has to keep answering about
-            // testnet-6 while the alias means something else. The guard for
-            // that is `network_rules.rs`
-            // `::the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to`,
-            // which reads the first block off whatever network the rules
-            // name; with this line gone and the alias moved, the two stop
-            // agreeing and it says so.
-            "testnet" | "testnet-6" => Some(Self {
-                network: NetworkId::TESTNET_6,
-                genesis: crate::genesis::pinned(NetworkId::TESTNET_6),
-                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_6),
+            // It has to come back the day the alias moves to the next testnet,
+            // when this arm must keep answering about testnet-7 while the
+            // alias means something else. `network_rules.rs`
+            // `::the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to`
+            // reads the first block off whatever network the rules name, so
+            // moving the alias without it fails there and says so.
+            //
+            // testnet-6 answers nothing here, the way testnet-5 and every
+            // testnet before it already does: a retired network is still
+            // named, in `NetworkId::name`, so a node still on it is told
+            // plainly which network it is on, but asking `for_network` for it
+            // does not bring its rules back.
+            "testnet" | "testnet-7" => Some(Self {
+                genesis: crate::genesis::pinned(NetworkId::TESTNET_7),
+                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_7),
                 genesis_difficulty: 1 << 27,
+                place_price: PLACE_PRICE,
                 ..Self::testnet()
             }),
             // A throwaway network, so its hot set is small enough that notes
@@ -396,18 +453,20 @@ impl ConsensusParams {
             // block is found in seconds. Everything else is the same, which is
             // the point of having it.
             //
-            // Everything else but one, and it is the one the small hot set
-            // takes with it. `max_evictions_per_block` is written as a hundred
-            // and twenty eighth of the *default* tier, so a tier of sixty four
-            // inherits a cap sixteen times its own size and a single block
-            // empties the whole thing, where on a public network the same
-            // number buys a hundred and twenty eight blocks.
+            // Everything else but the eviction cap, which the small hot set
+            // takes with it. The public cap is a hundred and twenty eighth of
+            // the *default* tier, and inherited here it was sixteen times
+            // devnet's own: a single block emptied the tier, so the one rule
+            // bounding how fast the hot set turns over was the one rule a
+            // throwaway network did not rehearse.
             //
-            // Said rather than mended, because no number keeps the relation at
-            // this size: a hundred and twenty eighth of sixty four is nought,
-            // and a cap of one refuses an ordinary devnet payment, which
-            // evicts two. So the one rule bounding how fast the hot set turns
-            // over is the one rule a throwaway network does not rehearse.
+            // Thirty two, because no smaller number keeps the network usable.
+            // A hundred and twenty eighth of sixty four is nought, and a miner
+            // building a block keeps room for a full coinbase, sixteen notes,
+            // out of the cap, so any cap of sixteen or less leaves a full
+            // devnet tier carrying no payment at all. Thirty two leaves sixteen
+            // places a block, sixteen ordinary payments every five seconds,
+            // and emptying the tier takes two blocks rather than one.
             // `tests/network_rules.rs` writes down what each network's cap
             // actually buys, so that moving either number fails a test rather
             // than a network.
@@ -426,6 +485,8 @@ impl ConsensusParams {
                 // network.
                 max_timestamp_drift: drift_allowance(5),
                 hot_capacity: 64,
+                max_evictions_per_block: 32,
+                place_price: PLACE_PRICE,
                 // A throwaway network reaches this in minutes rather than in
                 // most of a day, which is the whole point of having one.
                 burial: 32,
@@ -434,6 +495,11 @@ impl ConsensusParams {
                 coinbase_maturity: 32,
                 ..Self::testnet()
             }),
+            // "mainnet" among them: not yet made. A network exists once its
+            // first block does, and that block will be mined in the open on
+            // the day it is announced. An arm of its own answered the same
+            // nothing as this one, so deleting it was a mutant nothing could
+            // kill; `network_rules.rs` holds that it answers nothing.
             _ => None,
         }
     }
@@ -450,9 +516,9 @@ impl ConsensusParams {
 
     /// The rule set, with nothing tying it to a live network.
     ///
-    /// No pinned first block and a trivial opening difficulty, which is what
-    /// tests want and what no public network should ever run. Public networks
-    /// come from [`Self::for_network`].
+    /// No pinned first block, a trivial opening difficulty and no place price,
+    /// which is what tests want and what no public network should ever run.
+    /// Public networks come from [`Self::for_network`].
     pub const fn testnet() -> Self {
         Self {
             network: NetworkId::TESTNET,
@@ -465,6 +531,12 @@ impl ConsensusParams {
             // A hundred and twenty eighth of the tier, so however the blocks
             // are stuffed, emptying it takes at least that many of them.
             max_evictions_per_block: DEFAULT_HOT_CAPACITY >> 7,
+            // Nought here, for the reason the opening difficulty below is the
+            // floor: this is what the tests build on, most of them pay no fee,
+            // and none of those is about fees. Every named network and
+            // `mineable_network` charge `PLACE_PRICE`, and the tests that are
+            // about the price ask for it with `with_place_price`.
+            place_price: Amount::ZERO,
             burial: crate::handover::BURIAL,
             coinbase_maturity: COINBASE_MATURITY,
             target_block_time: DEFAULT_TARGET_BLOCK_TIME,
@@ -584,6 +656,29 @@ impl ConsensusParams {
         self
     }
 
+    /// The same, for what a place in the hot set destroys. For tests about
+    /// fees, since [`Self::testnet`] charges nothing.
+    #[must_use]
+    pub const fn with_place_price(mut self, price: Amount) -> Self {
+        self.place_price = price;
+        self
+    }
+
+    /// What `places` places in the hot set destroy under these rules, or
+    /// nothing if the amount cannot be held, which no transfer the rules allow
+    /// comes near.
+    ///
+    /// One definition for the rule and for everything that quotes it: the
+    /// pool's floor and a wallet's quote read it here, so none of them can
+    /// price a place differently from the block that burns it.
+    #[must_use]
+    pub fn burn_for(&self, places: usize) -> Option<Amount> {
+        u64::try_from(places)
+            .ok()
+            .and_then(|places| self.place_price.as_pebbles().checked_mul(places))
+            .and_then(Amount::from_pebbles)
+    }
+
     /// The same, for how deep a handed over ledger must sit. For tests, which
     /// would otherwise have to mine a thousand blocks to reach one.
     #[must_use]
@@ -633,13 +728,14 @@ impl ConsensusParams {
     /// every block is worth one a rival wins by exactly one. The memory
     /// ceiling went unenforced on a chain younger than the reorganisation
     /// window. And the deepest switch the rules allow was refused on
-    /// testnet-6, because every deep-switch fixture set a burial far under the
+    /// testnet-7, because every deep-switch fixture set a burial far under the
     /// constant.
     ///
     /// So this is not a fourth set of numbers nobody runs. It is
-    /// [`Self::testnet`] with the opening difficulty lifted off the floor and
-    /// the two depths set together, and `tests/network_rules.rs` compares it
-    /// field by field against `testnet-6`: a rule that moves on a public
+    /// [`Self::testnet`] with the opening difficulty lifted off the floor, the
+    /// two depths set together and the place price a public network charges,
+    /// and `tests/network_rules.rs` compares it
+    /// field by field against `testnet-7`: a rule that moves on a public
     /// network and not here fails a test rather than leaving the fixtures
     /// rehearsing a shape no network has.
     ///
@@ -655,6 +751,7 @@ impl ConsensusParams {
         params.genesis_difficulty = MINEABLE_DIFFICULTY;
         params.burial = burial;
         params.coinbase_maturity = burial;
+        params.place_price = PLACE_PRICE;
         params
     }
 }
@@ -676,6 +773,15 @@ pub enum TransferError {
     /// be refused as `BlockTooLarge` instead.
     #[error("transfer takes {bytes} bytes, more than the {limit} a block carries")]
     TooLargeForABlock { bytes: usize, limit: usize },
+    /// Raised by the pool, never by a block rule: the places a transfer takes
+    /// in the hot set are more than the next block has for transfers, the
+    /// room the tier has left plus its eviction cap, less the coinbase's. A
+    /// block carrying it would be refused as `TooManyEvictions`.
+    #[error(
+        "transfer takes {places} places in the hot set, more than the {limit} the next block \
+         has for transfers"
+    )]
+    TooManyPlacesForABlock { places: usize, limit: usize },
     /// Raised by the pool, never by a block rule: what a block may carry is
     /// not priced, what a node will carry for a stranger is.
     #[error("transfer pays {fee}, below the {floor} its bytes and new notes ask")]
@@ -694,6 +800,13 @@ pub enum TransferError {
     MissingProof { note_id: NoteId },
     #[error("the proof for note {note_id:?} does not match the cold commitment")]
     InvalidProof { note_id: NoteId },
+    /// The key an input carries is not the one whose address owns the note.
+    ///
+    /// Asked with one hash, as soon as the input has resolved and before its
+    /// signature is collected, so a key that is not the owner's is never
+    /// decoded and never verified against.
+    #[error("the key on input {input_index} is not the one the note it spends is paid to")]
+    KeyNotOwner { input_index: usize },
     #[error(
         "note {note_id:?} was paid by a coinbase and cannot be spent before height \
          {matures_at}, because until then the block that paid it can still be undone"
@@ -707,6 +820,18 @@ pub enum TransferError {
     OutputsExceedInputs {
         available: Amount,
         requested: Amount,
+    },
+    /// A rule, not a pool's price: a block carrying it is refused. The burn
+    /// is the place price times the places, and it is destroyed, so paying it
+    /// in one's own block buys nothing back.
+    #[error(
+        "transfer takes {places} new places in the hot set, which destroys {burn}, \
+         and gives up only {fee}"
+    )]
+    PlacesUnpaid {
+        places: usize,
+        burn: Amount,
+        fee: Amount,
     },
     #[error("signature on input {input_index} does not verify")]
     InvalidSignature { input_index: usize },
@@ -822,7 +947,11 @@ pub enum BlockError {
 /// What a valid transfer contributes to the block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransferOutcome {
+    /// Everything the transfer gave up: its inputs less its outputs.
     pub fee: Amount,
+    /// The part of the fee destroyed for the places it takes, which no
+    /// coinbase may claim. Never more than the fee.
+    pub burn: Amount,
     pub spent_hot: Vec<NoteId>,
     pub spent_cold: Vec<ColdSpend>,
 }
@@ -837,8 +966,13 @@ pub struct TransferOutcome {
 /// check would have named. Which of two bad signatures is reported changes
 /// nothing any node agrees on, but a validator that names a different one on
 /// every run is one nobody can debug.
+///
+/// The key is the input's, as the bytes it carried, and it is only here once
+/// its hash has been found to be the note's owner. It is decoded where the
+/// signature is verified, on whichever thread verifies it, which is the one
+/// place in the whole of validation that does curve arithmetic.
 struct Pending {
-    owner: PublicKey,
+    key: [u8; PUBLIC_KEY_LEN],
     message: Hash32,
     signature: Signature,
     transfer: usize,
@@ -846,10 +980,19 @@ struct Pending {
 }
 
 impl Pending {
+    /// Whether the key is one a signer can hold and the signature verifies
+    /// under it.
+    ///
+    /// A key that hashes to its note's owner and is not a usable point fails
+    /// here, as a signature that does not verify. Only whoever chose to be
+    /// paid at the hash of bytes that are not a key can present one, and
+    /// nobody can sign under it.
+    ///
+    /// The point is decoded once for both questions. Reading the key and then
+    /// verifying with it decoded it twice, since a `PublicKey` keeps the bytes
+    /// and decodes them again to verify.
     fn holds(&self) -> bool {
-        self.owner
-            .verify(self.message.as_bytes(), &self.signature)
-            .is_ok()
+        PublicKey::verify_bytes(&self.key, self.message.as_bytes(), &self.signature).is_ok()
     }
 }
 
@@ -1124,7 +1267,9 @@ pub fn check_transfer(
 /// transaction that made the note together with a position in it, and that
 /// identifier commits to the note. So the message a signature covers cannot be
 /// moved by the chain, and one that held once holds for as long as the transfer
-/// names the same notes.
+/// names the same notes. The same goes for the key each input carries, which
+/// is the transfer's own bytes and was found to hash to the note's owner when
+/// the signature was first checked; `KeyNotOwner` is not asked again here.
 ///
 /// What the chain does move is everything else: whether a note is still there,
 /// whether it has been spent, which of the two sets it sits in, and what the
@@ -1147,9 +1292,10 @@ pub fn check_transfer_again(
 /// The same, with the signatures written down instead of checked.
 ///
 /// Everything else is decided here: the shape, where each note is, that it is
-/// not already spent, and what it is worth. What is left over is the one part
-/// that needs no state at all, and a block's worth of it is enough work to be
-/// worth doing in one go.
+/// not already spent, what it is worth, and that the fee pays for the places
+/// the transfer takes. What is left over is the one part that needs no state
+/// at all, and a block's worth of it is enough work to be worth doing in one
+/// go.
 fn resolve_transfer(
     transfer: &Transfer,
     position_in_block: usize,
@@ -1182,8 +1328,21 @@ fn resolve_transfer(
 
         let position = u32::try_from(index).unwrap_or(u32::MAX);
         if let (Some(collected), Some(signing)) = (pending.as_deref_mut(), signing.as_ref()) {
+            // One hash and no curve arithmetic, before the signature is
+            // collected: a key that is not the owner's is refused without ever
+            // being decoded. It is the whole of what ties the key an input
+            // carries to the note, since the identifier leaves the key out.
+            //
+            // Asked wherever a signature is, and not by the pool's second look,
+            // for the reason that look checks no signature: the note's owner
+            // is settled by its identifier and the key by the transfer's
+            // bytes, so a key that hashed to the owner once does for as long
+            // as the transfer names the same notes.
+            if Address::of_ed25519(&input.key) != spent.owner {
+                return Err(TransferError::KeyNotOwner { input_index: index });
+            }
             collected.push(Pending {
-                owner: spent.owner,
+                key: input.key,
                 message: signing.message(position, &spent),
                 signature: input.signature,
                 transfer: position_in_block,
@@ -1210,11 +1369,36 @@ fn resolve_transfer(
             requested,
         })?;
 
+    // Only a note spent out of the hot set gives a place back. One spent
+    // through the grace window or with a proof had already left the tier, so
+    // every output beside it is a note pushed out of a full one.
+    let places = places_taken(transfer.outputs.len(), from_hot.len());
+    let burn = params
+        .burn_for(places)
+        .ok_or(TransferError::ValueOverflow)?;
+    if fee < burn {
+        return Err(TransferError::PlacesUnpaid { places, burn, fee });
+    }
+
     Ok(TransferOutcome {
         fee,
+        burn,
         spent_hot: from_hot,
         spent_cold: from_cold,
     })
+}
+
+/// The places a transfer making `outputs` notes takes in the hot set, when
+/// `freed` of the notes it spends were in it: its outputs less those, or none
+/// when it gives room back.
+///
+/// One count for the rule and for everything that quotes it, as
+/// [`ConsensusParams::burn_for`] is one price: the pool's floor, its ranking
+/// and a wallet's quote read it here, so none of them can count a place the
+/// block does not.
+#[must_use]
+pub const fn places_taken(outputs: usize, freed: usize) -> usize {
+    outputs.saturating_sub(freed)
 }
 
 /// What applying a block body does to the state, computed without mutation.
@@ -1271,6 +1455,7 @@ pub fn evaluate_block_body(
     let mut spent_cold: BTreeMap<NoteId, ColdSpend> = BTreeMap::new();
     let mut created: Vec<(NoteId, Note)> = Vec::new();
     let mut total_fees = Amount::ZERO;
+    let mut total_burns = Amount::ZERO;
 
     // Collected across the whole block and checked once below, rather than one
     // at a time here. A full block carries over a thousand of them, every one
@@ -1301,6 +1486,9 @@ pub fn evaluate_block_body(
         total_fees = total_fees
             .checked_add(outcome.fee)
             .ok_or(BlockError::ValueOverflow)?;
+        total_burns = total_burns
+            .checked_add(outcome.burn)
+            .ok_or(BlockError::ValueOverflow)?;
     }
 
     if let Some(failed) = first_failure(&pending) {
@@ -1313,10 +1501,14 @@ pub fn evaluate_block_body(
     }
 
     // What the schedule pays at this height, plus what the transfers paid to
-    // be carried.
-    let allowed = params
-        .reward_at(height)
-        .checked_add(total_fees)
+    // be carried, less what they paid for their places. The burn is destroyed
+    // whoever mined the block: a miner that could claim it back would pay
+    // itself for the places its own transfers take, which is paying nothing.
+    // Every transfer's fee covers its own burn, so the subtraction cannot
+    // fail on a block that got this far.
+    let allowed = total_fees
+        .checked_sub(total_burns)
+        .and_then(|kept| params.reward_at(height).checked_add(kept))
         .ok_or(BlockError::ValueOverflow)?;
     let claimed = coinbase.total_output().ok_or(BlockError::ValueOverflow)?;
     if claimed > allowed {
@@ -1327,8 +1519,9 @@ pub fn evaluate_block_body(
     let evicted = state.plan_evictions(&spent_hot, &created, params.hot_capacity);
     // Falling is what a full tier does to make room, so how many fall is
     // decided by what the block creates, and a block can be stuffed with
-    // outputs for exactly that purpose. Fees put a price on it; this puts a
-    // ceiling on it, because a miner pays no fee to itself.
+    // outputs for exactly that purpose. The place price puts a price on it,
+    // the same for a miner as for anyone; this puts a ceiling on the rate,
+    // because whoever will pay the price can otherwise buy any rate at all.
     if evicted.len() > params.max_evictions_per_block {
         return Err(BlockError::TooManyEvictions {
             count: evicted.len(),
@@ -1851,15 +2044,15 @@ mod tests {
     /// arm is not a compile error: it silently takes the default, which
     /// carries the unnamed network's number, no pinned first block and an
     /// opening moment of nought. `cargo mutants` dropped each of them in turn
-    /// and the suite stayed green. A node started with `--network testnet-6`
+    /// and the suite stayed green. A node started with `--network testnet-7`
     /// would then follow another network's number, take whatever first block
     /// it was handed, and accept blocks dated before the network opened.
     #[test]
     fn a_named_network_carries_its_own_identity() {
         let unnamed = ConsensusParams::testnet();
         for (name, id) in [
-            ("testnet", NetworkId::TESTNET_6),
-            ("testnet-6", NetworkId::TESTNET_6),
+            ("testnet", NetworkId::TESTNET_7),
+            ("testnet-7", NetworkId::TESTNET_7),
             ("devnet", NetworkId::DEVNET),
         ] {
             let params = ConsensusParams::for_network(name).expect("a network this build ships");
@@ -1998,13 +2191,13 @@ mod tests {
         let message = Hash32::from_bytes([seed; 32]);
         let signature = key.sign(message.as_bytes());
         Pending {
-            owner: if good {
-                key.public_key()
+            key: if good {
+                key.public_key().to_bytes()
             } else {
                 // A key that did not sign this: the signature is well formed
                 // and does not hold, which is what a forged transfer looks
                 // like and what a corrupted one looks like too.
-                SecretKey::from_bytes(&[0xAB; 32]).public_key()
+                SecretKey::from_bytes(&[0xAB; 32]).public_key().to_bytes()
             },
             message,
             signature,

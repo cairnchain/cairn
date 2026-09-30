@@ -201,7 +201,7 @@ fn an_archivist_does_not_build_a_run_nobody_can_read() {
     // step. Seventeen or eighteen reads a sample over this chain, against the
     // 180 169 the run alone used to add on top.
     assert_eq!(
-        served.reads, 72_436,
+        served.reads, 72_559,
         "answering the draw took {} header reads",
         served.reads
     );
@@ -224,8 +224,8 @@ fn an_archivist_does_not_build_a_run_nobody_can_read() {
 #[test]
 fn a_run_of_exactly_the_ceiling_is_served_and_one_header_more_is_not() {
     for (blocks, held, answered) in [
-        (19_110u64, MOST_TAIL, true),
-        (83_077u64, MOST_TAIL + 1, false),
+        (23_056u64, MOST_TAIL, true),
+        (36_370u64, MOST_TAIL + 1, false),
     ] {
         // One block a minute at the floor, so a work value is a height and the
         // run a draw leaves is the distance from the tip to where it landed.

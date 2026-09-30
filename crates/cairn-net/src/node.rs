@@ -24,11 +24,10 @@ use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_chain::{
     first_to_offer, Accepted, Bodies, ChainError, ChainStore, Located, Outdated, MAX_REORG_DEPTH,
 };
-use cairn_crypto::PublicKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::genesis;
 use cairn_ledger::handover::{accept, Handover, HandoverError};
-use cairn_ledger::note::NetworkId;
+use cairn_ledger::note::{Address, NetworkId};
 use cairn_ledger::pow::RECENT_HEADERS;
 use cairn_ledger::sampling::{check_start, open_start, SampledStart, StartError, Weighed, SAMPLES};
 use cairn_ledger::state::header_leaf;
@@ -1785,13 +1784,15 @@ struct Shared {
 ///
 /// A block that loses the fork choice is held without being applied, and its
 /// body is tried only when its branch becomes the heaviest, which is usually
-/// the delivery of a later block by some other peer. Its identifier is taken
-/// over the header alone, so the body tried can be a copy with its signatures
-/// broken that one connection sent ahead of the real block. Without this, the
-/// refusal reached only the peer that delivered the later block, which was the
-/// one carrying the real chain, and the sender of the copy could send it again
-/// after every failure and keep a node off the heavier branch for as long as
-/// it liked.
+/// the delivery of a later block by some other peer. A body that is not the
+/// one its header names is refused before it is held, so a body that fails is
+/// a mined block that is invalid, and the connection that handed it in
+/// relayed a block it had not validated. Without this, the refusal reached
+/// only the peer that delivered the later block, and the sender of the body
+/// could send it again after every failure. It was written when the body
+/// tried could be a copy of a real block with its signatures broken, sent
+/// ahead of the real one and able to keep a node off the heavier branch for as
+/// long as its sender liked; the root now refuses such a copy on arrival.
 #[derive(Debug)]
 struct HeldAside {
     by: HashMap<Hash32, HandedIn>,
@@ -4009,10 +4010,10 @@ impl Shared {
     /// before it is read, and the first one it refuses ends the batch there:
     /// nothing after it is read. Each comes back with that weight. The whole
     /// batch used to be read first and priced after, and reading a block off
-    /// the disk decodes it, which is a key off the curve for every owner in
-    /// it: a hundred and twenty eight old full blocks cost this node eight
-    /// seconds of processor for one ask, whatever the peer's window then
-    /// allowed it to be sent.
+    /// the disk decodes it, which while a note's owner was a key was a key off
+    /// the curve for every owner in it: a hundred and twenty eight old full
+    /// blocks cost this node eight seconds of processor for one ask, whatever
+    /// the peer's window then allowed it to be sent.
     fn blocks_at(
         &self,
         heights: &[u64],
@@ -4496,7 +4497,7 @@ impl Node {
         params: ConsensusParams,
         address: SocketAddr,
         directory: impl Into<PathBuf>,
-        owners: &[PublicKey],
+        owners: &[Address],
     ) -> Result<(Self, Restored), NodeError> {
         Self::open_with(params, address, directory, false, owners)
     }
@@ -4521,7 +4522,7 @@ impl Node {
         address: SocketAddr,
         directory: impl Into<PathBuf>,
         archiving: bool,
-        owners: &[PublicKey],
+        owners: &[Address],
     ) -> Result<(Self, Restored), NodeError> {
         let directory = directory.into();
         let lock = DirectoryLock::acquire(&directory)?;
@@ -9857,7 +9858,7 @@ fn paid_and_decoded(
     if !peer.afford_reading(frame, now, || shared.choosing().asked_join(id)) {
         return Ok(None);
     }
-    Ok(Some(Message::decode(frame)?))
+    Ok(Some(Message::from_frame(frame)?))
 }
 
 /// Whether this node lets a message reach the layer that decides about it.
@@ -9983,8 +9984,9 @@ fn read_loop(
         // the protocol allows between nodes that know each other; this is what
         // a stranger gets, and a handshake is a fixed set of fields a few
         // hundred bytes long. Before it arrives, a megabyte of notes bought
-        // one and a third seconds of this node's processor, because decoding
-        // one decompresses a curve point for every owner in it.
+        // one and a third seconds of this node's processor while a note's
+        // owner was a key, because decoding one decompressed a curve point
+        // for every owner in it.
         //
         // Lifted by the introduction and not by the port it names. It was
         // lifted once the peer had an address worth writing down, which a
@@ -10521,7 +10523,7 @@ mod disk_and_headers {
     /// that no longer starts where the ledger does.
     #[test]
     fn a_chain_that_holds_its_first_block_is_not_given_it_again() {
-        let params = ConsensusParams::for_network("testnet-6").expect("testnet-6 exists");
+        let params = ConsensusParams::for_network("testnet-7").expect("testnet-7 exists");
         let opened = genesis::opens_at(params.network);
         let directory = scratch("first-block-again");
         let (mut log, _) = BlockLog::open(&directory).unwrap();
@@ -11974,6 +11976,17 @@ mod peers_and_loops {
             let _ = write_message(&mut self.far, self.node.shared.network(), message);
         }
 
+        /// A frame carrying `body` as it is, for what this build would never
+        /// write itself.
+        fn send_body(&mut self, body: &[u8]) {
+            use std::io::Write as _;
+            let mut frame = Vec::new();
+            self.node.shared.network().as_u32().encode_to(&mut frame);
+            u32::try_from(body.len()).unwrap().encode_to(&mut frame);
+            frame.extend_from_slice(body);
+            let _ = self.far.write_all(&frame);
+        }
+
         /// Whether the node answers with something `wanted` picks out.
         fn hears(&self, wanted: impl Fn(&Message) -> bool) -> bool {
             while let Ok((message, _)) = self.said.recv_timeout(Duration::from_secs(10)) {
@@ -12013,7 +12026,6 @@ mod peers_and_loops {
             version: PROTOCOL_VERSION,
             network,
             genesis: Hash32::ZERO,
-            tip: Hash32::ZERO,
             height,
             total_work: work,
             listen: 9_944,
@@ -13236,14 +13248,14 @@ mod peers_and_loops {
 
     /// A frame the peer's window cannot pay for is not decoded.
     ///
-    /// Decoding is where a frame of notes costs this node its processor: an
-    /// owner's key off the curve and checked for its subgroup, about fifty
-    /// microseconds a note, nine tenths of a second for eight hundred
-    /// kilobytes of them. The window was asked only once a message had been
-    /// built, so a peer that had spent it went on sending frames of owners,
-    /// and each was decoded in full and then answered with silence. Nothing
-    /// asked which came first, so a node that decoded before it priced passed
-    /// every test there was.
+    /// Decoding is where a frame of notes cost this node its processor while a
+    /// note's owner was a key: an owner's key off the curve and checked for its
+    /// subgroup, about fifty microseconds a note, nine tenths of a second for
+    /// eight hundred kilobytes of them. The window was asked only once a
+    /// message had been built, so a peer that had spent it went on sending
+    /// frames of owners, and each was decoded in full and then answered with
+    /// silence. Nothing asked which came first, so a node that decoded before
+    /// it priced passed every test there was.
     ///
     /// Measured by what the node does with a frame it could only have refused
     /// by decoding it: one that is not a message at all. Read after the window
@@ -13667,7 +13679,6 @@ mod peers_and_loops {
                 version,
                 network,
                 genesis: Hash32::ZERO,
-                tip: Hash32::ZERO,
                 height: 0,
                 total_work: 0,
                 listen: 9_944,
@@ -13700,6 +13711,48 @@ mod peers_and_loops {
                  nothing, and dropped on its third"
             );
         }
+    }
+
+    /// A dialled address that answered from protocol nine, laid out as nine
+    /// lays out its introduction, is not charged a miss for it.
+    ///
+    /// Nine's introduction carries the tip's identifier that ten no longer
+    /// has, so it is 32 bytes longer than ten's. It used to be decoded with
+    /// ten's layout before its version was compared, came out a broken frame,
+    /// and was booked as a dial that came to nothing and the host as one to
+    /// refuse. The test above answers with ten's layout, so a node forgetting
+    /// every node one version behind it passed.
+    #[test]
+    fn a_dialled_address_that_answered_in_an_older_versions_layout_is_not_charged_a_miss() {
+        let ours = Handshake {
+            version: PROTOCOL_VERSION,
+            network: ConsensusParams::testnet().network,
+            genesis: Hash32::ZERO,
+            height: 0,
+            total_work: 0,
+            listen: 9_944,
+            nonce: 7,
+            keeps: Keeps::default(),
+        }
+        .encode();
+        let mut nine = vec![1u8];
+        9u32.encode_to(&mut nine);
+        nine.extend_from_slice(&ours[4..40]);
+        nine.extend_from_slice(&[0xAB; 32]);
+        nine.extend_from_slice(&ours[40..]);
+
+        let node = quiet();
+        let dialled = on_its_last_chance(&node, 9_966);
+        let mut line = Line::open(node, Some(dialled));
+        line.send_body(&nine);
+        let ended = line.ends();
+        let node = line.close();
+        assert!(ended, "a peer on protocol nine was kept");
+        assert!(
+            node.shared.book().contains(&dialled),
+            "an address that answered from protocol nine was read as a broken frame, counted \
+             as a dial that came to nothing, and dropped on its third"
+        );
     }
 
     /// A dialled address that took the connection and shut it before saying a
@@ -15150,9 +15203,9 @@ mod clock_tests {
     /// waiting for its first peer.
     #[test]
     fn a_clock_behind_the_first_block_is_named_rather_than_dropped() {
-        let params = ConsensusParams::for_network("testnet-6").expect("testnet-6 exists");
+        let params = ConsensusParams::for_network("testnet-7").expect("testnet-7 exists");
         let opened = genesis::opens_at(params.network);
-        assert!(opened > 0, "testnet-6 pins a first block");
+        assert!(opened > 0, "testnet-7 pins a first block");
 
         let mut chain = ChainStore::new(params);
         let ahead = open_the_chain(&mut chain, None, params, opened - DRIFT - 60)
@@ -16424,14 +16477,15 @@ mod tests {
     /// A block the asking peer's window cannot pay for is not read off the
     /// disk.
     ///
-    /// Reading a record back decodes it, and decoding a block decompresses a
-    /// key off the curve for every owner in it: sixty five milliseconds for a
-    /// full one. The batch was read whole and priced after, so a peer with
-    /// nothing left in its window still had a hundred and twenty eight old
-    /// blocks read and decoded for every ask, which is eight seconds of this
-    /// node's processor an ask for full ones, and was then sent none of them.
-    /// Nothing counted what serving read, so a node that read everything and
-    /// sent what was paid for passed every test there was.
+    /// Reading a record back decodes it, and while a note's owner was a key,
+    /// decoding a block decompressed a key off the curve for every owner in it:
+    /// sixty five milliseconds for a full one. The batch was read whole and
+    /// priced after, so a peer with nothing left in its window still had a
+    /// hundred and twenty eight old blocks read and decoded for every ask,
+    /// which is eight seconds of this node's processor an ask for full ones,
+    /// and was then sent none of them. Nothing counted what serving read, so a
+    /// node that read everything and sent what was paid for passed every test
+    /// there was.
     ///
     /// Counted by the bytes hashed on this thread: reading a record back hashes
     /// its transactions to hold them to its header, and nothing else in

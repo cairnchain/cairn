@@ -1682,7 +1682,7 @@ fn the_reorg_window_can_no_longer_be_had_for_a_thousand_hashes() {
 /// A brand new network, from its opening difficulty down, driven by a miner
 /// that holds every block and dates them with the median-legal saw.
 ///
-/// `testnet-6` opens at 2^27 and `devnet` at 2^23. The opening difficulty is
+/// `testnet-7` opens at 2^27 and `devnet` at 2^23. The opening difficulty is
 /// described as what makes the first seconds of a launch fair, and the saw used
 /// to take either of them to the floor inside the two hour drift budget of the
 /// time: a few hundred blocks, an hour of chain time, and a few blocks' worth
@@ -1696,7 +1696,7 @@ fn an_opening_difficulty_no_longer_falls_to_the_saw() {
     let pattern = [
         true, false, true, false, true, false, true, false, true, false, false,
     ];
-    for (name, start, target) in [("testnet-6", 1u64 << 27, 60u64), ("devnet", 1 << 23, 5)] {
+    for (name, start, target) in [("testnet-7", 1u64 << 27, 60u64), ("devnet", 1 << 23, 5)] {
         let ceiling = target * 6;
         let saw = |rule: Retarget, limit: usize| {
             let mut window = Window::new();

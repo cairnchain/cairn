@@ -552,7 +552,13 @@ async function home() {
         { class: 'stats' },
         stat(t('stat.height'), count(status.tip ? status.tip.height : 0), status.tip ? ago(status.tip.timestamp) : ''),
         stat(t('stat.difficulty'), status.tip && status.tip.difficulty ? count(BigInt(status.tip.difficulty)) : '-'),
-        stat(t('stat.supply'), cairn(status.supply.issued) + ' CAIRN', t('stat.supply.note', { reward: cairn(status.supply.nextReward) })),
+        stat(
+          t('stat.supply'),
+          cairn(status.supply.issued) + ' CAIRN',
+          status.supply.destroyed === null
+            ? t('stat.supply.note', { reward: cairn(status.supply.nextReward) })
+            : t('destroyed.supply.note', { reward: cairn(status.supply.nextReward), destroyed: cairn(status.supply.destroyed) })
+        ),
         stat(t('stat.holders'), count(status.chain.holders)),
         stat(t('stat.pool'), count(status.pool), t('stat.pool.note')),
         stat(t('stat.peers'), count(status.peers))
@@ -1203,6 +1209,12 @@ async function block(reference, parameters) {
     row(t('field.size'), bytes(data.size)),
     row(t('field.reward'), cairn(data.reward) + ' CAIRN'),
     row(t('field.fees'), data.fees === null ? t('field.unknown') : cairn(data.fees) + ' CAIRN'),
+    row(t('destroyed.block'), data.destroyed === null ? t('field.unknown') : cairn(data.destroyed) + ' CAIRN', el('span', { class: 'row-note', text: ' ' + t('destroyed.block.note') })),
+    data.unclaimed === null
+      ? row(t('destroyed.unclaimed'), t('field.unknown'), el('span', { class: 'row-note', text: ' ' + t('destroyed.unclaimed.note') }))
+      : data.unclaimed !== '0'
+        ? row(t('destroyed.unclaimed'), cairn(data.unclaimed) + ' CAIRN', el('span', { class: 'row-note', text: ' ' + t('destroyed.unclaimed.note') }))
+        : null,
     el(
       'div',
       { class: 'row lv-technical' },
@@ -1830,7 +1842,7 @@ function unpack(build) {
 function download() {
   setTitle(t('nav.run'));
   clear(view);
-  const network = state.status && state.status.network ? state.status.network.name : 'testnet-6';
+  const network = state.status && state.status.network ? state.status.network.name : 'testnet-7';
   const here = thisMachine();
   const mine = BUILDS.find((build) => build.key === here) || null;
   const rest = BUILDS.filter((build) => build !== mine);
@@ -2025,13 +2037,12 @@ searchForm.addEventListener('submit', async (event) => {
   try {
     const answer = await api('search?q=' + encodeURIComponent(query));
     if (answer.target) {
-      // A transaction identifier and an address are both thirty two bytes, so
-      // anything the site has not read falls through to the address page. It
-      // used to go there without a word, and somebody looking up their own
-      // transaction was told, in effect, that it was an address holding
-      // nothing. The page is still shown, because an address nobody has paid
-      // is not in the index either; what is no longer left out is that this
-      // was a guess made off part of a chain.
+      // An address is written with its network's prefix and a checksum, so a
+      // transaction identifier this site has not read no longer falls through
+      // to the address page. What an address page shows is still made off the
+      // part of the chain this site has read, and that is said rather than
+      // left out: an address paid below where the reading starts shows less
+      // than it holds.
       const guessed = answer.kind === 'address' && answer.coverage && answer.coverage.whole === false;
       searchInput.value = '';
       go(answer.target);

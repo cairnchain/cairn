@@ -118,7 +118,7 @@ what it names, in order, and to nothing else.
 
 Each 32-byte domain constant is BLAKE3's `derive_key` over the context string
 below with empty key material, and every hash under that domain is BLAKE3 keyed
-with that constant. All twenty are given here, because a document that named
+with that constant. All twenty four are given here, because a document that named
 only some of them could not be used to compute an identifier, which is the one
 thing it exists for.
 
@@ -129,6 +129,7 @@ thing it exists for.
     <tr><td>coinbase id</td><td><code>cairn v1 coinbase id</code></td></tr>
     <tr><td>block header id</td><td><code>cairn v1 block header id</code></td></tr>
     <tr><td>signature message</td><td><code>cairn v1 signature message</code></td></tr>
+    <tr><td>address</td><td><code>cairn v1 address</code></td></tr>
     <tr><td>merkle leaf</td><td><code>cairn v1 merkle leaf</code></td></tr>
     <tr><td>merkle node</td><td><code>cairn v1 merkle node</code></td></tr>
     <tr><td>merkle empty</td><td><code>cairn v1 merkle empty</code></td></tr>
@@ -145,6 +146,9 @@ thing it exists for.
     <tr><td>header history leaf</td><td><code>cairn v1 header history leaf</code></td></tr>
     <tr><td>sampling seed</td><td><code>cairn v1 sampling seed</code></td></tr>
     <tr><td>grace window</td><td><code>cairn v1 grace window</code></td></tr>
+    <tr><td>transfer commitment</td><td><code>cairn v1 transfer commitment</code></td></tr>
+    <tr><td>sampling draw</td><td><code>cairn v1 sampling draw</code></td></tr>
+    <tr><td>forest empty</td><td><code>cairn v1 forest empty</code></td></tr>
   </tbody>
 </table>
 
@@ -166,13 +170,13 @@ where the structure is specified.
 
 ## Notes
 
-A note is an amount and the public key that may spend it.
+A note is an amount and the address that may spend it.
 
 <table>
   <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
   <tbody>
     <tr><td>value</td><td>amount</td><td class="n">8</td></tr>
-    <tr><td>owner</td><td>public key</td><td class="n">32</td></tr>
+    <tr><td>owner</td><td>address</td><td class="n">32</td></tr>
   </tbody>
 </table>
 
@@ -188,22 +192,61 @@ transaction's outputs.
   </tbody>
 </table>
 
-A public key is 32 bytes and is an Ed25519 verifying key. A decoder MUST refuse
-bytes that are not a canonical encoding of a point on the curve, MUST refuse a
-key of small order, and MUST refuse a key that is not in the prime order
-subgroup. All three refusals happen at decode, so a structure that decoded
-holds no unusable key.
+An address is the hash, under the address domain, of a scheme byte followed
+by a public key:
 
-The third is the one that carries the sentence after it. Ed25519's group has a
-cofactor of eight, so a point may be `A + T` for a prime order point `A` and a
-non-identity point `T` of order dividing eight. Such a point is canonically
-encoded, decodes cleanly, and is not of small order, so the first two refusals
-pass it. No signer can produce a signature that verifies under it: Ed25519
-clamping clears the low three bits of the scalar, so a public key is always a
-multiple of eight times the basepoint and therefore always lies in the prime
-order subgroup. Seven of every eight byte strings that pass the first two
-refusals are addresses nobody holds a secret for, and a note paid to one is
-unspendable.
+```text
+address = H(address, 0x00 || key)
+```
+
+`0x00` is Ed25519, and `key` is the 32-byte public key. It is the only scheme a
+version 1 transfer knows. The scheme byte is inside the hash so that a key of
+another scheme with the same 32 bytes can never name the same owner. An address
+is 32 bytes and a decoder reads it as bytes: nothing about it can be checked
+until a key is presented for it, and a decoder does no curve arithmetic for it.
+
+So an unspent note shows no key. The key appears on the chain when a note paid
+to its address is first spent, in the input that spends it, and it is checked
+there twice: that it hashes to the note's owner, as soon as the input has
+resolved, and that it is a key a signer can hold, when the signature is
+verified (*How a signature is verified*). Every other note the same address
+still holds, change included, is committed to that published key from then on.
+A note can be paid to an address nobody holds a key for, as on any chain that
+pays to the hash of a key; the text form below is what stops one being typed by
+mistake.
+
+### Addresses as text
+
+An address is written in Bech32m, as BIP 350 defines it: a prefix naming the
+kind of network, the separator `1`, the 32 bytes as 52 characters of five bits
+each, the last padded with zero bits, and six characters of checksum. There is
+no version character: the scheme is inside the hash.
+
+<table>
+  <thead><tr><th>Network</th><th>Prefix</th><th class="n">Characters</th></tr></thead>
+  <tbody>
+    <tr><td>mainnet</td><td>cairn</td><td class="n">64</td></tr>
+    <tr><td>every test network</td><td>tcairn</td><td class="n">65</td></tr>
+    <tr><td>devnet</td><td>dcairn</td><td class="n">65</td></tr>
+  </tbody>
+</table>
+
+Test networks share a prefix, so an address stays the same across the restarts
+a test network goes through. A reader MUST refuse a string that mixes capital
+and small letters, a prefix other than its network's, a checksum that is not
+Bech32m's, spare bits in the last character that are not zero, and data of any
+length but 32 bytes. It MAY read the same string written all in capitals, which
+is how a QR code carries it. Bech32m detects every error of up to four
+characters in a string this long, so every single-character typo is refused.
+
+These are the address of the key in the signature vectors below, under each
+prefix:
+
+```text
+cairn   cairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqkvxac6
+tcairn  tcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqtk5uk3
+dcairn  dcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysq5lsh2e
+```
 
 ## Transactions
 
@@ -222,13 +265,16 @@ that exist. A coinbase creates them, and exactly one appears in each block.
 </table>
 
 An input names a note, says how its existence is being shown, and carries the
-signature that authorises spending it.
+public key whose address owns the note and the signature that authorises
+spending it. The key is 32 bytes, read as bytes, and decoded only to verify the
+signature.
 
 <table>
   <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
   <tbody>
     <tr><td>note_id</td><td>note identifier</td><td class="n">36</td></tr>
     <tr><td>witness</td><td>witness</td><td class="n">1 or more</td></tr>
+    <tr><td>key</td><td>public key</td><td class="n">32</td></tr>
     <tr><td>signature</td><td>signature</td><td class="n">64</td></tr>
   </tbody>
 </table>
@@ -252,8 +298,10 @@ note's leaf up to the root of its tree, bottom first, as *Proofs* gives them.
 
 **A transfer's identifier is not the hash of its wire encoding.** It is the
 hash, under the transfer domain, of the version, the count of inputs, each
-input's note identifier alone, and the outputs. Signatures and witnesses are
-left out.
+input's note identifier alone, and the outputs. Keys, signatures and witnesses
+are left out. A key goes with its signature: it is known once the input is
+signed and not before, and leaving it out lets no other key in, since only one
+key hashes to a note's owner.
 
 <table>
   <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
@@ -279,7 +327,10 @@ known before the transaction is signed.
 It is an instance of the case section 3 names: a field left out of an
 identifier's encoding is a field the identifier does not commit to. Two nodes
 can hold the same transfer identifier over different bytes, differing in
-signatures and witnesses, and that is intended rather than tolerated.
+signatures and witnesses, and that is intended rather than tolerated. A block
+does commit to those bytes: its `transactions_root` is taken over each
+transfer's whole encoding, so a block names the version of the transfer its
+miner carried.
 
 ### What a signature commits to
 
@@ -295,14 +346,15 @@ input's index, and the value and owner of the note being spent.
     <tr><td>transfer</td><td>hash</td><td class="n">32</td></tr>
     <tr><td>index</td><td>u32</td><td class="n">4</td></tr>
     <tr><td>value</td><td>amount</td><td class="n">8</td></tr>
-    <tr><td>owner</td><td>public key</td><td class="n">32</td></tr>
+    <tr><td>owner</td><td>address</td><td class="n">32</td></tr>
   </tbody>
 </table>
 
 That is 82 bytes. `network` is the identifier the network's headers carry,
 `version` is the transfer's, `transfer` is its identifier, `index` is the
 input's position among the transfer's inputs counting from nought, and `value`
-and `owner` are the spent note's.
+and `owner` are the spent note's: its owner is its address, not the key that
+signs.
 
 The last two matter and are not obvious. Without them a wallet shown a false
 value for the note it is spending would sign a transaction whose real fee is
@@ -315,8 +367,28 @@ scalar `S`, little-endian, in the last 32. It is pure Ed25519 as RFC 8032
 defines it, with the 32 bytes of the digest above as the message: no prehash
 and no context, so neither Ed25519ph nor Ed25519ctx.
 
+The key is the one the input carries, and by the time a signature is verified
+its hash has been found to be the note's owner (`KeyNotOwner` otherwise, among
+the state-dependent refusals). It is decoded here and nowhere else, as an
+Ed25519 verifying key, and a node MUST refuse bytes that are not a canonical
+encoding of a point on the curve, MUST refuse a key of small order, and MUST
+refuse a key that is not in the prime order subgroup. A key refused here
+refuses the signature, as `InvalidSignature`: only whoever chose to be paid at
+the hash of those bytes can present them.
+
+The third refusal is the one that carries the sentence after it. Ed25519's
+group has a cofactor of eight, so a point may be `A + T` for a prime order
+point `A` and a non-identity point `T` of order dividing eight. Such a point is
+canonically encoded, decodes cleanly, and is not of small order, so the first
+two refusals pass it. No signer can produce a signature that verifies under
+it: Ed25519 clamping clears the low three bits of the scalar, so a public key
+is always a multiple of eight times the basepoint and therefore always lies in
+the prime order subgroup. Seven of every eight byte strings that pass the first
+two refusals are keys nobody holds a secret for, and a note paid to the address
+of one is unspendable.
+
 RFC 8032 leaves a verifier two choices, and the verifiers in use differ
-exactly there, so this protocol makes both. With `A` the owner's public key,
+exactly there, so this protocol makes both. With `A` the input's key,
 `B` the base point, `M` the message, and `L` the order of the prime order
 subgroup, which is `2^252 + 27742317777372353535851937790883648493`, a node
 MUST accept a signature if and only if all four of these hold:
@@ -329,9 +401,9 @@ MUST accept a signature if and only if all four of these hold:
    reduced modulo `L`. The equation is checked as written, without multiplying
    either side by the cofactor.
 
-Any other signature is refused, and the refusal is `InvalidSignature`. `A` is a
-key that passed the three refusals in *Notes*, so it is never of small order
-itself.
+Any other signature is refused, and the refusal is `InvalidSignature`. `A` is
+the input's key, decoded with the three refusals above, so it is never of small
+order itself.
 
 The third and the fourth are the choices. RFC 8032 never asks about the order
 of `R`, and without the third a signature whose `R` is the identity and whose
@@ -397,8 +469,49 @@ by the refusals in *Which witness a spend must carry*, and the signatures come
 last: in a block, after every transfer's inputs have resolved, as the body
 table in *Blocks* orders them.
 
-Outputs MUST NOT exceed inputs. The difference is the fee, and it is claimed by
-the block's coinbase or destroyed; there is no third destination.
+Outputs MUST NOT exceed inputs. The difference is the fee. The part of it
+that is the transfer's burn, below, is burned; the rest is claimed by the
+block's coinbase or left unclaimed; there is no third destination.
+
+### Places
+
+A transfer's *places* are the number of its outputs less the number of its
+inputs whose note was in the hot set, or nought if that is negative. An input
+spent through the grace window, or carrying a proof, frees no place: its note
+had already left the hot set, so every output beside it is a note the transfer
+adds to the tier. Which inputs those are is settled as the inputs resolve, by
+*Which witness a spend must carry*.
+
+A transfer's *burn* is `place_price` times its places. A burn that does not
+fit in an amount is refused `ValueOverflow`, which no network here can reach.
+**A transfer MUST give up as fee at least its burn**, and one that does not is
+refused `PlacesUnpaid`. The burn is burned: the coinbase may claim the fees
+less the burns, and no more. So a miner filling its own block with outputs
+pays for every place what anybody else would, and cannot pay it to itself.
+
+The burn is a fee, paid once, by whoever makes the transfer, when it is made.
+Nothing is charged to a note for being in the hot set, for how long it stays
+there, or for leaving it: a note is never destroyed, expired or charged rent.
+Spending a note gives its place back for nothing, and a transfer that spends as
+many hot notes as it creates burns nothing. A coinbase's outputs take places
+and carry no burn; there are at most 16 of them.
+
+`place_price` is a consensus parameter of the network, in the table in *The
+two tiers*: 6 000 pebbles on every network here. It is measured rather than
+chosen, by the rule that pushing a note out of the hot set costs the pusher at
+least what spending it afterwards costs its owner, in the extra bytes of a cold
+witness at ten pebbles a byte. Measured after a flood that pushed a full tier
+out, the displaced owners' payments grew by 596 bytes, a cold witness carrying
+the note, its position and a path of seventeen hashes against a one-byte tag,
+and the price is that times ten, rounded up to the thousand.
+
+A transfer that pays its burn is still not owed a place in the very next
+block: the tier's room plus its eviction cap, less the coinbase's own outputs,
+is all a block has for transfers, and a pool MAY refuse `TooManyPlacesForABlock`
+to a transfer whose places do not fit in what is left. This is pool policy,
+not consensus: a block carrying such a transfer is judged by `PlacesUnpaid`
+and `TooManyEvictions` alone, and a node that pools differently, or not at
+all, still follows the same chain.
 
 ### Coinbase
 
@@ -417,8 +530,8 @@ carrying it, so the same coinbase cannot be replayed at another height. `extra`
 is free bytes for a miner, bounded, and committed to like everything else.
 
 A coinbase MUST NOT pay more than the schedule allows at its height plus the
-fees the block's own transfers gave up. Paying less is permitted, and the
-difference is destroyed rather than held anywhere.
+fees the block's own transfers gave up, less their burns. Paying less is
+permitted, and the difference is left unclaimed rather than held anywhere.
 
 ## Blocks
 
@@ -449,12 +562,20 @@ else in this protocol.
 
 A block is its header, its coinbase, and its sequence of transfers. The
 identifier of a block is the identifier of its header, and the header commits
-to the body through `transactions_root`.
+to every byte of the body through `transactions_root`.
 
 `transactions_root` is the Merkle root, under the merkle domains, of one leaf
 per transaction: the coinbase first, then the transfers in the order they
-appear in the block. Each leaf is the hash under the merkle leaf domain of that
-transaction's identifier. An interior node is the hash under the merkle node
+appear in the block. The coinbase's leaf is the hash under the merkle leaf
+domain of its identifier, which is already the hash of its whole encoding. A
+transfer's leaf is the hash under the merkle leaf domain of its commitment, and
+a transfer's commitment is the hash under the transfer commitment domain of its
+whole encoding as it travels: the version, every input with its witness, key
+and signature, and the outputs, with their counts, as *Transactions* lays them
+out. Not its identifier, which leaves signatures and witnesses out: a
+root over identifiers would name every body that differed from the real one in
+those, and some of them are valid, since inside the grace window a note can be
+spent with or without its proof. An interior node is the hash under the merkle node
 domain of its two children in order, and a level with an odd count carries the
 last node up unchanged rather than duplicating it, which is what stops two
 different bodies producing one root. The root of no leaves is the hash under
@@ -507,10 +628,12 @@ sent it.
 comes after the header's own arithmetic, which costs nothing, and before the
 body is looked at, which costs a great deal. A forged block therefore costs its
 sender the work or costs the reader one hash, once it has been read. Reading it
-is paid for separately and first: decoding a block decompresses a key off the
-curve for every owner in it, a frame may be eight times the largest block the
-rules allow, and so a frame is charged to its sender's allowance by its size
-before it is decoded. See the allowance.
+is paid for separately and first: a frame may be eight times the largest block
+the rules allow, and so a frame is charged to its sender's allowance by its size
+before it is decoded. See the allowance. Decoding a block does no curve
+arithmetic: an owner is an address, and each input's key is carried as bytes
+and decoded once, when its signature is verified, after its hash has matched
+the note's owner.
 
 **Sixteen is the one refusal in this list that two honest nodes on the same
 build can disagree about.** It is measured against the reading node's own
@@ -543,10 +666,10 @@ transactions root are checked before any of it.
     <tr><td class="n">4</td><td>ZeroValueCoinbaseOutput</td><td>a coinbase note worth nothing</td></tr>
     <tr><td class="n">5</td><td>TooManyTransfers</td><td>past the network's limit, which is 4 096 on every network here</td></tr>
     <tr><td class="n">6</td><td>InvalidTransfer</td><td>every transfer in block order: its shape by the transfer rules above, then its inputs by the refusals in <em>Which witness a spend must carry</em></td></tr>
-    <tr><td class="n">7</td><td>ValueOverflow</td><td>the fees the transfers give up do not sum</td></tr>
+    <tr><td class="n">7</td><td>ValueOverflow</td><td>the fees the transfers give up, or their burns, do not sum</td></tr>
     <tr><td class="n">8</td><td>InvalidSignature</td><td>once every transfer has passed six, the first input in block order whose signature does not verify</td></tr>
-    <tr><td class="n">9</td><td>ValueOverflow</td><td>the schedule's reward plus the fees, or the coinbase's outputs, do not sum</td></tr>
-    <tr><td class="n">10</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up</td></tr>
+    <tr><td class="n">9</td><td>ValueOverflow</td><td>the schedule's reward plus the fees given up less their burns, or the coinbase's outputs, do not sum</td></tr>
+    <tr><td class="n">10</td><td>CoinbaseOverpay</td><td>the coinbase claims more than the schedule pays plus the fees given up, less their burns</td></tr>
     <tr><td class="n">11</td><td>TooManyEvictions</td><td>past the network's eviction cap</td></tr>
     <tr><td class="n">12</td><td>SupplyDoesNotAddUp</td><td>the running supply is not the parent's plus what this block issued</td></tr>
   </tbody>
@@ -561,6 +684,8 @@ transfer's shape. The verdict is the same either way; only the name differs.
 Seven, and the first half of nine, cannot happen on any chain these rules
 produce: fees are given up by notes that exist, so they sum to at most the
 supply, and the schedule keeps the supply near a tenth of the monetary ceiling.
+Every transfer's fee covers its own burn, so the fees less the burns never
+fall below nought either.
 They are named because part 1 names every overflow.
 The second half of nine can happen: a coinbase carries up to sixteen outputs,
 each of them an amount, and sixteen amounts need not sum to one. A node asks
@@ -619,10 +744,11 @@ reports it, which is why it is written as a rule here rather than left as a
 number an implementation picks.
 
 <table>
-  <thead><tr><th>Parameter</th><th>testnet-6</th><th>devnet</th><th>What it bounds</th></tr></thead>
+  <thead><tr><th>Parameter</th><th>testnet-7</th><th>devnet</th><th>What it bounds</th></tr></thead>
   <tbody>
     <tr><td>hot capacity</td><td class="n">131 072</td><td class="n">64</td><td>notes the hot set holds</td></tr>
-    <tr><td>evictions per block</td><td class="n">1 024</td><td class="n">1 024</td><td>notes one block may push out</td></tr>
+    <tr><td>evictions per block</td><td class="n">1 024</td><td class="n">32</td><td>notes one block may push out</td></tr>
+    <tr><td>place price</td><td class="n">6 000</td><td class="n">6 000</td><td>pebbles burned for each place a transfer takes</td></tr>
     <tr><td>coinbase maturity</td><td class="n">1 024</td><td class="n">32</td><td>blocks a reward waits</td></tr>
   </tbody>
 </table>
@@ -636,10 +762,13 @@ constants rather than network parameters: every network carries the same two.
 
 Devnet is a throwaway network and is listed only because a second
 implementation that supports it has to get it right. It lowers the hot
-capacity and inherits the eviction cap, so there the cap is larger than the
-tier and one block can empty the whole of it. On testnet-6 the cap is a
-hundred and twenty eighth of the tier, so emptying the tier takes at least
-128 blocks whatever shape the blocks take.
+capacity to 64 and the eviction cap to 32 with it, so there too the cap is
+below the tier, and emptying the tier takes at least two blocks. The cap goes
+no lower because a miner building a block keeps room for a full coinbase, 16
+notes, out of it: a cap of 16 or less would leave a full devnet tier carrying
+no payment at all. On testnet-7 the cap is a hundred and twenty eighth of the
+tier, so emptying the tier takes at least 128 blocks whatever shape the blocks
+take.
 
 ### What the state root commits to
 
@@ -770,9 +899,11 @@ A node MUST refuse a block whose eviction list is longer than
 `max_evictions_per_block`, with `TooManyEvictions`. How fast the hot set turns
 over is a shared resource: every note pushed out is somebody's money now
 needing a proof to spend, and the pusher chooses whose by choosing nothing,
-since it is always the oldest that falls. Fees put a price on that; a miner
-includes its own transfers for free, so this is the bound that holds whatever
-anyone pays.
+since it is always the oldest that falls. The place price puts a price on
+that, and since the burn is burned rather than claimed, it is the same
+price for a miner filling its own block as for anyone. A price bounds nothing
+for whoever will pay it, so this is the bound on the rate, whatever anyone
+pays.
 
 The block's effect on the two tiers MUST be applied in this order, and the
 order is part of the rule rather than an implementation's convenience:
@@ -848,6 +979,10 @@ and not by the block at *f* + 65. Said of the window rather than of the note:
 after the block at height *h* it holds the landings of the blocks at heights
 *h* - 63 through *h*, and the block at *h* + 1 is judged against that. The note
 bound moves that edge earlier whenever more than 128 notes a block are falling.
+At the eviction cap of a public network it holds the window to 8 blocks, and
+that rate can be bought by anybody willing to pay the place price for about a
+thousand places a block, a miner included: 64 blocks of grace is what a quiet
+chain gives when nobody pays to change it.
 
 ### Which witness a spend must carry
 
@@ -866,7 +1001,10 @@ question about the state, and this is the answer.
 Inside the window both tags are accepted and they reach the same state: either
 way the note is taken out of the accumulator at its position, and either way
 the transfer has the same identifier, because a transfer's identifier leaves
-its witnesses out. A node MUST NOT treat the two as different transfers.
+its witnesses out. A node MUST NOT treat the two as different transfers. A
+block names which of the two it carried, since its `transactions_root` commits
+to each transfer's whole encoding, and a copy of the block carrying the other
+tag is a body its header does not name.
 
 `MissingProof` names two situations a node cannot tell apart: a note that fell
 and whose spender did not prove it, and a note that never existed. A node
@@ -874,8 +1012,10 @@ holds neither the cold set nor a record of what was never in it.
 
 The state-dependent refusals a transfer's inputs produce. Inputs are resolved
 in the order they appear. Within one input, the first two are asked before
-anything else, the middle four are the branches of where the note turns out to
-be, and the last is asked once every input has resolved.
+anything else, the next four are the branches of where the note turns out to
+be, and the seventh is asked of the input once it has resolved. The last two
+are asked of the transfer once every input has resolved, and before any
+signature is verified.
 
 <table>
   <thead><tr><th class="n">#</th><th>Refusal</th><th>When</th></tr></thead>
@@ -886,7 +1026,9 @@ be, and the last is asked once every input has resolved.
     <tr><td class="n">4</td><td>MissingProof</td><td>it is neither in the hot set nor in the window, and the input carries no proof</td></tr>
     <tr><td class="n">5</td><td>UnknownNote</td><td>the window names it and the accumulator no longer holds it</td></tr>
     <tr><td class="n">6</td><td>InvalidProof</td><td>the proof does not verify against the cold commitment</td></tr>
-    <tr><td class="n">7</td><td>OutputsExceedInputs</td><td>the outputs total more than the inputs, once every input has resolved</td></tr>
+    <tr><td class="n">7</td><td>KeyNotOwner</td><td>the key the input carries does not hash to the address that owns the note</td></tr>
+    <tr><td class="n">8</td><td>OutputsExceedInputs</td><td>the outputs total more than the inputs</td></tr>
+    <tr><td class="n">9</td><td>PlacesUnpaid</td><td>the fee is less than the burn of the transfer's places, by <em>Places</em></td></tr>
   </tbody>
 </table>
 
@@ -927,10 +1069,14 @@ current from what every block already carries.
   <thead><tr><th>Hash</th><th>Is</th></tr></thead>
   <tbody>
     <tr><td>the leaf of a fallen note</td><td>its 36-byte identifier then its 40-byte encoding, under the forest leaf domain</td></tr>
-    <tr><td>the empty leaf</td><td>no bytes, under the forest leaf domain</td></tr>
+    <tr><td>the empty leaf</td><td>no bytes, under the forest empty domain</td></tr>
     <tr><td>an internal node</td><td>its left child then its right child, under the forest node domain</td></tr>
   </tbody>
 </table>
+
+The empty leaf has a domain of its own, so it is not the leaf of any item: a
+leaf appended is a hash under the forest leaf domain, and the two domains are
+two different hash functions.
 
 The identifier is folded into the leaf because a position carries no meaning
 of its own: without it, a proof for one note would serve for another note of
@@ -1045,7 +1191,9 @@ could add it up.
 
 A block creates whatever its coinbase pays and destroys whatever its transfers
 gave up as fees, since the fees are money that already existed and whatever
-the coinbase declines to claim is gone. So after a block:
+the coinbase declines to claim is gone. The burn of the transfers' places is
+part of the fees and no coinbase may claim it, so that much is gone whoever
+mined the block. So after a block:
 
 - if what the coinbase paid is at or above the fees, the total rises by the
   difference, and a total above the monetary ceiling is a refusal;
@@ -1101,7 +1249,7 @@ A node MAY keep a current proof for the fallen notes of owners it was asked to
 follow, which is what lets a wallet spend later without asking anyone. A node
 that does SHOULD bound how many such notes it follows, and SHOULD choose which
 to let go of by a rule that makes displacing one cost more than the note is
-worth. An owner is a public key on a public chain, so the set of notes paid to
+worth. An owner is an address on a public chain, so the set of notes paid to
 a followed owner is chosen by strangers: without a bound, a dust note costs its
 sender one transfer and costs the node an entry and a full path for good. The
 reference implementation follows at most 8 192 notes and lets go of the least
@@ -1502,8 +1650,8 @@ total grows.
 
 Two things the schedule is and is not. It is a ceiling: a coinbase MUST NOT
 claim more than the reward at its height plus the fees its block's transfers
-gave up, and it MAY claim less, in which case the difference is destroyed and
-goes nowhere. So the money a chain has actually issued at a height is at most
+gave up less their burns, and it MAY claim less, in which case the difference is left unclaimed
+and goes nowhere. So the money a chain has actually issued at a height is at most
 the running total above and may be under it, and the running total is the one
 thing about a handed-over ledger that can be checked against the rules rather
 than against a commitment its sender wrote.
@@ -1806,10 +1954,10 @@ Both sides derive the same list of work values from the tip alone, so no round
 trip is needed to agree on the questions and nobody has to be trusted to ask
 them honestly. A second implementation MUST reproduce the list exactly.
 
-The seed is the hash, under the sampling domain, of the tip's identifier:
+The seed is the hash, under the sampling seed domain, of the tip's identifier:
 
 ```text
-seed = H(sampling, id(tip))
+seed = H(sampling seed, id(tip))
 ```
 
 Two further quantities come from the tip. The work the draw ranges over is the
@@ -1888,7 +2036,7 @@ Otherwise, for each index `i` from `0` to `count - 1`, in order:
   <thead><tr><th class="n">#</th><th>Step</th></tr></thead>
   <tbody>
     <tr><td class="n">1</td><td>form 40 bytes: the 32 bytes of the seed, then <code>i</code> as a little-endian <code>u64</code></td></tr>
-    <tr><td class="n">2</td><td><code>b = H(sampling, those 40 bytes)</code></td></tr>
+    <tr><td class="n">2</td><td><code>b = H(sampling draw, those 40 bytes)</code></td></tr>
     <tr><td class="n">3</td><td><code>level = (u64 from b[0..8], little-endian) * levels &gt;&gt; 64</code>, in 128-bit arithmetic</td></tr>
     <tr><td class="n">4</td><td><code>within = u128</code> from <code>b[8..24]</code>, little-endian</td></tr>
     <tr><td class="n">5</td><td><code>far = total >> level</code> and <code>near = total >> (level + 1)</code>, both shift counts clamped at 127</td></tr>
@@ -2172,15 +2320,15 @@ first. The tie puts a floor under a tip at the band the draw leaves unresolved
 over 2<sup>18</sup>, which on a chain that ran to schedule is at least a
 thousandth of an average block. Measured on a thirty year chain at the two
 networks' opening difficulties, the cheapest tip a forger can present costs
-2<sup>18</sup> hashes on testnet-6 and 2<sup>14</sup> on the devnet; held to the
-pinned header alone it would cost 2<sup>10.3</sup> and 2<sup>7.3</sup>. It does
+2<sup>18</sup> hashes on testnet-7 and 2<sup>14</sup> on the devnet; held to the
+pinned header alone it would cost 2<sup>10.2</sup> and 2<sup>7.4</sup>. It does
 not cost the chain's difficulty, and no tie of this kind can make it: a run
 whose tip fell by the tie is what an honest chain looks like after a loss.
 
 So the figure MUST be quoted against a grinding budget. At 40 per cent the
 inequality above gives 2^-161.9 a tip, which stays under 2^-128 against
 2<sup>33</sup> tips and not against 2<sup>34</sup>, and 2<sup>33</sup> tips
-cost 2<sup>51</sup> hashes on testnet-6 and 2<sup>47</sup> on the devnet at
+cost 2<sup>51</sup> hashes on testnet-7 and 2<sup>47</sup> on the devnet at
 those difficulties. The staircase the draw really is is worth more per question
 than the inequality, so that budget is a floor under the real one and not the
 real one; at the measured 42.96 per cent there is no budget at all, since that
@@ -2191,7 +2339,7 @@ hash rate with noise of its own, and on chains with random block times the
 hardest header of a run stood up to twice as far above the tip as the loss
 alone puts it, so a tie of 32 refused no chain that lost sixteen times its hash
 rate, sixty-four of them on each network. A chain that lost twenty or more
-cannot be weighed on testnet-6 from about eight hours after the loss, for up to
+cannot be weighed on testnet-7 from about eight hours after the loss, for up to
 a day at twenty, about as long as the ceiling on the run's length refuses it
 anyway, and for under six days at any loss beyond what the ceiling refuses; a
 newcomer reads such a chain instead, where a peer keeps it.
@@ -2384,8 +2532,8 @@ mined, not that a lie is impossible. Whoever did out-mine the network for the
 burial chose the state root and everything under it.
 
 **One check does not go by that road.** A coinbase claims at most what the
-schedule pays at its height plus the fees its own block's transfers gave up,
-and a fee the coinbase declines is destroyed, so a chain at a height holds at
+schedule pays at its height plus the fees its own block's transfers gave up
+less their burns, and a fee the coinbase declines is left unclaimed, so a chain at a height holds at
 most what the schedule has paid by then and never more. Refusal twelve is that
 subtraction. It is the only place in this exchange where a newcomer is not
 taking somebody's word, and no amount of work gets past it. The supply is also
@@ -2518,11 +2666,20 @@ the same either way; read late it is a rule about what to throw away.
 A frame is at most 1 048 576 bytes whatever it carries, so these ceilings bound
 what is built and the frame bounds what is read.
 
-A handshake is 108 bytes and carries the protocol version as a `u32`, the
-network as a `u32`, the first block of the branch this node follows, its tip,
-its height, the work behind that tip as a `u128`, the port it listens on as a
+A peer that has not introduced itself may send at most 4 096 bytes before that
+frame is refused as too large, since the only message such a peer may send is
+a handshake. Any future handshake MUST still fit inside that limit: a node
+reads a longer one exactly as it reads an oversized frame from anybody else,
+which is a peer fault and not a version to negotiate over.
+
+A handshake is 76 bytes and carries the protocol version as a `u32`, the
+network as a `u32`, the first block of the branch this node follows, the
+height of its tip, the work behind that tip as a `u128`, the port it listens on as a
 `u16`, a `u64` nonce drawn once when the node started, and two `u8` claims about
-what it kept. A node that does not offer itself to be dialled, as a wallet's
+what it kept. The version is the first field of a handshake, and a reader
+compares it, as *Versions* describes, before decoding anything that follows
+it, so a peer on another version is answered as one and never read as a
+malformed frame. A node that does not offer itself to be dialled, as a wallet's
 does not, names port `0`, and a peer MUST NOT write an address down for it. A decoder MUST refuse either claim byte if it is neither `0` nor
 `1`, because reading anything else as true is guessing on the peer's behalf.
 
@@ -2652,7 +2809,7 @@ There are two version numbers in this protocol and they are compared
 differently.
 
 **The protocol version is compared for equality.** It is a `u32` in the
-handshake, it is 9 today, and a node MUST close the connection with a peer
+handshake, it is 10 today, and a node MUST close the connection with a peer
 carrying anything else. What that costs is that a node on one version and a node
 on the next turn each other away rather than talking; what it buys is that a message
 whose meaning changed is never read under the old meaning. The alternative,
@@ -2765,10 +2922,12 @@ honest pair of nodes behind one address is, and pooling makes two people behind
 one carrier gateway invisible to each other.
 
 **A frame is charged by its size before it is decoded.** Decoding is not
-free: every note in a frame is an owner's key decompressed off the curve and
-checked for its subgroup, which costs about what verifying a signature does, so
-eight hundred kilobytes of note owners are most of a second of processor before
-anything in them has been priced. A node SHOULD charge every frame from a peer
+free: it builds everything the frame describes before anything in it has been
+priced. While a note's owner was a key, every note in a frame was also a key
+decompressed off the curve and checked for its subgroup, about what verifying a
+signature costs, and eight hundred kilobytes of note owners were most of a
+second of processor. An owner is an address now and reads as bytes, and the
+charge still pays for the building. A node SHOULD charge every frame from a peer
 that has introduced itself one unit per 512 bytes, rounded up, before it decodes
 it, and SHOULD NOT decode a frame the peer's window cannot pay for. That charge
 counts toward the price of the message the frame carried, so a message pays the
@@ -2822,12 +2981,15 @@ one answer whose size the ask cannot state, since a block is anything up to what
 the consensus rules allow and only whoever read it off the disk knows which;
 headers and paths are bounded by the ask and are charged there instead.
 
-**A transfer costs what taking it in costs.** An input is a note resolved and a
-signature verified. An output is a key decompressed off the curve and checked
-for its subgroup while the frame is decoded, which costs about the same, so it
-is priced the same. Priced by its inputs alone, a transfer of one input and 256
-outputs cost what an ordinary payment does and bought over a hundred times the
-processor for each unit.
+**A transfer costs what taking it in costs.** An input is a note resolved, its
+key hashed and then decoded, and a signature verified. An output was a key
+decompressed off the curve while the frame was decoded, which cost about what an
+input's verification does, and it was priced the same. That decoding has moved
+to the input that spends the note, and the reference implementation keeps both
+prices, so an ordinary payment of one input and two outputs still pays twelve
+units, about what taking it in costs. Priced by its inputs alone, a transfer of
+one input and 256 outputs cost what an ordinary payment does and bought over a
+hundred times the processor for each unit.
 
 **A block this node asked for is discounted once it has earned it.** It pays
 for its bytes like any other block, and has all of that but one unit handed back
@@ -2839,9 +3001,9 @@ costs its sender nothing to make, and keeps its price.
 A batch SHOULD be charged block by block as it is served, and each block before
 it is read, from what its record says it weighs, so a peer that has spent its
 window is handed what it could afford and the rest is not read, not encoded and
-not queued. Reading a block back off a disk decodes it, so a batch read first
-and priced after costs its reader a decode of every owner in a hundred and
-twenty eight blocks whatever the peer can pay. A short batch is what a peer
+not queued. Reading a block back off a disk reads it, decodes it and hashes its
+transactions, so a batch read first and priced after costs its reader all of
+that for a hundred and twenty eight blocks whatever the peer can pay. A short batch is what a peer
 already gets for heights this node no longer holds, so it asks again for the
 rest.
 

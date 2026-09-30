@@ -163,7 +163,10 @@ fn a_spend_that_no_block_could_carry_is_refused_by_the_wallet() {
 
     // Nearly everything this key holds, which no one note can pay for, so the
     // spend has to gather most of them.
-    let fee = Amount::from_pebbles(100_000).unwrap();
+    //
+    // Over the floor of the widest spend the wallet will draft, so what
+    // refuses it is its size and never its fee: every input carries its key.
+    let fee = Amount::from_pebbles(200_000).unwrap();
     let asking = paid
         .checked_sub(fee)
         .unwrap()
@@ -249,7 +252,9 @@ fn every_spend_the_wallet_accepts_is_one_a_block_would_carry() {
     let payee = SecretKey::from_bytes(&[9; 32]);
     let (chain, paid) = a_chain(&mine);
 
-    let fee = Amount::from_pebbles(100_000).unwrap();
+    // Over the floor of the widest spend the wallet will draft, so what
+    // refuses it is its size and never its fee: every input carries its key.
+    let fee = Amount::from_pebbles(200_000).unwrap();
     let most = paid.checked_sub(fee).unwrap().as_pebbles();
 
     let mut accepted = 0usize;

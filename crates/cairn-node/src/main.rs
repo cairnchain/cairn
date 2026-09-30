@@ -339,7 +339,8 @@ fn start_mining(
     options: &options::Options,
     running: &Arc<AtomicBool>,
 ) -> Option<thread::JoinHandle<()>> {
-    options.mine_to.and_then(|key| {
+    options.mine_to.and_then(|to| {
+        let key = to.address;
         let node = Arc::clone(node);
         let running = Arc::clone(running);
         let params = options.params;

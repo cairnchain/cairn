@@ -185,7 +185,8 @@ const LATE: u8 = 4;
 /// [`every_followed_note_can_be_proved`] says.
 fn without(print: &Fingerprint, owner: PublicKey) -> Fingerprint {
     let mut copy = print.clone();
-    copy.watched.retain(|(_, _, note)| note.owner != owner);
+    copy.watched
+        .retain(|(_, _, note)| note.owner != owner.into());
     copy
 }
 
@@ -610,7 +611,7 @@ fn undoing_any_sequence_of_blocks_restores_the_state_exactly() {
         reached.back_filled += nodes
             .archive
             .watched_notes()
-            .filter(|(_, _, note)| note.owner == late)
+            .filter(|(_, _, note)| note.owner == late.into())
             .count() as u64;
         nodes.coherent("just after the ask");
 
@@ -732,7 +733,7 @@ fn at_a_fork(
     reached.back_filled += walker
         .archive
         .watched_notes()
-        .filter(|(_, _, note)| note.owner == late)
+        .filter(|(_, _, note)| note.owner == late.into())
         .count() as u64;
     level(
         &walker,

@@ -357,6 +357,40 @@ fn only_the_tip_is_not_mined_yet() {
     );
 }
 
+/// **The block page says an unclaimed figure it does not know is unknown, as
+/// it says of a destroyed one.**
+///
+/// The API sends either as null where it does not know it: above what the
+/// index has read, on an index that did not start at the first block, or for
+/// the half second after a switch. The page printed "Unknown" for what a
+/// block destroyed and dropped the row for what it left unclaimed, which is
+/// also what it does for a block that left nothing, so on such an index every
+/// block looked as if its miner had taken all it was owed. Nothing read the
+/// two rows side by side.
+#[test]
+fn an_unclaimed_figure_nobody_knows_is_said_to_be_unknown_as_destroyed_is() {
+    let block = js_fn("block");
+    let destroyed = block
+        .find("t('destroyed.block')")
+        .expect("the block page says what a block destroyed");
+    assert!(
+        block[destroyed..].contains("data.destroyed === null ? t('field.unknown')"),
+        "the premise: a destroyed figure nobody knows is said to be unknown"
+    );
+    let from = block
+        .find("data.unclaimed")
+        .expect("the block page reads what a block left unclaimed");
+    let deciding = &block[from..];
+    let deciding = &deciding[..deciding
+        .find("destroyed.unclaimed.note")
+        .expect("the unclaimed row carries its note")];
+    assert!(
+        deciding.starts_with("data.unclaimed === null") && deciding.contains("t('field.unknown')"),
+        "the block page hides an unclaimed figure nobody knows, where it says a destroyed \
+         one is unknown: {deciding}"
+    );
+}
+
 /// **A search that found nothing says how much it looked in.**
 ///
 /// The API answers `kind: unknown` with `coverage`, and the page printed

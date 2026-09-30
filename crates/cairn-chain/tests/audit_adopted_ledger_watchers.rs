@@ -101,19 +101,19 @@ fn an_adopted_ledger_does_not_decide_who_this_node_follows() {
     }
     let handed = elsewhere.ledger_at(elsewhere.height().unwrap()).unwrap();
     assert!(
-        !handed.is_watching(&owner),
+        !handed.is_watching(owner),
         "a ledger from elsewhere follows nobody"
     );
 
     // A node told to follow an owner, the way `cairn-net` does at start.
     let mut node = ChainStore::new(params);
     node.watch_owner(owner);
-    assert!(node.state().is_watching(&owner));
+    assert!(node.state().is_watching(owner));
 
     // And then handed a ledger, the way `cairn-net` does immediately after.
     node.adopt(handed.clone(), &headers).unwrap();
     assert!(
-        node.state().is_watching(&owner),
+        node.state().is_watching(owner),
         "a ledger from elsewhere does not decide who this node follows"
     );
 
@@ -125,6 +125,6 @@ fn an_adopted_ledger_does_not_decide_who_this_node_follows() {
     second.watch_owner(owner);
     second.watch_owner(wallet(9).public_key());
     second.adopt(handed, &headers).unwrap();
-    assert!(second.state().is_watching(&owner));
-    assert!(second.state().is_watching(&wallet(9).public_key()));
+    assert!(second.state().is_watching(owner));
+    assert!(second.state().is_watching(wallet(9).public_key()));
 }

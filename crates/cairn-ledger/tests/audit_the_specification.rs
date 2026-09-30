@@ -60,7 +60,7 @@ use std::collections::BTreeSet;
 use cairn_accumulator::{Forest, ForestProof, Key, SparseMerkleTree};
 use cairn_crypto::{PublicKey, SecretKey, Signature};
 use cairn_ledger::block::{BlockHeader, HeaderSummary};
-use cairn_ledger::note::{NetworkId, Note, NoteId};
+use cairn_ledger::note::{Address, NetworkId, Note, NoteId};
 use cairn_ledger::pow::{
     median_time_past, meets_target, next_difficulty, target_for, work_of, MIN_DIFFICULTY,
 };
@@ -129,10 +129,11 @@ fn spec_witness_bytes(witness: &Witness) -> Vec<u8> {
     out
 }
 
-/// An input: the note identifier, the witness, the signature.
+/// An input: the note identifier, the witness, the key, the signature.
 fn spec_input_bytes(input: &Input) -> Vec<u8> {
     let mut out = spec_note_id_bytes(&input.note_id);
     out.extend_from_slice(&spec_witness_bytes(&input.witness));
+    out.extend_from_slice(&input.key);
     out.extend_from_slice(&input.signature.to_bytes());
     out
 }
@@ -197,20 +198,24 @@ fn spec_block_bytes(block: &Block) -> Vec<u8> {
 /// `transactions_root`, built from *What a block is* and from nothing else.
 ///
 /// The document's words: one leaf per transaction, the coinbase first and then
-/// the transfers in the order they appear; each leaf the hash under the merkle
-/// leaf domain of that transaction's identifier; an interior node the hash
-/// under the merkle node domain of its two children in order; a level with an
-/// odd count carries the last node up unchanged rather than duplicating it;
-/// and the root of no leaves the hash under the merkle empty domain.
+/// the transfers in the order they appear; the coinbase's leaf the hash under
+/// the merkle leaf domain of its identifier; a transfer's leaf the hash under
+/// the merkle leaf domain of its commitment, which is the hash under the
+/// transfer commitment domain of its whole encoding as it travels; an interior
+/// node the hash under the merkle node domain of its two children in order; a
+/// level with an odd count carries the last node up unchanged rather than
+/// duplicating it; and the root of no leaves the hash under the merkle empty
+/// domain.
 ///
 /// The last of those cannot arise for a block, which always has its coinbase,
 /// and is written here because the document states it and a helper that
 /// quietly left it out would be agreeing with the code about a case the
 /// document covers.
 fn spec_transactions_root(block: &Block) -> Hash32 {
-    let mut level: Vec<Hash32> = Vec::new();
-    for id in std::iter::once(block.coinbase.id()).chain(block.transfers.iter().map(Transfer::id)) {
-        level.push(hash(Domain::MerkleLeaf, id.as_bytes()));
+    let mut level: Vec<Hash32> = vec![hash(Domain::MerkleLeaf, block.coinbase.id().as_bytes())];
+    for transfer in &block.transfers {
+        let commitment = hash(Domain::TransferCommitment, &spec_transfer_bytes(transfer));
+        level.push(hash(Domain::MerkleLeaf, commitment.as_bytes()));
     }
     if level.is_empty() {
         return hash(Domain::MerkleEmpty, &[]);
@@ -372,15 +377,23 @@ fn a_transfer_encodes_as_version_inputs_outputs() {
 
     // The widths the two tables promise, read back out of the bytes rather
     // than taken on trust: two for the version, four for each count, thirty
-    // six then one then sixty four for a hot input.
+    // six then one then thirty two then sixty four for a hot input.
     assert_eq!(&built[..2], &TRANSFER_VERSION.to_le_bytes());
     assert_eq!(&built[2..6], &2u32.to_le_bytes());
     assert_eq!(built[42], 0, "a hot witness is the tag and nothing further");
-    // Version and count, then a hot input of 36 + 1 + 64 bytes, then the
-    // second input's own 36 byte identifier, which puts its tag here.
-    assert_eq!(built[107], 0xb2, "the second input starts with its source");
+    // The key after the witness, the one that signed, and the signature
+    // after the key.
     assert_eq!(
-        built[143], 1,
+        &built[43..75],
+        wallet(3).public_key().as_bytes(),
+        "the key comes after the witness"
+    );
+    assert_eq!(&built[75..139], &subject.inputs[0].signature.to_bytes());
+    // Version and count, then a hot input of 36 + 1 + 32 + 64 bytes, then the
+    // second input's own 36 byte identifier, which puts its tag here.
+    assert_eq!(built[139], 0xb2, "the second input starts with its source");
+    assert_eq!(
+        built[175], 1,
         "a cold witness is the tag and the note after"
     );
 
@@ -515,6 +528,41 @@ fn the_transactions_root_is_built_the_way_the_document_says() {
         4,
         "four different bodies gave four different roots, or this agreed about \
          one value four times"
+    );
+}
+
+/// A block's root moves with every byte of a transfer it carries, a signature
+/// and a witness included, and the transfer's identifier does not.
+///
+/// The root used to be taken over transfer identifiers, which leave both out,
+/// so a block with one signature or one proof changed produced the root its
+/// header names. Nothing asked this, so a header that named many bodies
+/// passed: the vector above was built from the same words the code was.
+#[test]
+fn a_changed_signature_or_witness_changes_the_transactions_root() {
+    let block = Block {
+        header: sample_header(),
+        coinbase: CoinbaseTransaction::new(11, vec![note(42, 2)]),
+        transfers: vec![sample_transfer()],
+    };
+    let root = block.transactions_root();
+
+    let mut resigned = block.clone();
+    resigned.transfers[0].inputs[0].signature = Signature::from_bytes(&[0x5c; 64]);
+    assert_eq!(resigned.transfers[0].id(), block.transfers[0].id());
+    assert_ne!(
+        resigned.transactions_root(),
+        root,
+        "a block with a signature changed produces the same root"
+    );
+
+    let mut rewitnessed = block.clone();
+    rewitnessed.transfers[0].inputs[1].witness = Witness::Hot;
+    assert_eq!(rewitnessed.transfers[0].id(), block.transfers[0].id());
+    assert_ne!(
+        rewitnessed.transactions_root(),
+        root,
+        "a block with a cold witness swapped for the hot tag produces the same root"
     );
 }
 
@@ -724,7 +772,7 @@ fn the_preimage_tables_are_the_bytes_the_code_hashes() {
             spent.value.as_pebbles().to_le_bytes().to_vec()
         }
         "owner" => {
-            assert_eq!(kind, "public key");
+            assert_eq!(kind, "address");
             spent.owner.as_bytes().to_vec()
         }
         other => panic!("the signature's table has a row `{other}` the code does not hash"),
@@ -766,6 +814,62 @@ fn the_preimage_tables_are_the_bytes_the_code_hashes() {
         transfer.inputs[1].witness.encode(),
         "a cold witness built from the document's table is not the one the code encodes"
     );
+}
+
+/// **The transfer commitment sentence names every field an input carries.**
+///
+/// "Whole encoding as it travels" is exact: the code hashes
+/// `transfer.encode()`, and `spec_transactions_root` above hashes the same
+/// bytes and agrees with it. The list after the colon, written before #261
+/// added a key to every input, did not: "every input with its witness and
+/// signature, and the outputs" left the key out. A second implementer who
+/// built the preimage from that list rather than from the input's own table
+/// computed a different `transactions_root` for any block carrying a
+/// transfer.
+///
+/// Read the input's own field table rather than writing its fields out a
+/// second time here: a field added there and not carried into this sentence
+/// fails here too.
+#[test]
+fn the_transfer_commitment_sentence_names_every_field_an_input_carries() {
+    let fields = spec_rows_after(
+        "spending it. The key is 32 bytes, read as bytes, and decoded only to verify the",
+    );
+    let names: Vec<&str> = fields.iter().map(|(name, _, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["note_id", "witness", "key", "signature"],
+        "the input's own field table changed shape; this test's marker text may have \
+         moved with it"
+    );
+
+    // Joined across the source's line wrapping, so where the sentence breaks
+    // across lines does not decide whether this test can read it.
+    let sentence = SPECIFICATION
+        .split_once("a transfer's commitment is the hash under the transfer commitment domain of")
+        .expect("the transfer commitment sentence")
+        .1
+        .split_once("Not its identifier")
+        .expect("the sentence that follows it")
+        .0
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // note_id is not named on its own: it is what "every input" already
+    // carries. The other three are new since #261 added the key.
+    assert!(
+        sentence.contains("every input"),
+        "the transfer commitment sentence no longer names the inputs at all"
+    );
+    for word in ["witness", "key", "signature"] {
+        assert!(
+            sentence.contains(word),
+            "the transfer commitment sentence does not name the input's `{word}` field, \
+             so a second implementer building the preimage from the sentence alone \
+             leaves it out and computes another `transactions_root`"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1316,7 +1420,7 @@ fn spec_draw(seed: Hash32, count: usize, total: u128, levels: u32) -> Vec<u128> 
         let mut preimage = Vec::with_capacity(40);
         preimage.extend_from_slice(seed.as_bytes());
         preimage.extend_from_slice(&index.to_le_bytes());
-        let bytes = hash(Domain::SamplingSeed, &preimage);
+        let bytes = hash(Domain::SamplingDraw, &preimage);
         let bytes = bytes.as_bytes();
 
         let mut level_bytes = [0u8; 8];
@@ -1501,6 +1605,49 @@ fn the_draw_is_the_seven_steps_the_document_gives() {
     );
 }
 
+/// Each draw hashes its 40 bytes under the sampling draw domain, and not
+/// under the domain the seed was made in.
+///
+/// The seed is 32 bytes hashed under `sampling seed` and each draw was the
+/// seed and an eight-byte counter hashed under the same domain, so one domain
+/// named two kinds of value and only their lengths told them apart. Nothing
+/// asked which domain step 2 used, so a draw that kept sharing the seed's
+/// passed: the vector above rebuilt it with the same domain the code used.
+#[test]
+fn a_draw_hashes_under_a_domain_the_seed_does_not() {
+    let seed = hash(Domain::SamplingSeed, b"a tip");
+    let total = 1u128 << 40;
+    let levels = spec_levels(30 * 365 * 24 * 60);
+    let drawn = draw(seed, 1, total, levels);
+    assert_eq!(
+        drawn,
+        spec_draw(seed, 1, total, levels),
+        "the first value is not the one step 2 of the document gives"
+    );
+
+    // The same seven steps with the seed's domain at step 2.
+    let mut preimage = Vec::with_capacity(40);
+    preimage.extend_from_slice(seed.as_bytes());
+    preimage.extend_from_slice(&0u64.to_le_bytes());
+    let bytes = hash(Domain::SamplingSeed, &preimage);
+    let bytes = bytes.as_bytes();
+    let mut level_bytes = [0u8; 8];
+    level_bytes.copy_from_slice(&bytes[0..8]);
+    let level = (u128::from(u64::from_le_bytes(level_bytes)) * u128::from(levels)) >> 64;
+    let mut within_bytes = [0u8; 16];
+    within_bytes.copy_from_slice(&bytes[8..24]);
+    let within = u128::from_le_bytes(within_bytes);
+    let far = total >> (level as u32);
+    let near = total >> (level as u32 + 1);
+    let width = far.saturating_sub(near).max(1);
+    let under_the_seeds_domain = (total - far).saturating_add(within % width).min(total - 1);
+    assert_ne!(
+        drawn,
+        vec![under_the_seeds_domain],
+        "the first question was drawn under the domain the seed is hashed in"
+    );
+}
+
 #[test]
 fn a_logarithm_in_place_of_the_leading_zeros_would_draw_different_questions() {
     // The claim the document makes about its own gap, measured: at a power of
@@ -1521,7 +1668,7 @@ fn a_logarithm_in_place_of_the_leading_zeros_would_draw_different_questions() {
                     let mut preimage = Vec::with_capacity(40);
                     preimage.extend_from_slice(seed.as_bytes());
                     preimage.extend_from_slice(&index.to_le_bytes());
-                    let bytes = hash(Domain::SamplingSeed, &preimage);
+                    let bytes = hash(Domain::SamplingDraw, &preimage);
                     let bytes = bytes.as_bytes();
                     let mut level_bytes = [0u8; 8];
                     level_bytes.copy_from_slice(&bytes[0..8]);
@@ -1626,8 +1773,9 @@ fn spec_cold_leaf(id: &NoteId, subject: &Note) -> Hash32 {
     hash(Domain::ForestLeaf, &bytes)
 }
 
+/// "no bytes, under the forest empty domain".
 fn spec_empty_leaf() -> Hash32 {
-    hash(Domain::ForestLeaf, &[])
+    hash(Domain::ForestEmpty, &[])
 }
 
 fn spec_forest_node(left: Hash32, right: Hash32) -> Hash32 {
@@ -1808,7 +1956,7 @@ fn the_state_root_is_the_eight_fields_folded_in_that_order() {
             if let Some((id, position, fallen)) = spendable
                 .iter()
                 .find(|(id, _, fallen)| {
-                    fallen.owner == miner.public_key()
+                    fallen.owner == miner.public_key().into()
                         && state.within_grace(id).is_some()
                         && state
                             .coinbase_matures_at(&id.source)
@@ -1928,9 +2076,10 @@ fn the_state_root_is_the_eight_fields_folded_in_that_order() {
 
 #[test]
 fn the_published_network_parameters_are_what_the_networks_carry() {
-    let public = ConsensusParams::for_network("testnet-6").expect("the network the draft names");
+    let public = ConsensusParams::for_network("testnet-7").expect("the network the draft names");
     assert_eq!(public.hot_capacity, 131_072);
     assert_eq!(public.max_evictions_per_block, 1_024);
+    assert_eq!(public.place_price.as_pebbles(), 6_000);
     assert_eq!(public.coinbase_maturity, 1_024);
     assert_eq!(public.burial, 1_024);
     assert_eq!(public.target_block_time, 60);
@@ -1947,7 +2096,8 @@ fn the_published_network_parameters_are_what_the_networks_carry() {
 
     let devnet = ConsensusParams::for_network("devnet").expect("the throwaway network");
     assert_eq!(devnet.hot_capacity, 64);
-    assert_eq!(devnet.max_evictions_per_block, 1_024);
+    assert_eq!(devnet.max_evictions_per_block, 32);
+    assert_eq!(devnet.place_price.as_pebbles(), 6_000);
     assert_eq!(devnet.coinbase_maturity, 32);
     assert_eq!(devnet.burial, 32);
     assert_eq!(devnet.genesis_difficulty, 1 << 23);
@@ -2227,7 +2377,7 @@ fn every_derivation_a_block_forces_is_the_one_the_document_describes() {
                 .hot
                 .iter()
                 .find(|(id, note, _)| {
-                    note.owner == miner.public_key()
+                    note.owner == miner.public_key().into()
                         && note.value.as_pebbles() > 1_000
                         && state
                             .coinbase_matures_at(&id.source)
@@ -2239,7 +2389,7 @@ fn every_derivation_a_block_forces_is_the_one_the_document_describes() {
                 .iter()
                 .flatten()
                 .find(|(id, _, note)| {
-                    note.owner == miner.public_key()
+                    note.owner == miner.public_key().into()
                         && note.value.as_pebbles() > 1_000
                         && state
                             .coinbase_matures_at(&id.source)
@@ -2503,7 +2653,7 @@ fn the_limits_the_document_names_without_numbering_are_recorded_here() {
         MAX_COINBASE_EXTRA, MOST_COINBASE_OUTPUTS, MOST_INPUTS, MOST_OUTPUTS,
     };
 
-    let params = ConsensusParams::for_network("testnet-6").unwrap();
+    let params = ConsensusParams::for_network("testnet-7").unwrap();
     assert_eq!(params.max_inputs_per_transfer, 256);
     assert_eq!(params.max_outputs_per_transfer, 256);
     assert_eq!(params.max_coinbase_outputs, 16);
@@ -2728,7 +2878,10 @@ fn the_body_checks_signatures_after_every_transfer_and_the_coinbase_sum_before_i
         transfer
     };
     let signed = spend(coins[0], &miner);
-    let forged = spend(coins[0], &wallet(2));
+    // Signed by somebody else and carrying the owner's key, so the key hashes
+    // to the owner while the input resolves and the signature is what fails.
+    let mut forged = spend(coins[0], &wallet(2));
+    forged.inputs[0].key = miner.public_key().to_bytes();
     let mut shapeless = spend(coins[1], &miner);
     shapeless.outputs.push(Note::new(Amount::ZERO, owner(9)));
     let reward = || vec![Note::new(params.reward_at(height), miner.public_key())];
@@ -3433,4 +3586,81 @@ fn four_block_refusals_the_document_does_not_carry() {
         ),
         "the transfer count limit is a rule the document does not carry"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Addresses.
+// ---------------------------------------------------------------------------
+
+/// A fenced block of the document, the one whose first line starts `first`.
+fn spec_block(first: &str) -> &'static str {
+    SPECIFICATION
+        .split("```")
+        .map(|block| block.strip_prefix("text").unwrap_or(block).trim_start())
+        .find(|block| block.starts_with(first))
+        .unwrap_or_else(|| panic!("the specification has no block starting `{first}`"))
+}
+
+/// **An address is what *Notes* says, and its text is what *Addresses as
+/// text* prints for the key the signature vectors are made with.**
+///
+/// Built from the document's words: the hash under the address domain of the
+/// scheme byte nought and the key, then Bech32m under each prefix the table
+/// names. Nothing pinned an address to a published value, so an address
+/// computed with the scheme byte dropped, or under another domain, or written
+/// under another prefix, passed every test that only compared the code with
+/// itself.
+#[test]
+fn the_address_vectors_are_the_vector_keys_address_under_each_prefix() {
+    let key = spec_block("seed ")
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("public key"))
+        .map(str::trim)
+        .expect("the signature vectors name their public key");
+    let key: [u8; 32] = cairn_primitives::hex::decode_array(key).expect("thirty two bytes");
+    let mut preimage = vec![0x00_u8];
+    preimage.extend_from_slice(&key);
+    let built = hash(Domain::Address, &preimage);
+
+    let networks = [
+        ("cairn", NetworkId::MAINNET),
+        ("tcairn", NetworkId::TESTNET),
+        ("dcairn", NetworkId::DEVNET),
+    ];
+    let vectors: Vec<(&str, &str)> = spec_block("cairn ")
+        .lines()
+        .filter_map(|line| line.split_once(char::is_whitespace))
+        .map(|(prefix, text)| (prefix, text.trim()))
+        .collect();
+    assert_eq!(
+        vectors.len(),
+        3,
+        "the document gives an address under each prefix"
+    );
+    for ((prefix, text), (expected, network)) in vectors.iter().zip(networks) {
+        assert_eq!(
+            *prefix, expected,
+            "the vectors are not in the table's order"
+        );
+        assert_eq!(
+            network.address_prefix(),
+            *prefix,
+            "the code writes this network's addresses under another prefix than the document"
+        );
+        println!(
+            "{prefix:<7} {}",
+            cairn_primitives::bech32m::encode(prefix, built.as_bytes())
+        );
+        assert_eq!(
+            *text,
+            cairn_primitives::bech32m::encode(prefix, built.as_bytes()),
+            "the document's address under this prefix is not H(address, 0x00 || key) in Bech32m"
+        );
+        let public = PublicKey::from_bytes(&key).expect("the vector key is a key");
+        assert_eq!(
+            Address::from_text(text, network),
+            Ok(Address::from(public)),
+            "the code does not read the document's address as the vector key's"
+        );
+    }
 }

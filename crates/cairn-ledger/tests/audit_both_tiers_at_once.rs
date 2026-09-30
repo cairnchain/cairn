@@ -402,7 +402,7 @@ fn a_handed_ledger_naming_a_note_in_both_tiers_spends_it_twice() {
             let owner = wallet(*seed).public_key();
             state
                 .hot_notes()
-                .find(|(_, entry)| entry.note.owner == owner)
+                .find(|(_, entry)| entry.note.owner == owner.into())
                 .map(|(_, entry)| entry.note.value)
         })
         .collect();

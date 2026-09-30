@@ -203,13 +203,13 @@ use crate::validation::ConsensusParams;
 /// hardest header of its run, and that is what gives a seed a price: at least
 /// the band the draw leaves unresolved over 2^18, a thousandth of an average
 /// block on a chain that ran to schedule. Measured on a thirty year chain, the
-/// cheapest tip a forger can present costs 2^18 hashes at testnet-6's opening
+/// cheapest tip a forger can present costs 2^18 hashes at testnet-7's opening
 /// difficulty and 2^14 at the devnet's. [`MOST_FALL`] says why it is not the
 /// chain's difficulty, and what the tie costs an honest chain.
 ///
 /// So the figure is stated against a budget. At 40% the inequality above
 /// leaves 2^-161.9 a tip, which holds under 2^-128 against 2^33 tips and not
-/// against 2^34; 2^33 tips cost 2^51 hashes on testnet-6 and 2^47 on the
+/// against 2^34; 2^33 tips cost 2^51 hashes on testnet-7 and 2^47 on the
 /// devnet at those difficulties. The staircase the draw really is is worth
 /// more per question than the inequality, so that budget is a floor and not
 /// the budget; at the measured 42.96% there is none at all, since that is
@@ -524,7 +524,7 @@ pub const MOST_TAIL: u64 = 16 * SHALLOWEST + DIFFICULTY_WINDOW as u64;
 /// least 256 times its mean difficulty, so a fresh seed costs at least a
 /// thousandth of an average block. Measured on a thirty year chain in
 /// `tests/the_price_of_a_seed.rs`, the cheapest tip a forger can present is
-/// 2^18 hashes at testnet-6's opening difficulty and 2^14 at the devnet's.
+/// 2^18 hashes at testnet-7's opening difficulty and 2^14 at the devnet's.
 /// That is not the chain's difficulty, and no tie of this kind makes it so: a
 /// run whose tip fell this far is what an honest chain looks like after a
 /// loss.
@@ -533,7 +533,7 @@ pub const MOST_TAIL: u64 = 16 * SHALLOWEST + DIFFICULTY_WINDOW as u64;
 /// where its difficulty is low. Held to the pinned header alone, it lays a
 /// cheap stretch where the deepest question lands, climbs out of it to carry
 /// the band, and walks back down to within the tie of the cheap header:
-/// measured the same way, that tip costs 2^10.3 hashes on testnet-6 and 2^7.3
+/// measured the same way, that tip costs 2^10.2 hashes on testnet-7 and 2^7.4
 /// on the devnet.
 ///
 /// What it costs an honest chain is a loss of hash rate it cannot be weighed
@@ -542,7 +542,7 @@ pub const MOST_TAIL: u64 = 16 * SHALLOWEST + DIFFICULTY_WINDOW as u64;
 /// far above the tip as the loss alone puts it. So this is twice the sixteen
 /// [`MOST_TAIL`] is written for: no chain that lost sixteen times its hash
 /// rate was refused, sixty four of them on each network. One that lost twenty
-/// or more is refused on testnet-6 from about eight hours after the loss, for
+/// or more is refused on testnet-7 from about eight hours after the loss, for
 /// up to a day at twenty, about as long as the ceiling on the run refuses it
 /// anyway, and under six days at any loss beyond what the ceiling refuses. A
 /// newcomer reads such a chain rather than weighing it, where a peer keeps
@@ -820,6 +820,8 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128, levels: u32) -> Vec<u1
     let mut drawn = Vec::with_capacity(count);
     for index in 0..count {
         // Two numbers from one hash: which halving level, and where inside it.
+        // Under a domain of its own and not the seed's, so that a seed and a
+        // draw are never told apart by their length alone.
         let mut material = [0u8; 40];
         if let Some(head) = material.get_mut(..32) {
             head.copy_from_slice(seed.as_bytes());
@@ -828,7 +830,7 @@ pub fn draw(seed: Hash32, count: usize, total_work: u128, levels: u32) -> Vec<u1
         if let Some(tail) = material.get_mut(32..) {
             tail.copy_from_slice(&counter.to_le_bytes());
         }
-        let bytes = hash(Domain::SamplingSeed, &material);
+        let bytes = hash(Domain::SamplingDraw, &material);
         let bytes = bytes.as_bytes();
 
         // Multiplied and shifted rather than reduced: `chosen` spans the

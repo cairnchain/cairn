@@ -44,7 +44,7 @@ fn now() -> u64 {
         .as_secs()
 }
 
-/// testnet-6's rules with a burial of 32, so the undo floor is reached in 40
+/// testnet-7's rules with a burial of 32, so the undo floor is reached in 40
 /// blocks rather than a thousand.
 fn params() -> ConsensusParams {
     ConsensusParams::testnet().with_burial(32)
@@ -76,7 +76,6 @@ fn hello(nonce: u64, listen: u16) -> Message {
         version: PROTOCOL_VERSION,
         network: params().network,
         genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
         height: 0,
         total_work: 0,
         listen,

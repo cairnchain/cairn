@@ -44,8 +44,19 @@ const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
 /// Draws per tip, and tips per forgery. Small: what is being pinned is which
 /// check answers, not a rate to three figures.
+///
+/// Two hundred and fifty six tips because at the depth the second test
+/// forges, about one tip in thirty gets past the draw, and that column has
+/// to be exercised for the agreement to mean anything. It was twenty four,
+/// and those drew none once a note's owner became an address and every
+/// block identifier moved with it; sixty four drew two on that chain. It was
+/// sixty four, and those drew none again once testnet-7's marker moved every
+/// block identifier a second time; two hundred and fifty six draw three on
+/// this one. A number chosen for a chain of identifiers is a number the next
+/// renumbering can spend to zero, so a network rename is worth rerunning this
+/// against, the way it twice has been.
 const COUNT: usize = 32;
-const TIPS: usize = 24;
+const TIPS: usize = 256;
 
 /// Long enough that the draw spreads over two halvings rather than one.
 ///

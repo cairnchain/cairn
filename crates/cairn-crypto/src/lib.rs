@@ -6,9 +6,12 @@
 //! signature is verified*.
 //!
 //! Public keys outside the prime order subgroup are refused at construction, so
-//! a note can never be locked to a key that has no usable secret. The reference
-//! implementation only rejects the small order ones, and only at verification
-//! time, which is late: by then the note exists.
+//! no signature is ever checked against a key that has no usable secret. The
+//! reference implementation only rejects the small order ones, and only at
+//! verification time. A note is locked to the hash of a key rather than to the
+//! key (`cairn_ledger::note::Address`), so a key is constructed from the bytes
+//! an input carries, at the moment its signature is verified, and that is
+//! where these refusals are asked.
 //!
 //! That sentence used to say "small order public keys are refused", and drew
 //! the same conclusion from it. Refusing small order keys is true and the
@@ -152,19 +155,23 @@ fn is_canonically_encoded(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
     false
 }
 
-/// A public key. Notes are locked directly to one of these.
+/// A public key, decoded with the three refusals above.
 ///
-/// Ed25519 public keys are 32 bytes, the same size as a digest of one, so
-/// hashing the key before locking a note to it would cost a preimage step
-/// without saving any state.
+/// A note is not locked to one of these but to its hash. Ed25519 public keys
+/// are 32 bytes, the same size as a digest of one, so the hash saves no state,
+/// and that was once the reason given for locking a note to the key itself.
+/// What the hash buys is not space: a note shows no key until it is spent, and
+/// a node reads a note's owner without any curve arithmetic.
 ///
 /// The 32 bytes are what is kept, not the curve point they decode to. The
 /// reference type holds both, which is right for a key that verifies often and
-/// wrong for a key that sits in a note: a node holds one of these per hot note
-/// and touches it once, when the note is spent. Keeping the point would be 160
-/// bytes of precomputation per note against 32 bytes of key, and across the
-/// three structures a node keeps for a hot note it is the difference between a
-/// set that costs a phone 107 MB and one that costs it 68.
+/// wrong for one that verifies once, which is every key here: one is built for
+/// the input that spends a note and dropped once its signature is checked.
+/// When a note held a key, a node held one of these per hot note, and keeping
+/// the point would have been 160 bytes of precomputation per note against 32
+/// bytes of key, across the three structures a node keeps for a hot note the
+/// difference between a set that costs a phone 107 MB and one that costs it 68.
+/// A note holds an address of the same 32 bytes now, so the 68 stands.
 ///
 /// That second figure said 37, which is the tree half of the same measurement
 /// and not the set. `cairn-ledger/examples/footprint.rs` prints the whole and
@@ -180,26 +187,55 @@ fn is_canonically_encoded(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey([u8; PUBLIC_KEY_LEN]);
 
+/// The point `bytes` encode, once it has passed the three refusals.
+fn decoded(bytes: &[u8; PUBLIC_KEY_LEN]) -> Result<VerifyingKey, CryptoError> {
+    if !is_canonically_encoded(bytes) {
+        return Err(CryptoError::NonCanonicalPublicKey);
+    }
+    let key = VerifyingKey::from_bytes(bytes).map_err(|_| CryptoError::MalformedPublicKey)?;
+    if key.is_weak() {
+        return Err(CryptoError::WeakPublicKey);
+    }
+    // And the rest of the keys nobody holds. `is_weak` is exactly
+    // `is_small_order`, so it catches the eight torsion points themselves
+    // and nothing else: a real key with one of them added is not small
+    // order, and no signer can reach it. Kept as its own refusal rather
+    // than folded into the one above, because the two are different
+    // sentences and whoever reads the error is looking for a different
+    // thing.
+    if !key.to_edwards().is_torsion_free() {
+        return Err(CryptoError::UnusablePublicKey);
+    }
+    Ok(key)
+}
+
 impl PublicKey {
     pub fn from_bytes(bytes: &[u8; PUBLIC_KEY_LEN]) -> Result<Self, CryptoError> {
-        if !is_canonically_encoded(bytes) {
-            return Err(CryptoError::NonCanonicalPublicKey);
-        }
-        let key = VerifyingKey::from_bytes(bytes).map_err(|_| CryptoError::MalformedPublicKey)?;
-        if key.is_weak() {
-            return Err(CryptoError::WeakPublicKey);
-        }
-        // And the rest of the keys nobody holds. `is_weak` is exactly
-        // `is_small_order`, so it catches the eight torsion points themselves
-        // and nothing else: a real key with one of them added is not small
-        // order, and no signer can reach it. Kept as its own refusal rather
-        // than folded into the one above, because the two are different
-        // sentences and whoever reads the error is looking for a different
-        // thing.
-        if !key.to_edwards().is_torsion_free() {
-            return Err(CryptoError::UnusablePublicKey);
-        }
-        Ok(Self(*bytes))
+        decoded(bytes).map(|_| Self(*bytes))
+    }
+
+    /// Reads `bytes` as a key and verifies `signature` over `message` under
+    /// it, decoding the point once.
+    ///
+    /// The same answer as [`Self::from_bytes`] followed by [`Self::verify`],
+    /// refusal for refusal and in the same order, so a key that is refused is
+    /// refused whatever its signature says. What it saves is the second
+    /// decoding: `verify` decodes the point again rather than holding it,
+    /// which is right for a key kept and wrong for one read to verify one
+    /// signature, which is what every input a node checks presents.
+    ///
+    /// # Errors
+    ///
+    /// Whichever refusal [`Self::from_bytes`] makes of the key, and then
+    /// [`CryptoError::BadSignature`].
+    pub fn verify_bytes(
+        bytes: &[u8; PUBLIC_KEY_LEN],
+        message: &[u8],
+        signature: &Signature,
+    ) -> Result<(), CryptoError> {
+        decoded(bytes)?
+            .verify_strict(message, &signature.0)
+            .map_err(|_| CryptoError::BadSignature)
     }
 
     pub fn to_bytes(self) -> [u8; PUBLIC_KEY_LEN] {
@@ -423,14 +459,15 @@ mod tests {
         }
     }
 
-    /// A key held in a note is the thirty two bytes and nothing beside them.
+    /// A key is the thirty two bytes and nothing beside them.
     ///
-    /// The footprint quoted on [`PublicKey`] rests on this and on nothing
-    /// else: putting the decoded point back would be 160 more bytes per hot
-    /// note, and at the ceiling the rules impose that is the difference
-    /// between the 68 MB `cairn-ledger/examples/footprint.rs` reads today and
-    /// the 107 MB it read before. The megabytes are a resident reading and
-    /// cannot be pinned from here; the shape they are a reading of can.
+    /// The footprint quoted on [`PublicKey`] rested on this while a note held
+    /// a key: putting the decoded point back would have been 160 more bytes
+    /// per hot note, the difference between the 68 MB
+    /// `cairn-ledger/examples/footprint.rs` reads and the 107 MB it read
+    /// before. A note holds an address now, and `cairn-ledger` holds that to
+    /// the same thirty two bytes; this still holds a key that verifies once
+    /// to the size it is carried at.
     #[test]
     fn a_key_in_a_note_is_the_thirty_two_bytes_and_nothing_beside() {
         assert_eq!(PUBLIC_KEY_LEN, 32);

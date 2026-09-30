@@ -105,6 +105,7 @@ fn table_row(label: &str) -> String {
 fn in_french(value: usize) -> &'static str {
     match value {
         5 => "cinq",
+        6 => "six",
         8 => "huit",
         64 => "soixante-quatre",
         other => panic!(
@@ -112,6 +113,37 @@ fn in_french(value: usize) -> &'static str {
              has no word for {other}"
         ),
     }
+}
+
+/// The thirty-year download total, as README.md writes it in words.
+///
+/// The same rule as `in_french`: a number nobody has taught this test the
+/// words for stops the test rather than quietly agreeing with a README that
+/// has moved on and this test has not.
+fn in_english_gigabytes(value: u64) -> &'static str {
+    match value {
+        229 => "two hundred and twenty-nine",
+        other => panic!(
+            "the thirty-year download is {other} GB now, and this test has no words for \
+             it; README.md needs the same words, spelled out the way it always has"
+        ),
+    }
+}
+
+/// The thirty-year download total this build's transfer format encodes, in
+/// the words README.md should give it.
+///
+/// Computed rather than matched as a fixed string, the way the French papers'
+/// guard already recomputes the same total for design.md and prior-art.md: a
+/// literal-string check on the README passed whether or not the number was
+/// right, and it stopped being right when the transfer format grew and
+/// nobody told the assertion.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn arrival_gigabytes_in_words() -> &'static str {
+    let mut bench = Bench::new(8);
+    let busy = bench.block(64).encode().len() as u64;
+    let gigabytes = (THIRTY_YEARS * busy) as f64 / 1e9;
+    in_english_gigabytes(gigabytes.round() as u64)
 }
 
 /// The number beside the section whose heading is `heading`.
@@ -777,8 +809,8 @@ fn the_ledger_a_newcomer_is_handed_is_the_size_the_paper_gives() {
 /// **The papers count the renumberings the network identifiers record.**
 ///
 /// The whitepaper's limitations said the test networks were renumbered three
-/// times and the design paper said the same twice, while `note.rs` carries six
-/// test networks, each taken because a rule changed. Three was true at
+/// times and the design paper said the same twice, while `note.rs` carries
+/// seven test networks, each taken because a rule changed. Three was true at
 /// testnet-4. A count of how often something happened is a figure like any
 /// other, and the identifiers are where it is written down.
 #[test]
@@ -1127,9 +1159,14 @@ fn the_papers_weighing_is_the_size_this_build_encodes() {
         PAPER.contains(&format!("{stated} to weigh the\n      chain")),
         "the paper's arrival note does not say weighing costs {stated}"
     );
+    // The other half of the same sentence: what weighing replaces.
+    let words = arrival_gigabytes_in_words();
     assert!(
-        README.contains("about\nthree megabytes against the hundred and ninety-seven gigabytes"),
-        "the README does not say what weighing costs in the same figure"
+        README.contains(&format!(
+            "about\nthree megabytes against the {words} gigabytes"
+        )),
+        "the README does not say the thirty-year download is {words} gigabytes, which is \
+         what this build's transfer format now encodes"
     );
     // The README priced joining twice, a page apart: this figure, and "twelve
     // megabytes for a thirty year chain, against 2 067 GB of reading" higher
@@ -1719,6 +1756,63 @@ fn the_papers_figure_for_a_chain_far_past_the_cliff_is_the_measured_one() {
     );
 }
 
+/// **The specification's limit on a stranger's first frame is the wire's own
+/// constant, not a number copied beside it.**
+///
+/// `MOST_BEFORE_A_NAME` is what a peer that has not introduced itself may
+/// send before a frame is refused as too large: a handshake is the only
+/// message such a peer may send, and the specification says a future one
+/// must still fit inside it. A document that names the number and a build
+/// that changes it without the document noticing is exactly the drift this
+/// test exists to catch.
+#[test]
+fn the_specification_states_the_wire_limit_a_stranger_is_held_to() {
+    assert!(
+        specification_flowing().contains(&format!(
+            "A peer that has not introduced itself may send at most {} bytes",
+            grouped(u64::try_from(cairn_net::wire::MOST_BEFORE_A_NAME).unwrap())
+        )),
+        "the specification does not state the {} byte limit a stranger's frame is held to",
+        cairn_net::wire::MOST_BEFORE_A_NAME
+    );
+}
+
+/// **The specification names `TooManyPlacesForABlock` as pool policy, not a
+/// consensus refusal, and states the limit the same way the pool computes
+/// it.**
+///
+/// A block is judged by `PlacesUnpaid` and `TooManyEvictions` alone; a pool
+/// that refuses a transfer sooner, because it would not fit in the very next
+/// block, is a choice about what to carry and not about what a block may
+/// hold. Left unsaid, a reader of the specification alone would have no way
+/// to tell the two apart.
+#[test]
+fn the_specification_names_the_pools_place_limit_as_policy_not_consensus() {
+    let paper = specification_flowing();
+    assert!(
+        paper.contains("TooManyPlacesForABlock"),
+        "the specification does not name TooManyPlacesForABlock at all"
+    );
+    assert!(
+        paper.contains("the tier's room plus its eviction cap, less the coinbase's own outputs"),
+        "the specification does not state the pool's place limit as the tier's room \
+         plus the eviction cap, less the coinbase's outputs"
+    );
+    assert!(
+        paper.contains("This is pool policy, not consensus"),
+        "the specification does not say TooManyPlacesForABlock is pool policy, not consensus"
+    );
+}
+
+/// The specification with its line breaks taken out, for phrases longer than
+/// a line, the same way [`flowing`] does for the whitepaper.
+fn specification_flowing() -> String {
+    SPECIFICATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The paper with its line breaks taken out, for phrases longer than a line.
 ///
 /// A guard that matched the paper's own wrapping would be a guard against
@@ -1731,7 +1825,9 @@ fn flowing() -> String {
 fn spelled(value: u64) -> &'static str {
     match value {
         5 => "five",
+        6 => "six",
         11 => "eleven",
+        15 => "fifteen",
         16 => "sixteen",
         24 => "twenty four",
         32 => "thirty two",
@@ -2009,5 +2105,120 @@ fn the_surveys_byline_counts_the_works_the_survey_cites() {
         PRIOR_ART.contains(&said),
         "the survey cites {} works and its byline does not say so",
         cited.len()
+    );
+}
+
+/// What a flood of the hot set costs and does, as the papers give it, worked
+/// out from the constants this build runs on.
+///
+/// The place price made pushing the tier out cost something, and the papers
+/// quote what: the price itself, the burn of a whole tier, the blocks the
+/// eviction cap spreads it over, how short the grace window gets while it
+/// lasts, and the higher price that was turned down. Each is a product of
+/// constants, and before this none of them was written anywhere a test could
+/// hold it: the papers promised sixty four blocks of grace and a cap that made
+/// a flush take two hours, and said nothing of what it cost, which for a miner
+/// was nothing.
+#[test]
+fn the_papers_price_a_flood_of_the_hot_set_from_the_constants() {
+    const THREAT_MODEL: &str = include_str!("../../../docs/cairn-threat-model.html");
+    let flat = |page: &str| page.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (paper, spec, threats) = (flat(PAPER), flat(SPECIFICATION), flat(THREAT_MODEL));
+
+    let live = ConsensusParams::for_network("testnet").unwrap();
+    let price = cairn_ledger::validation::PLACE_PRICE;
+    assert_eq!(
+        live.place_price, price,
+        "the public network charges the price"
+    );
+    let written = grouped(price.as_pebbles());
+    assert_eq!(
+        parameter("Place price, destroyed"),
+        format!("{written} pebbles"),
+        "the paper's parameter list does not give the place price"
+    );
+    assert!(
+        paper.contains(&format!("destroys {written} pebbles, paid once")),
+        "the paper's limitations do not give the place price"
+    );
+    assert!(
+        spec.contains(&format!("{written} pebbles on every network here")),
+        "the specification does not give the place price"
+    );
+
+    // The burn of a whole tier, and the blocks the cap spreads it over: at
+    // least the cap allows, and at the pace a miner's selection builds, which
+    // keeps a full coinbase's room and then pays its miner one note.
+    let tier = live.hot_capacity as u64;
+    let burn = tier * price.as_pebbles();
+    let cairn = format!("{:.1}", burn as f64 / 1e8);
+    let least = live.hot_capacity.div_ceil(live.max_evictions_per_block);
+    let pace = live
+        .hot_capacity
+        .div_ceil(live.max_evictions_per_block - live.max_coinbase_outputs + 1);
+    assert!(
+        paper.contains(&format!(
+            "costs {} places, {cairn} CAIRN destroyed",
+            grouped(tier)
+        )),
+        "the paper's burn of a whole tier is not the tier times the price, {cairn} CAIRN"
+    );
+    assert!(
+        paper.contains(&format!(
+            "at least {least} blocks, about {pace} at the pace"
+        )),
+        "the paper's flush does not take the blocks the cap allows, {least} and {pace}"
+    );
+    assert!(
+        threats.contains(&format!(
+            "{} places at {written} pebbles, about {cairn} CAIRN destroyed",
+            grouped(tier)
+        )),
+        "the threat model's price of a flush is not the tier times the price"
+    );
+
+    // The grace window at the cap, which the note bound decides.
+    let span = GRACE_NOTES / live.max_evictions_per_block;
+    assert!(
+        paper.contains(&format!("the window spans {span} blocks"))
+            && paper.contains(&format!(
+                "the grace window spans {span} blocks rather than {GRACE_BLOCKS}"
+            )),
+        "the paper's grace window under a flood is not the note bound over the cap, {span}"
+    );
+
+    // And the price turned down: a block reward for the whole tier, which a
+    // miner with a tenth of the work earns many times a day.
+    let rejected = live.reward_at(0).as_pebbles() / tier;
+    let rounded = (rejected + 500) / 1_000 * 1_000;
+    let tenth = 24 * 60 * 60 / live.target_block_time / 10;
+    assert!(
+        paper.contains(&format!("about {} pebbles a place", grouped(rounded)))
+            && paper.contains(&format!("one of the {tenth} rewards it earns a day")),
+        "the paper's rejected price is not a block reward over the tier, {rounded}"
+    );
+
+    // A coinbase's outputs are places that pay no price, so a miner's own
+    // coinbase is a second, unpriced channel beside the one measured above:
+    // every output past the one that claims the reward.
+    let free = spelled((live.max_coinbase_outputs - 1) as u64);
+    assert!(
+        paper.contains(&format!("up to {free} extra outputs"))
+            && paper.contains(&format!("mining alone up to {free}")),
+        "the paper's limitations do not give the miner's free coinbase places, {free}"
+    );
+    assert!(
+        threats.contains(&format!(
+            "up to {free} extra outputs beyond the reward's own"
+        )) && threats.contains(&format!(
+            "bounds the free outputs at {free} but does not burn"
+        )),
+        "the threat model's miner row does not give the free coinbase places, {free}"
+    );
+    assert!(
+        threats.contains(&format!(
+            "exempt for up to {free} extra outputs a block, free"
+        )),
+        "the threat model's eviction-cap row does not give the miner's free channel, {free}"
     );
 }

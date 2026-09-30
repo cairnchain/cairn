@@ -1,10 +1,13 @@
 //! AUDIT SCRATCH TEST: end-to-end consequence of block-id malleability.
 //!
-//! A block id is the header id, and the header commits to signatures/witnesses
-//! nowhere (its `transactions_root` is a Merkle root over `Transfer::id()`,
-//! which excludes them). So for any honest block B, an attacker can build a twin
-//! B' = B with one input signature replaced by garbage: same id, different
-//! bytes, invalid.
+//! A block id is the header id, and the header used to commit to signatures
+//! and witnesses nowhere (its `transactions_root` was a Merkle root over
+//! `Transfer::id()`, which excludes them). So for any honest block B, an
+//! attacker could build a twin B' = B with one input signature replaced by
+//! garbage: same id, different bytes, invalid. The root commits to each
+//! transfer's whole encoding now, so that twin is refused as a body its header
+//! does not name; any other body under a real header still shares the id, and
+//! the tests here hold what the chain does about that.
 //!
 //! `ChainStore` keys both its dedup and its invalid-block memory on the block
 //! id. Deliver B' before B and the node stores B' under B's id, marks that id
@@ -42,9 +45,9 @@ use cairn_chain::{Accepted, ChainError, ChainStore};
 use cairn_crypto::{SecretKey, Signature};
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
+use cairn_ledger::transaction::{CoinbaseTransaction, ColdWitness, Input, Transfer, Witness};
 use cairn_ledger::validation::{
-    assemble_block, connect_block, mine_block, BlockError, ConsensusParams,
+    assemble_block, connect_block, evaluate_block_body, mine_block, BlockError, ConsensusParams,
 };
 use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
@@ -433,4 +436,160 @@ fn a_copy_sent_again_before_every_delivery_does_not_keep_a_node_off_the_heavier_
         rival.last().map(Block::id),
         "a node offered every block of a heavier valid branch stayed on the lighter one"
     );
+}
+
+/// Eleven blocks both branches share and two more on the branch a node
+/// follows, with the node holding them, and the branch a rival grows from,
+/// left where the two part.
+fn parted(params: ConsensusParams) -> (ChainStore, Vec<Block>, Branch) {
+    let miner = wallet(1);
+    let mut branch = Branch::new(params);
+    let shared = branch.mine_empty(&miner, 11);
+    let aside = branch.fork();
+    let followed = branch.mine_empty(&miner, 2);
+
+    let mut store = ChainStore::new(params);
+    for block in shared.iter().chain(followed.iter()) {
+        store.add_block(block.clone(), NOW).unwrap();
+    }
+    assert_eq!(store.height(), Some(12));
+    (store, shared, aside)
+}
+
+/// A rival of three off `aside`, its first block carrying `payment`.
+fn rival_carrying(aside: &mut Branch, payment: Transfer) -> Vec<Block> {
+    let other = wallet(3);
+    vec![
+        aside.mine(&other, vec![payment]),
+        aside.mine(&other, Vec::new()),
+        aside.mine(&other, Vec::new()),
+    ]
+}
+
+/// `copy` is refused on arrival as a body its header does not name, nothing
+/// is held under its identifier, and the real block and its branch are then
+/// taken as they arrive.
+fn refused_and_then_the_real_branch_taken(store: &mut ChainStore, rival: &[Block], copy: &Block) {
+    let refused = store.add_block(copy.clone(), NOW);
+    assert!(
+        matches!(
+            &refused,
+            Err(ChainError::InvalidBlock {
+                id,
+                source: BlockError::TransactionsRootMismatch { .. },
+            }) if *id == copy.id()
+        ),
+        "a copy that differs from a mined block in its signatures or witnesses alone was \
+         not refused as a body its header does not name"
+    );
+    assert!(
+        store.block(&rival[0].id()).is_none(),
+        "and something is held under the identifier it copied"
+    );
+
+    assert_eq!(
+        store.add_block(rival[0].clone(), NOW),
+        Ok(Accepted::SideBranch)
+    );
+    assert_eq!(
+        store.block(&rival[0].id()),
+        Some(&rival[0]),
+        "the real block, arriving after the copy, is not the body held under its identifier"
+    );
+    assert_eq!(
+        store.add_block(rival[1].clone(), NOW),
+        Ok(Accepted::SideBranch)
+    );
+    let delivered = store.add_block(rival[2].clone(), NOW);
+    assert!(
+        matches!(delivered, Ok(Accepted::Reorganised { .. })),
+        "the delivery of the block that makes the rival the heaviest was refused"
+    );
+    assert_eq!(store.tip(), rival.last().map(Block::id));
+}
+
+/// A copy of a side block that changes only a signature is refused before it
+/// is held, and the real block, delivered after it, is the one held.
+///
+/// A transfer's identifier leaves its signatures and witnesses out, and a
+/// block's `transactions_root` was taken over those identifiers, so a copy
+/// with one signature turned to garbage kept the real block's header, and so
+/// its identifier and its work, and produced the root that header names. Held
+/// first, it was the body the node tried when its branch became the heaviest,
+/// and the real body, arriving second, had been turned away. Nothing asked
+/// this, so a node that held a body nobody mined under a mined block's
+/// identifier passed.
+#[test]
+fn a_copy_that_changes_only_a_signature_is_refused_before_it_is_held() {
+    let params = params();
+    let (mut store, shared, mut aside) = parted(params);
+    let miner = wallet(1);
+    let (funded, funded_note) = coinbase_note(&shared[10], &params, &miner);
+    let mut payment = Transfer::new(
+        vec![Input::hot(funded)],
+        vec![Note::new(funded_note.value, wallet(2).public_key())],
+    );
+    payment.sign_input(params.network, 0, &funded_note, &miner);
+    let rival = rival_carrying(&mut aside, payment);
+
+    let mut copy = rival[0].clone();
+    copy.transfers[0].inputs[0].signature = Signature::from_bytes(&[0xAB; 64]);
+    assert_eq!(copy.id(), rival[0].id(), "the copy shares the identifier");
+    assert_ne!(copy.encode(), rival[0].encode(), "yet is a different block");
+
+    refused_and_then_the_real_branch_taken(&mut store, &rival, &copy);
+}
+
+/// A copy of a side block that spends a note in the grace window with its
+/// proof, where the miner spent it without, is refused before it is held.
+///
+/// Inside the window both witness tags are accepted for the same spend, and
+/// every node holds the window's paths, so anybody relaying such a block can
+/// make a copy carrying the other tag. That copy is not merely held: it is
+/// valid, reaches the same state, and is applied, written to the block log and
+/// served as the block, and nothing can tell it from what the miner produced.
+/// Nothing asked this, so a node whose record of a block could be a body the
+/// miner never carried passed.
+#[test]
+fn a_copy_that_swaps_a_grace_spend_for_its_proof_is_refused_before_it_is_held() {
+    // A tier of four, so the first rewards have fallen by the time the
+    // branches part, and the window, which holds the last sixty four landings,
+    // still names them.
+    let params = params().with_hot_capacity(4);
+    let (mut store, shared, mut aside) = parted(params);
+    let miner = wallet(1);
+    let (fallen, note) = coinbase_note(&shared[0], &params, &miner);
+    let (position, held) = aside
+        .state
+        .within_grace(&fallen)
+        .expect("the premise: the first reward fell and the window still names it");
+    assert_eq!(held, note);
+    let proof = aside
+        .state
+        .cold()
+        .proof_of(position)
+        .expect("every node holds the paths of the window's notes");
+
+    let mut payment = Transfer::new(
+        vec![Input::hot(fallen)],
+        vec![Note::new(note.value, wallet(2).public_key())],
+    );
+    payment.sign_input(params.network, 0, &note, &miner);
+    let parent = aside.state.clone();
+    let rival = rival_carrying(&mut aside, payment);
+
+    let mut copy = rival[0].clone();
+    copy.transfers[0].inputs[0].witness = Witness::Cold(Box::new(ColdWitness {
+        note,
+        position,
+        proof,
+    }));
+    assert_eq!(copy.id(), rival[0].id(), "the copy shares the identifier");
+    assert_ne!(copy.encode(), rival[0].encode(), "yet is a different block");
+    assert!(
+        evaluate_block_body(&parent, &copy.coinbase, &copy.transfers, &params).is_ok(),
+        "the premise: the copy's body is one the rules accept on the rival's parent"
+    );
+
+    refused_and_then_the_real_branch_taken(&mut store, &rival, &copy);
 }

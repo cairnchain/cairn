@@ -23,8 +23,8 @@
 # about swap below if the build is killed partway.
 #
 # A seed node holds no key. If this machine were taken tomorrow, there would be
-# nothing on it to steal. It can still be asked to mine, with MINE set to a
-# public key: what a miner needs is the address rewards are paid to, never the
+# nothing on it to steal. It can still be asked to mine, with MINE set to an
+# address: what a miner needs is the address rewards are paid to, never the
 # key that spends them.
 
 set -eu
@@ -141,13 +141,14 @@ the_settings() {
     # retired name here costs a line of output and nothing else. It is not
     # asked from the build at this point because the build is not built
     # yet.
-    resolve NETWORK "$(carried network)" testnet-6
+    resolve NETWORK "$(carried network)" testnet-7
     resolve PORT "${listen##*:}" 9944
     resolve SEED "$(carried seed)" ""
-    # A public key to pay block rewards to. Mining needs the address money
-    # goes to and nothing else: the key that spends it never leaves the
-    # machine that holds it, so this stays true even here, where nothing
-    # worth stealing may sit.
+    # An address to pay block rewards to, or a public key in the form an
+    # address had before 0.11, which the node converts to its address. Mining
+    # needs the address money goes to and nothing else: the key that spends
+    # it never leaves the machine that holds it, so this stays true even
+    # here, where nothing worth stealing may sit.
     resolve MINE "$(carried mine)" ""
     # Not settings this script is told. The directory and the address to
     # listen on are whatever the installed line says, and the defaults on a
@@ -370,20 +371,62 @@ if [ -n "$MINE_SAID" ] && [ -z "$MINE" ]; then
     MINE=off
 fi
 
-# A key that is not a key produces a service that will not start, and systemd
-# reports that as a failure to launch rather than as a bad argument. Asked
-# here as well as by `--check` below, because this is before the build.
+# An address that is not an address produces a service that will not start,
+# and systemd reports that as a failure to launch rather than as a bad
+# argument. Its shape is asked here, because this is before the build; its
+# checksum and its network are the build's to read, at `--check` below.
+#
+# The shape asked is the specification's: a reader MAY take the same string
+# written all in capitals, which is how a QR code carries it, and MUST refuse
+# one that mixes the two cases, a character outside the Bech32m alphabet, or
+# any length but the one an address of that prefix is. `case` in POSIX `sh`
+# is case-sensitive, so the prefix is matched against a folded copy and the
+# case rule is asked of the string `MINE` actually holds.
 if [ -n "$MINE" ] && [ "$MINE" != off ]; then
-    case "$MINE" in
-        *[!0-9a-fA-F]* | "")
-            echo "MINE is not a public key: $MINE" >&2
-            exit 1
-            ;;
+    mine_lower=$(printf '%s' "$MINE" | tr 'A-Z' 'a-z')
+    mine_prefix=
+    case "$mine_lower" in
+        cairn1*) mine_prefix=cairn1; mine_length=64 ;;
+        tcairn1*) mine_prefix=tcairn1; mine_length=65 ;;
+        dcairn1*) mine_prefix=dcairn1; mine_length=65 ;;
     esac
-    if [ "${#MINE}" -ne 64 ]; then
-        echo "MINE should be 64 hex characters, this is ${#MINE}" >&2
-        echo "get it with: cairn-wallet address <your key file>" >&2
-        exit 1
+    if [ -n "$mine_prefix" ]; then
+        mine_upper=$(printf '%s' "$MINE" | tr 'a-z' 'A-Z')
+        if [ "$MINE" != "$mine_lower" ] && [ "$MINE" != "$mine_upper" ]; then
+            echo "MINE is not an address: it mixes capital and small letters: $MINE" >&2
+            echo "get it with: cairn-wallet address <your key file>" >&2
+            exit 1
+        fi
+        if [ "${#MINE}" -ne "$mine_length" ]; then
+            echo "MINE is not an address: a $mine_prefix address is $mine_length characters, this is ${#MINE}: $MINE" >&2
+            echo "get it with: cairn-wallet address <your key file>" >&2
+            exit 1
+        fi
+        mine_data=${mine_lower#"$mine_prefix"}
+        case "$mine_data" in
+            *[!qpzry9x8gf2tvdw0s3jn54khce6mua7l]*)
+                echo "MINE is not an address: it has a character no address is written with: $MINE" >&2
+                echo "get it with: cairn-wallet address <your key file>" >&2
+                exit 1
+                ;;
+        esac
+    else
+        case "$MINE" in
+            *[!0-9a-fA-F]* | "")
+                echo "MINE is not an address: $MINE" >&2
+                echo "get it with: cairn-wallet address <your key file>" >&2
+                exit 1
+                ;;
+            *)
+                # A public key, the form an address had before 0.11. The node
+                # still takes one and converts it to its address.
+                if [ "${#MINE}" -ne 64 ]; then
+                    echo "MINE is neither an address nor a 64 character public key: $MINE" >&2
+                    echo "get the address with: cairn-wallet address <your key file>" >&2
+                    exit 1
+                fi
+                ;;
+        esac
     fi
 fi
 
@@ -499,6 +542,23 @@ settle_the_network "$BUILT"
 NOW=$(name_of "$BUILT" "$NETWORK")
 ARGS=$(the_line)
 check_the_line "$BUILT"
+# A public key in the old form of an address is still accepted and converted,
+# but the unit keeps whatever MINE carried in, key included, unless something
+# writes the address back. So the build's own answer is asked, once, and
+# written into the unit in the key's place: a 0.9 unit is rewritten with its
+# address the first time it is installed under a build that has one, and
+# 0.12 can drop the conversion because no unit carries a bare key by then.
+if [ -n "$MINE" ] && [ "$MINE" != off ] && [ -z "$mine_prefix" ]; then
+    # shellcheck disable=SC2086
+    resolved=$( (cd / && "$BUILT" --check $ARGS 2>/dev/null) | awk '/^mining / {print $NF; exit}')
+    case "$resolved" in
+        cairn1* | tcairn1* | dcairn1*)
+            echo "mine     $MINE was a public key; the unit is written with its address $resolved instead"
+            MINE=$resolved
+            ARGS=$(the_line)
+            ;;
+    esac
+fi
 # What the node will do, in the words of the build about to be installed:
 # the line and the cairn.conf beside the chain, read together. The lines
 # printed at the start are what this run was told and carried, which is not

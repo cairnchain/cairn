@@ -48,11 +48,13 @@ fn main() {
     println!("{ROUNDS} verifications in {taken:?}, {verification:.2} us each");
 
     // Reading a key is not verifying with it, and the two get confused because
-    // the expensive half of a verification is the same decompression. Every
-    // note on the wire carries a key and every one of them is decompressed
-    // while the frame is being decoded, which is before any rule has looked at
-    // the frame. So this is what a peer can make a node spend per forty bytes
-    // it sends, and it is worth knowing on its own.
+    // the expensive half of a verification is the same decompression. While a
+    // note carried its owner's key, every note on the wire was decompressed
+    // while the frame was being decoded, before any rule had looked at the
+    // frame, and this was what a peer could make a node spend per forty bytes
+    // it sent. A note carries an address now, and a key is read only for the
+    // input that spends a note, beside its verification: this is what that
+    // input adds to it.
     let keys = a_key_each(ROUNDS);
     let started = Instant::now();
     let mut read = 0usize;
@@ -73,5 +75,34 @@ fn main() {
     println!(
         "a public key is {} bytes in memory",
         core::mem::size_of::<cairn_crypto::PublicKey>()
+    );
+
+    // What an input costs a node: its key read with the refusals and its
+    // signature verified under it. Asked as two steps the point is decoded
+    // twice, since a key keeps its bytes and decodes them again to verify;
+    // `verify_bytes` decodes it once for both.
+    let bytes = key.to_bytes();
+    let started = Instant::now();
+    let mut apart = 0usize;
+    for _ in 0..ROUNDS {
+        if PublicKey::from_bytes(&bytes)
+            .and_then(|read| read.verify(&message, &signature))
+            .is_ok()
+        {
+            apart += 1;
+        }
+    }
+    let two_steps = started.elapsed().as_secs_f64() * 1e6 / ROUNDS as f64;
+    let started = Instant::now();
+    let mut together = 0usize;
+    for _ in 0..ROUNDS {
+        if PublicKey::verify_bytes(&bytes, &message, &signature).is_ok() {
+            together += 1;
+        }
+    }
+    let one_pass = started.elapsed().as_secs_f64() * 1e6 / ROUNDS as f64;
+    assert_eq!((apart, together), (ROUNDS, ROUNDS));
+    println!(
+        "an input, key read then verified: {two_steps:.2} us; in one decoding: {one_pass:.2} us"
     );
 }

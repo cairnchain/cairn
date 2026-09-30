@@ -5,11 +5,13 @@
 //! The comment on that cap reasoned about the allocation: a megabyte, bounded
 //! by the number of connections a node accepts at once, fine.
 //!
-//! The allocation is the cheap half. Decoding is the other, and decoding a
-//! frame full of notes decompresses a point off the curve for every owner in
-//! it and checks each one for its subgroup. A megabyte of note owners is about
-//! twenty six thousand keys: a sixth of a second of somebody else's processor
-//! before the subgroup check went in, and one and a third seconds after.
+//! The allocation is the cheap half. Decoding is the other, and while a note's
+//! owner was a key, decoding a frame full of notes decompressed a point off the
+//! curve for every owner in it and checked each one for its subgroup. A
+//! megabyte of note owners was about twenty six thousand keys: a sixth of a
+//! second of somebody else's processor before the subgroup check went in, and
+//! one and a third seconds after. An owner is an address now and reads as
+//! bytes; the cap still bounds what a stranger's frame costs to build.
 //!
 //! The budget that would have charged for it was asked after the read, once
 //! the message was built, and by then the work was done. A control that
@@ -52,7 +54,6 @@ fn hello(nonce: u64, listen: u16) -> Message {
         version: cairn_net::message::PROTOCOL_VERSION,
         network: params().network,
         genesis: cairn_primitives::Hash32::ZERO,
-        tip: cairn_primitives::Hash32::ZERO,
         height: 0,
         total_work: 0,
         listen,

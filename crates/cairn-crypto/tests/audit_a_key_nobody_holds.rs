@@ -138,3 +138,61 @@ fn the_refusals_that_were_there_still_say_what_they_said() {
         "a canonical number that is not a point has its own refusal"
     );
 }
+
+/// Reading a key and verifying with it in one pass answers exactly what
+/// reading it and then verifying with it answered, for every kind of key and
+/// every kind of signature.
+///
+/// `PublicKey::verify_bytes` decodes the point once where the two steps
+/// decoded it twice, and it is only right if it refuses what they refused,
+/// under the same name and before it looks at the signature: a key carrying
+/// torsion is refused whatever its signature says. Nothing compared the two,
+/// so a one-pass reader that skipped a refusal, or asked it after the
+/// signature, would have passed.
+#[test]
+fn verifying_from_the_bytes_answers_what_reading_then_verifying_answered() {
+    let secret = SecretKey::from_bytes(&[5; 32]);
+    let message = b"what an input signs";
+    let signatures = [secret.sign(message), secret.sign(b"something else")];
+    let (point, plain) = point_of(5);
+    let mut not_a_point = [0u8; 32];
+    not_a_point[0] = 2;
+    let mut keys = vec![
+        plain,
+        SecretKey::from_bytes(&[6; 32]).public_key().to_bytes(),
+        [0xff; 32],
+        not_a_point,
+    ];
+    for torsion in EIGHT_TORSION {
+        keys.push(torsion.compress().to_bytes());
+        keys.push((point + torsion).compress().to_bytes());
+    }
+
+    let mut answers = Vec::new();
+    for key in &keys {
+        for signature in &signatures {
+            let apart = PublicKey::from_bytes(key).and_then(|read| read.verify(message, signature));
+            let together = PublicKey::verify_bytes(key, message, signature);
+            assert_eq!(
+                together, apart,
+                "one pass over a key answered other than reading it and then verifying"
+            );
+            if !answers.contains(&apart) {
+                answers.push(apart);
+            }
+        }
+    }
+    for expected in [
+        Ok(()),
+        Err(CryptoError::BadSignature),
+        Err(CryptoError::NonCanonicalPublicKey),
+        Err(CryptoError::MalformedPublicKey),
+        Err(CryptoError::WeakPublicKey),
+        Err(CryptoError::UnusablePublicKey),
+    ] {
+        assert!(
+            answers.contains(&expected),
+            "no key here reached {expected:?}, so the comparison says nothing about it"
+        );
+    }
+}

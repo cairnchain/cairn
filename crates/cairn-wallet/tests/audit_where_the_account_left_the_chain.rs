@@ -464,10 +464,10 @@ fn a_one_block_switch_reads_back_only_the_blocks_it_applied() {
 /// An account level with the tip reads nothing off the disk to find that out.
 ///
 /// Every look at the account asked whether it had diverged by reading the
-/// newest block it had read back off the block log: a seek, a decode with one
-/// key decompression per note, the transactions root hashed again and the
-/// neighbour's header read, to compare thirty two bytes the chain holds in
-/// memory. The page asks four times every two seconds. Nothing counted the
+/// newest block it had read back off the block log: a seek, a decode, which
+/// then took a key decompression per note, the transactions root hashed again
+/// and the neighbour's header read, to compare thirty two bytes the chain
+/// holds in memory. The page asks four times every two seconds. Nothing counted the
 /// reads, so an account that went to the disk on every look passed. Here the
 /// tip's record is damaged after the account has read it, which makes every
 /// read of it a refusal the node counts.

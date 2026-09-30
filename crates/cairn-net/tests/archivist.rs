@@ -176,7 +176,6 @@ fn a_handshake(listen: u16, nonce: u64, keeps: Keeps) -> Message {
         version: PROTOCOL_VERSION,
         network: params().network,
         genesis: Hash32::ZERO,
-        tip: Hash32::ZERO,
         height: 0,
         total_work: 0,
         listen,
@@ -470,8 +469,13 @@ fn a_node_following_an_owner_tells_a_stranger_nothing_about_which_one() {
     let ready = a_chain_with_a_fallen_note();
 
     let watching = scratch("watching");
-    let (follower, _) =
-        Node::open_watching(params(), loopback(), &watching, &[miner().public_key()]).unwrap();
+    let (follower, _) = Node::open_watching(
+        params(),
+        loopback(),
+        &watching,
+        &[miner().public_key().into()],
+    )
+    .unwrap();
     for block in &ready.blocks {
         follower.submit_block(block.clone()).unwrap();
     }

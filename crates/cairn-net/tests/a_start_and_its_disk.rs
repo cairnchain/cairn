@@ -246,6 +246,42 @@ fn a_log_of_another_network_stops_the_start_and_keeps_every_block() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// A node started for devnet, on a directory devnet-1's build wrote, stops
+/// and names the retired network by name rather than by its bare marker.
+///
+/// Nothing asked this before devnet was renumbered alongside testnet-7: the
+/// generic case above proves a mismatched marker is refused and named, but a
+/// marker nobody had named printed as hexadecimal, `0x43415244`. Devnet-1 is
+/// named in `NetworkId::name` for exactly this, so a directory left over
+/// from before the restart is refused with the word "devnet-1" rather than a
+/// number nobody can look up.
+#[test]
+fn a_devnet_1_log_stops_a_devnet_start_and_names_the_network() {
+    let directory = scratch("devnet-1");
+    let old = ConsensusParams {
+        network: NetworkId::DEVNET_1,
+        ..params()
+    };
+    write_log(&directory, &chain(&old, 8));
+    let before = bytes_of(&directory, BLOCK_LOG);
+    let current = ConsensusParams {
+        network: NetworkId::DEVNET,
+        ..params()
+    };
+
+    let said = refusal(Node::open(current, loopback(), &directory));
+
+    assert!(
+        bytes_of(&directory, BLOCK_LOG) == before,
+        "a start under devnet's name changed devnet-1's block log"
+    );
+    assert!(
+        said.contains("devnet-1"),
+        "the refusal did not name the retired network by name: {said}"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// A ledger this build is too old for is answered with a build, not with the
 /// remedy for a damaged file.
 ///

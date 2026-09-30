@@ -28,7 +28,7 @@ const PROBE: &[u8] = b"cairn audit vector";
 ///
 /// The pairing matters as much as the values: a swap between two arms of
 /// `key_for` would keep every digest distinct and still be a fork.
-const DOMAIN_VECTORS: [(Domain, &str); 21] = [
+const DOMAIN_VECTORS: [(Domain, &str); 25] = [
     (
         Domain::TransferId,
         "8903a92f6a8473eb072c6c73ba4f3e71322010ddf3a6d961d1256bfa4e19e908",
@@ -44,6 +44,10 @@ const DOMAIN_VECTORS: [(Domain, &str); 21] = [
     (
         Domain::SignatureMessage,
         "b61f559e48d6b1b0b0d820e164a85ce54e50e06145015588cb9dbf2183374606",
+    ),
+    (
+        Domain::Address,
+        "eea1c5fbfa179a67d796ed80b97f0b79e2e7cba5c8631e1af0b852d59728275d",
     ),
     (
         Domain::MerkleLeaf,
@@ -108,6 +112,18 @@ const DOMAIN_VECTORS: [(Domain, &str); 21] = [
     (
         Domain::GraceWindow,
         "deb7354cfac902db43130ba979205b8dcaaf4627869cff3afa4b20ab05356336",
+    ),
+    (
+        Domain::TransferCommitment,
+        "01d20850e32948d9dea503e6a7e12e1f5d9de1414eca7ed8c8dd72bc0e0f87cf",
+    ),
+    (
+        Domain::SamplingDraw,
+        "076ff9f55aa78284e2cc7bd6c6a98df637715d6e02019ab74c6a25644311f361",
+    ),
+    (
+        Domain::ForestEmpty,
+        "49b8bc85cc52bdcba0b5088d54ce614754c5a568b00621a8b1f6aad8021e5684",
     ),
     (
         Domain::WalletHistory,
@@ -216,7 +232,7 @@ fn every_domain_the_crate_declares_is_pinned_here() {
 
 /// And no two of them are the same vector.
 ///
-/// The table holds twenty one hex strings and every guard over it compares a
+/// The table holds a hex string per domain and every guard over it compares a
 /// row against itself: this one against the digest it pins, the one above
 /// against membership and a count. None of them compares a row against another
 /// row, so a domain added with the string of the row above it arrives here
@@ -309,8 +325,8 @@ fn hexadecimal_still_renders_the_way_it_did() {
 //
 // The link this note used to say was unpinned is pinned now. The document says
 // each domain constant is BLAKE3's `derive_key` over a published context
-// string with empty key material, and it publishes twenty of the twenty-one
-// strings: the one it leaves out is `wallet history`, which stamps a file on
+// string with empty key material, and it publishes every string but one: the
+// one it leaves out is `wallet history`, which stamps a file on
 // one person's disk rather than anything two nodes have to agree about.
 // `every_domain_key_is_the_published_string_derived` derives each key from the
 // crate's own context string and checks the string against the document's

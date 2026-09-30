@@ -55,11 +55,13 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// It used to cost whatever [`MAX_FRAME_BYTES`] allowed. The comment on that
 /// cap reasoned about the allocation, which is a megabyte and is bounded by
 /// the number of connections a node accepts at once. Decoding what is in it is
-/// the other half: a megabyte of note owners is about twenty six thousand
-/// public keys, and each one is a point decompressed off the curve and checked
+/// the other half: a megabyte of note owners was about twenty six thousand
+/// public keys, and each one a point decompressed off the curve and checked
 /// for its subgroup. A sixth of a second of somebody else's processor before
 /// that subgroup check existed, and one and a third seconds after, from a
-/// socket that had not said who it was.
+/// socket that had not said who it was. An owner is an address now and is
+/// read as bytes, and what a stranger's frame costs to build is still what
+/// this bounds.
 pub const MOST_BEFORE_A_NAME: usize = 4 * 1024;
 
 /// How much this node will read from a peer, by whether it knows who it is.
@@ -351,7 +353,9 @@ pub fn read_message<R: Read>(
     most: usize,
 ) -> Result<Incoming, WireError> {
     match read_frame(reader, network, most)? {
-        Framed::Frame(body) => Ok(Incoming::Message(crate::message::Message::decode(&body)?)),
+        Framed::Frame(body) => Ok(Incoming::Message(crate::message::Message::from_frame(
+            &body,
+        )?)),
         Framed::Quiet => Ok(Incoming::Quiet),
     }
 }
@@ -406,12 +410,13 @@ pub(crate) fn read_frame<R: Read>(
     // question as what the protocol allows. The cap used to be the protocol's
     // alone, and the comment here reasoned about the allocation: one megabyte,
     // bounded connections, fine. The allocation is the cheap half. Decoding
-    // the frame is the other, and decoding a frame full of notes decompresses
-    // a point off the curve for every owner in it, so a megabyte from somebody
-    // who had not yet said who they were bought a second and a third of this
-    // node's processor. The cap is the caller's to state now, and the caller
-    // that reads from a peer states a small one until the peer has introduced
-    // itself, and charges the peer for the frame before decoding it after.
+    // the frame is the other, and while a note's owner was a key, decoding a
+    // frame full of notes decompressed a point off the curve for every owner
+    // in it, so a megabyte from somebody who had not yet said who they were
+    // bought a second and a third of this node's processor. The cap is the
+    // caller's to state now, and the caller that reads from a peer states a
+    // small one until the peer has introduced itself, and charges the peer for
+    // the frame before decoding it after.
     let mut body = vec![0u8; declared];
     if fill(reader, &mut body, &mut patience)? == Filled::Nothing {
         return Err(WireError::Stalled {

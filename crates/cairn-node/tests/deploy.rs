@@ -258,12 +258,14 @@ data=cairn-data
 network=testnet
 listen=0.0.0.0:1
 named=""
+mine=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --check | --archive) shift ;;
         --data) data=$2; shift 2 ;;
         --network) network=$2; named=1; shift 2 ;;
         --listen) listen=$2; shift 2 ;;
+        --mine) mine=$2; shift 2 ;;
         *) shift 2 ;;
     esac
 done
@@ -286,7 +288,14 @@ case "${listen##*:}" in
     "" | *[!0-9]*) echo "$program: $listen is not an address" >&2; exit 1 ;;
 esac
 echo "$program 0.0.0"
-echo "network      $network (0x00000000)""#;
+echo "network      $network (0x00000000)"
+if [ -n "$mine" ] && [ "$mine" != off ]; then
+    case "$mine" in
+        cairn1* | tcairn1* | dcairn1*) address=$mine ;;
+        *) address="tcairn1converted$mine" ;;
+    esac
+    echo "mining       rewards to $address"
+fi"#;
             // Twice, so that the build a machine is running and the one an
             // update makes are two files, as they are on a machine: `install`
             // refuses to copy a file onto itself.
@@ -713,6 +722,137 @@ echo "network      $network (0x00000000)""#;
                     said(&output)
                 );
             }
+        }
+    }
+
+    /// **The installer takes an address to mine to, and still a public key
+    /// in the old form, and refuses anything else before it builds.**
+    ///
+    /// A note's owner is the hash of a key, and `cairnd --mine` takes the
+    /// address `cairn-wallet address` prints. The installer asked `MINE` to be
+    /// sixty four hexadecimal characters before anything was built, so the
+    /// form the node now names in its own summary was refused by the script
+    /// that installs it, and nothing ran the script with one. A key that
+    /// passes is not carried into the unit as a key: the build converts it
+    /// and says the address on its `--check` summary, and the installer
+    /// writes that address into the unit in the key's place, so a 0.9 unit
+    /// is rewritten with an address the first time it meets a build that
+    /// has one.
+    #[test]
+    fn the_installer_takes_an_address_to_mine_to() {
+        // The address and the key of the specification's signature vectors,
+        // so neither is a literal made up for this test.
+        let address = "tcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqtk5uk3";
+        let key = "47da95e3585bde332648ce1bf660eb1d68bb4fd9a6b206f80996056edd78995c";
+        for shell in shells() {
+            let machine = Machine::new(&INSTALL, "mine", shell);
+            machine.running("testnet-6", "testnet-6");
+            machine.building("testnet-6", "testnet-6");
+            machine.installed("--network testnet-6");
+
+            // An address goes into the unit unchanged; a key goes in as the
+            // address the build's `--check` summary named for it, which the
+            // stand-in build derives as `tcairn1converted<key>`.
+            let expect = [
+                ("an address", address, address.to_owned()),
+                ("a public key", key, format!("tcairn1converted{key}")),
+            ];
+            for (what, mine, written) in expect {
+                let output = machine.run(&[("MINE", mine)]);
+                assert!(
+                    output.status.success(),
+                    "the installer refused {what} to mine to: {}",
+                    said(&output)
+                );
+                assert!(
+                    format!("{} ", machine.exec_start()).contains(&format!(" --mine {written} ")),
+                    "the installer did not write {what} into the line it installed as {written}: {}",
+                    machine.exec_start()
+                );
+            }
+
+            let before = machine.unit();
+            let output = machine.run(&[("MINE", "not-an-address")]);
+            assert!(
+                !output.status.success(),
+                "the installer took a word that is neither an address nor a key"
+            );
+            assert!(
+                said(&output).contains("MINE is not an address"),
+                "the installer did not say what MINE should be: {}",
+                said(&output)
+            );
+            assert_eq!(machine.unit(), before, "and it changed the unit anyway");
+        }
+    }
+
+    /// **The installer takes an address written all in capitals, the way a
+    /// QR code carries it.**
+    ///
+    /// The specification's *Addresses as text* says a reader MAY accept the
+    /// same string written all in capitals, and the Rust reader does; the
+    /// installer's own shape check did not, because `case` in POSIX `sh` is
+    /// case-sensitive and its three accepted patterns were all lower case.
+    /// An upper-case address fell to the arm that refuses anything with a
+    /// character outside `0-9a-fA-F`, with the message "MINE is not an
+    /// address," which was false (03-F2).
+    #[test]
+    fn the_installer_accepts_an_address_written_all_in_capitals() {
+        let address = "tcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqtk5uk3";
+        let shouting = address.to_uppercase();
+        for shell in shells() {
+            let machine = Machine::new(&INSTALL, "shout", shell);
+            machine.running("testnet-6", "testnet-6");
+            machine.building("testnet-6", "testnet-6");
+            machine.installed("--network testnet-6");
+
+            let output = machine.run(&[("MINE", shouting.as_str())]);
+            assert!(
+                output.status.success(),
+                "the installer refused an address written all in capitals, which the \
+                 specification says a reader MAY accept: {}",
+                said(&output)
+            );
+            assert!(
+                format!("{} ", machine.exec_start()).contains(&format!(" --mine {shouting} ")),
+                "the installer did not write the capitalised address into the line it \
+                 installed"
+            );
+        }
+    }
+
+    /// **The installer refuses an address with anything appended to it,
+    /// rather than smuggling it through `--check`'s unquoted expansion.**
+    ///
+    /// The shape check only looked at an address's prefix, so a `MINE`
+    /// carrying a valid address followed by a space and another flag matched
+    /// it. `check_the_line` runs `--check $ARGS` unquoted, splitting that
+    /// value into `--mine <address> --archive` there and in the unit this
+    /// script writes: a malformed or pasted-with-extras `MINE` could install
+    /// extra arguments rather than being refused (02-F8).
+    #[test]
+    fn the_installer_refuses_an_address_with_something_appended() {
+        let address = "tcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqtk5uk3";
+        let smuggled = format!("{address} --archive");
+        for shell in shells() {
+            let machine = Machine::new(&INSTALL, "smuggle", shell);
+            machine.running("testnet-6", "testnet-6");
+            machine.building("testnet-6", "testnet-6");
+            machine.installed("--network testnet-6");
+
+            let before = machine.unit();
+            let output = machine.run(&[("MINE", smuggled.as_str())]);
+            assert!(
+                !output.status.success(),
+                "the installer took a MINE carrying more than one address's worth of \
+                 characters: {smuggled}"
+            );
+            assert!(
+                said(&output).contains("MINE is not an address"),
+                "the installer did not say what MINE should be: {}",
+                said(&output)
+            );
+            assert_eq!(machine.unit(), before, "and it changed the unit anyway");
         }
     }
 

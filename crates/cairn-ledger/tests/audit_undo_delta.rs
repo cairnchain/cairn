@@ -1,5 +1,5 @@
 //! Adversarial audit of the undo record, the delta rewind, and the handover,
-//! as they stand after testnet-6.
+//! as they stand after testnet-7.
 //!
 //! Read only. Nothing here changes a source file.
 //!

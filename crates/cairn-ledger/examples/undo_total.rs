@@ -185,7 +185,7 @@ impl Chain {
             if split.map(|(held, _)| held) == Some(id) || !self.provable(position, &id, &note) {
                 continue;
             }
-            let owner = if note.owner == self.miner.public_key() {
+            let owner = if note.owner == self.miner.public_key().into() {
                 &self.miner
             } else {
                 &self.other

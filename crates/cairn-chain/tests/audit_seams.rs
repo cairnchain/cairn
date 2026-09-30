@@ -127,7 +127,7 @@ impl Bodies for Shelf {
 fn one_note(state: &LedgerState, owner: &SecretKey) -> (NoteId, Note) {
     state
         .hot_notes()
-        .find(|(_, entry)| entry.note.owner == owner.public_key())
+        .find(|(_, entry)| entry.note.owner == owner.public_key().into())
         .map(|(id, entry)| (id, entry.note))
         .expect("the miner was paid")
 }
@@ -783,10 +783,10 @@ fn a_locator_is_never_answered_from_a_block_nobody_here_holds() {
 /// invariant `cut <= undo_from + 1` reduces to `params.burial >= MAX_REORG_DEPTH`.
 ///
 /// The build-time assertion checks the opposite direction, on a constant:
-/// `BURIAL <= MAX_REORG_DEPTH`. Together they force equality, which testnet-6
+/// `BURIAL <= MAX_REORG_DEPTH`. Together they force equality, which testnet-7
 /// has and devnet does not.
 ///
-/// The one block between the two on testnet-6 is the block a switch of the
+/// The one block between the two on testnet-7 is the block a switch of the
 /// full depth lands on. The chain holds its entry and its identifier and the
 /// log does not hold its body, and neither is wrong: a rewind stops above it,
 /// so nothing ever reads that body. What the chain wants from it is the
@@ -806,7 +806,7 @@ fn the_disk_is_trimmed_to_the_burial_and_read_back_from_the_reorg_depth() {
 
     let tip = 100_000u64;
 
-    for name in ["testnet-6", "devnet"] {
+    for name in ["testnet-7", "devnet"] {
         let network = ConsensusParams::for_network(name).unwrap();
         let cut = cut_at(tip, network.burial);
         let floor = reads_back_from(tip);
@@ -818,11 +818,11 @@ fn the_disk_is_trimmed_to_the_burial_and_read_back_from_the_reorg_depth() {
         );
     }
 
-    let testnet = ConsensusParams::for_network("testnet-6").unwrap();
+    let testnet = ConsensusParams::for_network("testnet-7").unwrap();
     assert_eq!(
         cut_at(tip, testnet.burial),
         reads_back_from(tip) + 1,
-        "on testnet-6 the log begins one height above the deepest the chain \
+        "on testnet-7 the log begins one height above the deepest the chain \
          holds an entry for, and that one height is the block a switch lands \
          on, whose body no rewind reads"
     );
@@ -850,7 +850,7 @@ fn the_disk_is_trimmed_to_the_burial_and_read_back_from_the_reorg_depth() {
     // place that anything asks for. Held on purpose: see the note on
     // `forget_what_cannot_change`, which is where following the burial here
     // would cost more than it saves.
-    for name in ["testnet-6", "devnet"] {
+    for name in ["testnet-7", "devnet"] {
         let network = ConsensusParams::for_network(name).unwrap();
         let reaches = tip
             .saturating_sub(depth.min(network.burial))
@@ -1155,12 +1155,12 @@ fn a_node_that_trimmed_its_log_to_the_burial_cannot_put_a_branch_back() {
 /// blocks under a burial of eighty: the window never bites there, so the
 /// entries and the records are all still held and the fork parent is simply
 /// present. The two only meet where the burial and `MAX_REORG_DEPTH` are the
-/// same number and the chain has run past the window, which is testnet-6 and
+/// same number and the chain has run past the window, which is testnet-7 and
 /// mainnet on any ordinary day.
 #[test]
 fn a_failed_switch_leaves_the_branch_naming_the_deepest_fork_the_rules_allow() {
     let depth = MAX_REORG_DEPTH as u64;
-    let burial = depth; // what testnet-6 and mainnet both set
+    let burial = depth; // what testnet-7 and mainnet both set
     let miner = wallet(1);
     let shelf = Arc::new(Shelf::default());
     let mut store = ChainStore::new(params());

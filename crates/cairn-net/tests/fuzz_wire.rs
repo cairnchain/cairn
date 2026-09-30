@@ -126,6 +126,7 @@ fn a_block(rng: &mut Rng) -> Block {
                     .map(|_| Input {
                         note_id: NoteId::new(a_hash(rng), rng.edgy_u32()),
                         witness: cairn_ledger::transaction::Witness::Hot,
+                        key: rng.array::<32>(),
                         signature: Signature::from_bytes(&rng.array::<64>()),
                     })
                     .collect(),
@@ -154,7 +155,6 @@ fn a_handshake(rng: &mut Rng) -> Handshake {
         version: rng.edgy_u32(),
         network: NetworkId::new(rng.edgy_u32()),
         genesis: a_hash(rng),
-        tip: a_hash(rng),
         height: rng.edgy_u64(),
         total_work: u128::from(rng.edgy_u64()),
         listen: u16::try_from(rng.below(65_536)).unwrap_or(0),
@@ -343,7 +343,9 @@ fn every_message_variant_refuses_or_round_trips() {
     );
 }
 
-/// A message this node would send comes back the same through its own wire.
+/// A message this node would send comes back the same through its own wire,
+/// and an introduction from another protocol version comes back naming that
+/// version, which is all of it a node reads (see `Message::from_frame`).
 #[test]
 fn a_framed_message_survives_the_round_trip_over_the_wire() {
     let campaign = Campaign::named("net: framing");
@@ -356,11 +358,22 @@ fn a_framed_message_survives_the_round_trip_over_the_wire() {
 
         let mut source = Feeding::new(framed);
         match read_message(&mut source, NetworkId::TESTNET, MAX_FRAME_BYTES) {
-            Ok(Incoming::Message(back)) => assert_eq!(
-                back.encode(),
-                message.encode(),
-                "a message changed on its way through the wire (case {case})"
-            ),
+            Ok(Incoming::Message(back)) => match (&message, &back) {
+                (Message::Hello(sent), Message::Hello(read))
+                | (Message::Welcome(sent), Message::Welcome(read))
+                    if sent.version != PROTOCOL_VERSION =>
+                {
+                    assert_eq!(
+                        read.version, sent.version,
+                        "an introduction from another version lost its version (case {case})"
+                    );
+                }
+                _ => assert_eq!(
+                    back.encode(),
+                    message.encode(),
+                    "a message changed on its way through the wire (case {case})"
+                ),
+            },
             other => panic!("the wire would not read back what it wrote: {other:?} (case {case})"),
         }
     });
@@ -732,11 +745,12 @@ fn a_tag_past_the_last_variant_is_refused() {
     assert!(ran.cases >= 100, "the campaign ran {} cases", ran.cases);
     // A tripwire rather than a fact about the version: a protocol change that
     // adds a message has to move the tag this campaign calls the last one.
-    // Seven and eight changed which positions a chain is asked about, and
-    // nine what a weighing carries. None of them added a variant, so
-    // seventeen still is.
+    // Seven and eight changed which positions a chain is asked about, nine
+    // what a weighing carries, and ten the handshake, the draw and what a
+    // block's root covers. None of them added a variant, so seventeen still
+    // is.
     assert_eq!(
-        PROTOCOL_VERSION, 9,
+        PROTOCOL_VERSION, 10,
         "a protocol change should read this file"
     );
 }

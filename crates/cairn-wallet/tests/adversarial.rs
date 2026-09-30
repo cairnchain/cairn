@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::block::Block;
-use cairn_ledger::note::Note;
+use cairn_ledger::note::{Address, Note};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
@@ -471,7 +471,8 @@ fn would_refuse(
     let transfer = Transfer::new(inputs, outputs);
     let bytes = cairn_primitives::codec::Encode::encode(&transfer).len();
     let freed = chosen.iter().filter(|held| held.fallen.is_none()).count();
-    let floor = cairn_chain::fee_floor(cairn_chain::transfer_weight(&transfer, bytes, freed));
+    let places = cairn_chain::places_taken(&transfer, freed);
+    let floor = cairn_chain::fee_floor(bytes, places, wallet.params());
     (fee < floor).then_some(floor)
 }
 
@@ -808,7 +809,8 @@ fn what_a_page_somewhere_else_in_the_same_browser_gets() {
         (status, answer)
     };
 
-    let thief = SecretKey::from_bytes(&[99; 32]).public_key();
+    let thief = cairn_ledger::note::Address::from(SecretKey::from_bytes(&[99; 32]).public_key())
+        .to_text(params().network);
     let spend = format!("to={thief}&amount=1&fee=");
 
     // A form on a site the person happens to have open. A browser sends an
@@ -1457,4 +1459,76 @@ fn how_far_a_wallet_has_read_is_on_the_disk_once_it_has_read_it() {
 
     wallet.shutdown();
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// CLAIM UNDER TEST: after one payment, every note this wallet still holds,
+/// change included, sits behind a key the chain now shows.
+///
+/// The whitepaper's Notes paragraph says the key appears on the chain when a
+/// note paid to an address is first spent, and that every note the address
+/// still holds, change included, sits behind that published key from then
+/// on (02-F1, fixed to say this instead of promising an unspent note "shows
+/// nothing a future computer could work a secret back from" with no
+/// qualification). This wallet pays its change back to the one address it
+/// uses, in the same transfer that publishes that address's key, so the
+/// property the papers describe holds only up to this wallet's first
+/// payment: kept beyond that only by a fresh key per payment, which nothing
+/// here draws yet.
+#[test]
+fn after_one_payment_every_note_this_wallet_holds_sits_behind_a_published_key() {
+    let directory = scratch("exposed");
+    std::fs::create_dir_all(&directory).unwrap();
+    let key_file = directory.join("key");
+    let secret = SecretKey::from_bytes(&[3; 32]);
+    cairn_wallet::keyfile::write(&key_file, &secret).unwrap();
+    let (wallet, _) = Wallet::open(&key_file, params(), &directory.join("data")).unwrap();
+
+    let mut forge = Forge::new();
+    let mut chain: Vec<Block> = Vec::new();
+    for _ in 0..4 {
+        let block = forge.mine(&secret.public_key(), Vec::new());
+        chain.push(block.clone());
+        wallet.node().submit_block(block).unwrap();
+    }
+    let key = secret.public_key().to_bytes();
+    let carries_key = |block: &Block| {
+        cairn_primitives::codec::Encode::encode(block)
+            .windows(key.len())
+            .any(|window| window == key)
+    };
+    assert!(
+        !chain.iter().any(carries_key),
+        "the premise does not hold: an address never spent from should show no key"
+    );
+
+    // One ordinary payment, carried by the next block.
+    let recipient = SecretKey::from_bytes(&[9; 32]).public_key();
+    wallet.send(recipient, cairn("120"), cairn("0.5")).unwrap();
+    let carried = pooled(&wallet);
+    let miner = SecretKey::from_bytes(&[7; 32]).public_key();
+    let block = forge.mine(&miner, carried);
+    chain.push(block.clone());
+    wallet.node().submit_block(block).unwrap();
+
+    let address = Address::from(secret.public_key());
+    let holdings = wallet.holdings();
+    let exposed: u64 = holdings
+        .notes
+        .iter()
+        .filter(|held| held.note.owner == address)
+        .map(|held| held.note.value.as_pebbles())
+        .sum();
+
+    let key_published = chain.iter().any(carries_key);
+    wallet.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        key_published,
+        "one payment from this wallet should publish its key"
+    );
+    assert!(
+        exposed > 0,
+        "this wallet should still hold unspent notes at its one address after paying"
+    );
 }

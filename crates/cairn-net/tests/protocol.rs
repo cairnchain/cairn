@@ -219,7 +219,6 @@ fn a_message_roundtrips_through_the_wire_format() {
             version: PROTOCOL_VERSION,
             network: NetworkId::TESTNET,
             genesis: block.id(),
-            tip: block.id(),
             height: 0,
             total_work: u128::MAX,
             listen: 4242,
@@ -273,6 +272,43 @@ fn a_frame_from_another_network_is_refused_on_its_first_bytes() {
     assert!(
         matches!(outcome, Err(WireError::WrongNetwork { .. })),
         "got {outcome:?}"
+    );
+}
+
+/// A frame marked with devnet-1's old marker is refused as another network,
+/// on its first bytes, and that refusal is not held against the peer that
+/// sent it.
+///
+/// Devnet was renumbered alongside testnet-7 so that a directory or a peer
+/// left over from before the restart is told plainly which network it is
+/// on. Nothing distinguishes that marker mismatch from any other one: the
+/// wire check compares the four bytes it reads against the network this
+/// node runs, whichever the two markers are, and the specification says a
+/// node belonging elsewhere is disconnected rather than refused.
+#[test]
+fn a_frame_marked_with_devnet_1s_marker_is_refused_as_another_network_and_not_held_against_the_peer(
+) {
+    let mut framed = Vec::new();
+    write_message(&mut framed, NetworkId::DEVNET_1, &Message::Ping(1)).unwrap();
+
+    let mut cursor = framed.as_slice();
+    let outcome = read_message(&mut cursor, NetworkId::DEVNET, MAX_FRAME_BYTES);
+    assert!(
+        matches!(
+            outcome,
+            Err(WireError::WrongNetwork {
+                found: NetworkId::DEVNET_1,
+                expected: NetworkId::DEVNET,
+            })
+        ),
+        "got {outcome:?}"
+    );
+    assert!(
+        !DropReason::WrongNetwork {
+            theirs: NetworkId::DEVNET_1
+        }
+        .is_misbehaviour(),
+        "a peer that spoke devnet-1's marker was held against as if it had misbehaved"
     );
 }
 
@@ -433,6 +469,98 @@ fn a_peer_on_another_network_or_version_or_chain_is_dropped() {
             "nothing is answered to a peer being dropped"
         );
     }
+}
+
+/// A frame as a peer writes it: the network's marker, the length, the body.
+fn framed(network: NetworkId, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    network.as_u32().encode_to(&mut out);
+    u32::try_from(body.len()).unwrap().encode_to(&mut out);
+    out.extend_from_slice(body);
+    out
+}
+
+/// An introduction from another protocol version is refused on its version,
+/// however that version lays out the rest of it.
+///
+/// A handshake's version is its first field, and what follows is laid out as
+/// the sender's version lays it out: protocol nine's carried the tip's
+/// identifier after the first block, which ten no longer has. The whole frame
+/// used to be decoded with this version's layout before the version was
+/// compared, so nine's introduction ran 32 bytes long, a later one of another
+/// length ran short or long, and a frame that cannot be read is a broken peer
+/// whose host is refused. Nothing read another version's introduction off the
+/// wire, so a node refusing every node one version away from it passed.
+#[test]
+fn an_introduction_from_another_version_is_refused_on_its_version_whatever_its_length() {
+    let params = params();
+    let mut store = ChainStore::new(params);
+    let ours = local_handshake(&store, Keeps::default(), 4242, 7).encode();
+    let network = params.network;
+
+    // Protocol nine's Hello: tag, version, marker and first block as ten has
+    // them, then the tip's identifier, then the rest of ten's fields.
+    let mut nine = vec![0u8];
+    9u32.encode_to(&mut nine);
+    nine.extend_from_slice(&ours[4..40]);
+    nine.extend_from_slice(&[0xAB; 32]);
+    nine.extend_from_slice(&ours[40..]);
+    // A later version's Welcome, longer and carrying fields ten has never had.
+    let mut later = vec![1u8];
+    (PROTOCOL_VERSION + 1).encode_to(&mut later);
+    later.extend_from_slice(&[0x5A; 200]);
+    // And one whose introduction is its version and nothing else.
+    let mut bare = vec![0u8];
+    (PROTOCOL_VERSION + 2).encode_to(&mut bare);
+
+    for (body, theirs) in [
+        (nine, 9),
+        (later, PROTOCOL_VERSION + 1),
+        (bare, PROTOCOL_VERSION + 2),
+    ] {
+        let read = read_message(
+            &mut framed(network, &body).as_slice(),
+            network,
+            MAX_FRAME_BYTES,
+        );
+        let Ok(Incoming::Message(message)) = read else {
+            panic!(
+                "an introduction from protocol {theirs} was not read as one, which a node \
+                 holds against the host as a broken frame"
+            )
+        };
+        assert_eq!(
+            message.encode().first(),
+            body.first(),
+            "a Hello from protocol {theirs} was read as a Welcome, or the other way round"
+        );
+        let mut peer = PeerState::default();
+        let reaction = on_message(&mut solo(&mut store), &mut peer, message, NOW);
+        assert_eq!(
+            reaction.drop_peer,
+            Some(DropReason::WrongVersion { theirs }),
+            "an introduction from protocol {theirs} was not refused on its version"
+        );
+        assert!(!peer.greeted);
+        assert!(reaction.reply.is_empty());
+    }
+
+    // This version's own introduction is still read in full: one byte long is
+    // a broken frame, not a version.
+    let mut long = vec![0u8];
+    long.extend_from_slice(&ours);
+    long.push(0);
+    assert!(
+        matches!(
+            read_message(
+                &mut framed(network, &long).as_slice(),
+                network,
+                MAX_FRAME_BYTES
+            ),
+            Err(WireError::Malformed(_))
+        ),
+        "an introduction on this version with a byte too many was read"
+    );
 }
 
 #[test]
