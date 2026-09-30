@@ -173,6 +173,38 @@ fn every_networks_eviction_cap_is_below_its_tier_and_above_its_coinbase() {
     }
 }
 
+/// Every named network's widest transfer fits what a block has for transfers
+/// once the tier is full, or the network is named here as one where the
+/// pool's refusal is what keeps such a transfer out.
+///
+/// A transfer may make `max_outputs_per_transfer` notes and free none, and a
+/// full tier leaves a block its eviction cap less its coinbase. On devnet that
+/// is two hundred and fifty six against sixteen, and the pool took a transfer
+/// no block could carry while the tier stayed full, and held it, ranked on a
+/// fee it never paid. The pool refuses one now as `TooManyPlacesForABlock`,
+/// held in `cairn-chain/tests/pool.rs`. Nothing compared the two numbers, so
+/// devnet's cap moved to thirty two and nobody asked what it left a transfer;
+/// the next network whose numbers leave that gap has to be named here.
+#[test]
+fn every_networks_widest_transfer_fits_a_full_tiers_block_or_is_named_as_refused() {
+    const REFUSED_BY_THE_POOL: [&str; 1] = ["devnet"];
+    for name in NAMED {
+        let Some(params) = ConsensusParams::for_network(name) else {
+            continue;
+        };
+        let left = params
+            .max_evictions_per_block
+            .saturating_sub(params.max_coinbase_outputs);
+        assert_eq!(
+            params.max_outputs_per_transfer <= left,
+            !REFUSED_BY_THE_POOL.contains(&name),
+            "{name}: a transfer may take {} places and a full tier leaves a block {left} for \
+             transfers, and whether the two fit is not what this list says",
+            params.max_outputs_per_transfer
+        );
+    }
+}
+
 /// Every named network charges the place price, and so do the rules fixtures
 /// mine on; only the bare test rules charge nothing.
 ///

@@ -43,11 +43,16 @@ fn params() -> ConsensusParams {
 /// and a place priced as a public network prices it, so a note falling moves
 /// what a payment owes: it frees no place any more, and the place it takes
 /// instead burns the price.
+///
+/// The eviction cap sits above the sixteen notes a coinbase may make, as
+/// every network's does: at four, a full tier left the next block no place
+/// for a payment, and the pool now refuses what no block its own miner builds
+/// could carry.
 fn small_hot_set() -> ConsensusParams {
     ConsensusParams::testnet()
         .with_coinbase_maturity(0)
         .with_hot_capacity(4)
-        .with_max_evictions(4)
+        .with_max_evictions(20)
         .with_place_price(PLACE_PRICE)
 }
 

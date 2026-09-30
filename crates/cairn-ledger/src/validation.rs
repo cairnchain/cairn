@@ -772,6 +772,15 @@ pub enum TransferError {
     /// be refused as `BlockTooLarge` instead.
     #[error("transfer takes {bytes} bytes, more than the {limit} a block carries")]
     TooLargeForABlock { bytes: usize, limit: usize },
+    /// Raised by the pool, never by a block rule: the places a transfer takes
+    /// in the hot set are more than the next block has for transfers, the
+    /// room the tier has left plus its eviction cap, less the coinbase's. A
+    /// block carrying it would be refused as `TooManyEvictions`.
+    #[error(
+        "transfer takes {places} places in the hot set, more than the {limit} the next block \
+         has for transfers"
+    )]
+    TooManyPlacesForABlock { places: usize, limit: usize },
     /// Raised by the pool, never by a block rule: what a block may carry is
     /// not priced, what a node will carry for a stranger is.
     #[error("transfer pays {fee}, below the {floor} its bytes and new notes ask")]

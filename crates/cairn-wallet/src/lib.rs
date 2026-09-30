@@ -4667,6 +4667,10 @@ mod tests {
             TransferError::TooManyInputs { count: 3, limit: 2 },
             TransferError::TooManyOutputs { count: 3, limit: 2 },
             TransferError::TooLargeForABlock { bytes: 3, limit: 2 },
+            TransferError::TooManyPlacesForABlock {
+                places: 3,
+                limit: 2,
+            },
             TransferError::FeeBelowFloor { fee, floor: fee },
             TransferError::DuplicateInput(note),
             TransferError::UnknownNote(note),
