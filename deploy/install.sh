@@ -375,25 +375,59 @@ fi
 # and systemd reports that as a failure to launch rather than as a bad
 # argument. Its shape is asked here, because this is before the build; its
 # checksum and its network are the build's to read, at `--check` below.
+#
+# The shape asked is the specification's: a reader MAY take the same string
+# written all in capitals, which is how a QR code carries it, and MUST refuse
+# one that mixes the two cases, a character outside the Bech32m alphabet, or
+# any length but the one an address of that prefix is. `case` in POSIX `sh`
+# is case-sensitive, so the prefix is matched against a folded copy and the
+# case rule is asked of the string `MINE` actually holds.
 if [ -n "$MINE" ] && [ "$MINE" != off ]; then
-    case "$MINE" in
-        cairn1* | tcairn1* | dcairn1*)
-            ;;
-        *[!0-9a-fA-F]* | "")
-            echo "MINE is not an address: $MINE" >&2
+    mine_lower=$(printf '%s' "$MINE" | tr 'A-Z' 'a-z')
+    mine_prefix=
+    case "$mine_lower" in
+        cairn1*) mine_prefix=cairn1; mine_length=64 ;;
+        tcairn1*) mine_prefix=tcairn1; mine_length=65 ;;
+        dcairn1*) mine_prefix=dcairn1; mine_length=65 ;;
+    esac
+    if [ -n "$mine_prefix" ]; then
+        mine_upper=$(printf '%s' "$MINE" | tr 'a-z' 'A-Z')
+        if [ "$MINE" != "$mine_lower" ] && [ "$MINE" != "$mine_upper" ]; then
+            echo "MINE is not an address: it mixes capital and small letters: $MINE" >&2
             echo "get it with: cairn-wallet address <your key file>" >&2
             exit 1
-            ;;
-        *)
-            # A public key, the form an address had before 0.10. The node
-            # still takes one and converts it to its address.
-            if [ "${#MINE}" -ne 64 ]; then
-                echo "MINE is neither an address nor a 64 character public key: $MINE" >&2
-                echo "get the address with: cairn-wallet address <your key file>" >&2
+        fi
+        if [ "${#MINE}" -ne "$mine_length" ]; then
+            echo "MINE is not an address: a $mine_prefix address is $mine_length characters, this is ${#MINE}: $MINE" >&2
+            echo "get it with: cairn-wallet address <your key file>" >&2
+            exit 1
+        fi
+        mine_data=${mine_lower#"$mine_prefix"}
+        case "$mine_data" in
+            *[!qpzry9x8gf2tvdw0s3jn54khce6mua7l]*)
+                echo "MINE is not an address: it has a character no address is written with: $MINE" >&2
+                echo "get it with: cairn-wallet address <your key file>" >&2
                 exit 1
-            fi
-            ;;
-    esac
+                ;;
+        esac
+    else
+        case "$MINE" in
+            *[!0-9a-fA-F]* | "")
+                echo "MINE is not an address: $MINE" >&2
+                echo "get it with: cairn-wallet address <your key file>" >&2
+                exit 1
+                ;;
+            *)
+                # A public key, the form an address had before 0.10. The node
+                # still takes one and converts it to its address.
+                if [ "${#MINE}" -ne 64 ]; then
+                    echo "MINE is neither an address nor a 64 character public key: $MINE" >&2
+                    echo "get the address with: cairn-wallet address <your key file>" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+    fi
 fi
 
 case "$DATADIR" in
