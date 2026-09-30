@@ -4,7 +4,7 @@
 //! which pins nothing, so a newcomer there starts with no chain at all. The
 //! two real networks pin theirs, and a node on either lays that block down the
 //! moment it opens a directory. Its chain is then not empty, and everything
-//! that decides whether a node joins asked whether it was: so on testnet-6 and
+//! that decides whether a node joins asked whether it was: so on testnet-7 and
 //! on the devnet every newcomer read the whole chain block by block, and the
 //! handover ran only in tests.
 //!

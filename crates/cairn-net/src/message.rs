@@ -43,7 +43,7 @@ use cairn_primitives::Hash32;
 ///
 /// The network number does not move with it, and the difference is worth
 /// stating. A network starts over when a rule makes blocks already mined
-/// invalid. This one does not: every block of testnet-6 is as valid under these
+/// invalid. This one does not: every block of testnet-7 is as valid under these
 /// rules as it was under the last, the chain a node follows is the same chain,
 /// and what changed is one exchange between two nodes. That is what a protocol
 /// version is for, and reaching for a network number here would throw away a

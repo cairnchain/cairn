@@ -379,7 +379,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
 /// or not whoever adds it remembers the constant assertion.
 #[test]
 fn every_network_this_build_ships_has_a_schedule_read_the_way_it_is_written() {
-    for name in ["testnet", "testnet-6", "devnet"] {
+    for name in ["testnet", "testnet-7", "devnet"] {
         let params = ConsensusParams::for_network(name).expect("a network this build ships");
         let schedule = params.activations;
         let opening = schedule.first().expect("a schedule is never empty");

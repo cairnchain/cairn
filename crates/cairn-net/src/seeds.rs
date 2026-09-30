@@ -48,11 +48,15 @@ use crate::book::{realm_of, Realm};
 /// of them cannot be formatted.
 pub const DEFAULT_PORT: u16 = 9944;
 
-/// Where to start on the third test network.
+/// Where to start on the current test network.
 ///
 /// One name, carrying however many machines the zone file says. Adding an
-/// entry point is a line in that file; it is not a release.
-const TESTNET_6: [&str; 1] = ["seed.cairnchain.org:9944"];
+/// entry point is a line in that file; it is not a release. Named for the
+/// network rather than counted, because a count here is exactly the sentence
+/// that stayed "the third test network" through three renumberings after it
+/// stopped being true: nothing reads the ordinal, and a name nobody has to
+/// update cannot go stale.
+const TESTNET_7: [&str; 1] = ["seed.cairnchain.org:9944"];
 
 /// The starting points written into the program for `network`.
 ///
@@ -61,13 +65,13 @@ const TESTNET_6: [&str; 1] = ["seed.cairnchain.org:9944"];
 /// wasting its time on a network it cannot follow.
 pub fn written_in(network: NetworkId) -> &'static [&'static str] {
     match network {
-        NetworkId::TESTNET_6 => &TESTNET_6,
+        NetworkId::TESTNET_7 => &TESTNET_7,
         _ => &[],
     }
 }
 
 /// Every name written into the program, whatever network it is for.
-const EVERY_WRITTEN_IN: [&[&str]; 1] = [&TESTNET_6];
+const EVERY_WRITTEN_IN: [&[&str]; 1] = [&TESTNET_7];
 
 /// What a name's answer is taken for: everything, for a name the operator
 /// typed, and only addresses out in the world for a name written in here.
@@ -282,7 +286,7 @@ mod tests {
     fn every_written_in_seed_is_named_with_the_default_port() {
         let suffix = format!(":{}", super::DEFAULT_PORT);
         let mut seen = 0usize;
-        for network in [NetworkId::TESTNET_6] {
+        for network in [NetworkId::TESTNET_7] {
             for name in super::written_in(network) {
                 assert!(
                     name.ends_with(&suffix),
@@ -310,7 +314,7 @@ mod tests {
     /// network, where the name fails for the wrong reason and is passed over.
     #[test]
     fn every_written_in_seed_names_a_port() {
-        for name in written_in(NetworkId::TESTNET_6) {
+        for name in written_in(NetworkId::TESTNET_7) {
             let (host, port) = name.rsplit_once(':').expect("a seed names a port");
             assert!(!host.is_empty(), "`{name}` names no host");
             assert!(
@@ -323,7 +327,7 @@ mod tests {
     #[test]
     fn what_was_asked_for_wins_and_is_not_repeated() {
         let asked = vec!["127.0.0.1:9944".to_owned(), "127.0.0.1:9944".to_owned()];
-        let found = start_from(&asked, NetworkId::TESTNET_6).expect("a literal address resolves");
+        let found = start_from(&asked, NetworkId::TESTNET_7).expect("a literal address resolves");
         assert_eq!(found.len(), 1, "the same address twice is one address");
         assert_eq!(
             found.first().map(ToString::to_string),
@@ -334,7 +338,7 @@ mod tests {
     #[test]
     fn a_seed_that_was_asked_for_and_cannot_be_reached_stops_the_node() {
         let asked = vec!["127.0.0.1".to_owned()];
-        assert!(start_from(&asked, NetworkId::TESTNET_6).is_err(), "no port");
+        assert!(start_from(&asked, NetworkId::TESTNET_7).is_err(), "no port");
     }
 
     /// A written-in name that will not resolve is passed over, and one the
@@ -380,7 +384,7 @@ mod tests {
     /// address, so that passed.
     #[test]
     fn a_written_in_name_is_taken_only_for_addresses_out_in_the_world() {
-        let written = written_in(NetworkId::TESTNET_6)
+        let written = written_in(NetworkId::TESTNET_7)
             .first()
             .map(|name| (*name).to_owned())
             .unwrap();

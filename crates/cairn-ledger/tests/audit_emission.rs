@@ -160,7 +160,7 @@ fn the_documents_and_the_constants_agree() {
     let years = f64::from(u32::try_from(HALVING_INTERVAL).unwrap()) / (365.25 * 24.0 * 60.0);
     assert!((years - 2.0).abs() < 0.01, "{years} years an era");
     // And the same rules are what a named network actually runs.
-    for name in ["testnet-6", "devnet"] {
+    for name in ["testnet-7", "devnet"] {
         let params = ConsensusParams::for_network(name).unwrap();
         assert_eq!(params.initial_reward.as_pebbles(), INITIAL_REWARD_PEBBLES);
         assert_eq!(params.tail_reward.as_pebbles(), TAIL_REWARD_PEBBLES);
@@ -1244,7 +1244,7 @@ fn a_block_that_overflows_the_tier_loses_nothing_on_the_way_down() {
 /// This test said the opposite, by name and in its comment: that nothing in
 /// the ledger carried a running total and no node could notice a chain that
 /// had drifted from its schedule. The total has been in the state root since
-/// testnet-6, and the test went on passing, because all it asserted was that a
+/// testnet-7, and the test went on passing, because all it asserted was that a
 /// fresh ledger was empty, which is true of both ledgers.
 #[test]
 fn the_ledger_states_the_supply_and_a_block_moves_it_by_what_it_claimed() {
