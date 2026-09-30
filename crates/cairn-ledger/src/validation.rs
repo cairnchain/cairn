@@ -421,15 +421,8 @@ impl ConsensusParams {
     /// build different chains while believing they are on the same one. So the
     /// rules belong to the network and are chosen by naming it, never set one
     /// at a time by whoever starts the node.
-    // The mainnet arm answers like the unknown one on purpose, and saying so
-    // out loud is the point: it is a name that will mean something and does
-    // not yet.
-    #[allow(clippy::match_same_arms)]
     pub fn for_network(name: &str) -> Option<Self> {
         match name {
-            // Not yet made. A network exists once its first block does, and
-            // that block will be mined in the open on the day it is announced.
-            "mainnet" => None,
             // The network comes in with `Self::testnet()`, whose
             // `NetworkId::TESTNET` is an alias for `TESTNET_7`. A line naming
             // `TESTNET_7` here wrote the value that was already there, which
@@ -502,6 +495,11 @@ impl ConsensusParams {
                 coinbase_maturity: 32,
                 ..Self::testnet()
             }),
+            // "mainnet" among them: not yet made. A network exists once its
+            // first block does, and that block will be mined in the open on
+            // the day it is announced. An arm of its own answered the same
+            // nothing as this one, so deleting it was a mutant nothing could
+            // kill; `network_rules.rs` holds that it answers nothing.
             _ => None,
         }
     }
