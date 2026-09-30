@@ -808,7 +808,8 @@ fn what_a_page_somewhere_else_in_the_same_browser_gets() {
         (status, answer)
     };
 
-    let thief = SecretKey::from_bytes(&[99; 32]).public_key();
+    let thief = cairn_ledger::note::Address::from(SecretKey::from_bytes(&[99; 32]).public_key())
+        .to_text(params().network);
     let spend = format!("to={thief}&amount=1&fee=");
 
     // A form on a site the person happens to have open. A browser sends an

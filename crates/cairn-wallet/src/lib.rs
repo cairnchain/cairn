@@ -30,8 +30,8 @@ use crate::history::{Direction, Discarded, Fork, History, Movement};
 use crate::pending::{Handed, Pending};
 use cairn_accumulator::ForestProof;
 use cairn_chain::{ChainStore, Outdated};
-use cairn_crypto::{random_bytes, PublicKey, SecretKey};
-use cairn_ledger::note::{Note, NoteId};
+use cairn_crypto::{random_bytes, SecretKey};
+use cairn_ledger::note::{Address, NetworkId, Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::{ConsensusParams, TransferError};
 use cairn_net::node::{
@@ -41,15 +41,15 @@ use cairn_net::{Joined, Node, MAX_PROVEN};
 use cairn_primitives::codec::Encode;
 use cairn_primitives::{Amount, Hash32};
 
-/// An address, read the one way this program reads one.
+/// An address on `network`, read the one way this program reads one.
 ///
-/// Every face takes an address as thirty two bytes of hexadecimal and has to
-/// answer the same question about the same string. There were two readers and
-/// they disagreed: the web face trimmed and the command line did not, so a
-/// pasted address with a space on the end was taken by the form and refused by
-/// `cairn-wallet send`. The web face's own doc said it read an address "the way
-/// every other face of this program reads one" and that "there is one reader of
-/// it now", and both sentences were false when they were written.
+/// Every face takes an address as its Bech32m text and has to answer the same
+/// question about the same string. There were two readers and they disagreed:
+/// the web face trimmed and the command line did not, so a pasted address with
+/// a space on the end was taken by the form and refused by `cairn-wallet
+/// send`. The web face's own doc said it read an address "the way every other
+/// face of this program reads one" and that "there is one reader of it now",
+/// and both sentences were false when they were written.
 ///
 /// What comes back is [`WalletError::BadAddress`], which exists for this and
 /// was built nowhere. The web face answered `NothingToSend`, so somebody who
@@ -61,16 +61,31 @@ use cairn_primitives::{Amount, Hash32};
 /// Trimming rather than refusing the space: an address arrives pasted, and
 /// what is on either side of it is not something the person typed on purpose.
 ///
+/// Sixty four hexadecimal characters are refused with a sentence of their own.
+/// That was the form of an address before an address was the hash of a key,
+/// and hashing them here would be right for a key and would destroy the money
+/// for anything else of that length, the hash of an address included, since
+/// no key hashes to the hash of a hash. So the person is sent to ask for the
+/// address instead.
+///
 /// # Errors
 ///
-/// [`WalletError::BadAddress`] if the text is not thirty two bytes of
-/// hexadecimal, or is thirty two bytes that are not a key.
-pub fn parse_address(text: &str) -> Result<PublicKey, WalletError> {
+/// [`WalletError::BadAddress`] if the text is a public key in the old form,
+/// is not Bech32m (every typo of up to four characters is not), names another
+/// network, or carries anything but thirty two bytes.
+pub fn parse_address(text: &str, network: NetworkId) -> Result<Address, WalletError> {
     let text = text.trim();
-    let bytes = cairn_primitives::hex::decode_array::<32>(text).ok_or_else(|| {
-        WalletError::BadAddress(text.to_owned(), "not 32 bytes of hexadecimal".to_owned())
-    })?;
-    PublicKey::from_bytes(&bytes)
+    if text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WalletError::BadAddress(
+            text.to_owned(),
+            format!(
+                "that is a public key, the old form of an address; ask for the address, \
+                 which starts {}1",
+                network.address_prefix()
+            ),
+        ));
+    }
+    Address::from_text(text, network)
         .map_err(|error| WalletError::BadAddress(text.to_owned(), error.to_string()))
 }
 
@@ -997,6 +1012,19 @@ fn lost_its_account(lost: &SetAside) -> String {
              permission this wallet does not have, a disk that would not answer, or a \
              name something else has taken. This is worth looking into."
         }
+        Discarded::BeforeTheAddress => {
+            return format!(
+                "This wallet did not read back the account it had written down. It was \
+                 written by a version of this wallet from before an address was the hash of \
+                 a key, and every note it lists is on a test network that has since been \
+                 retired, so none of it is on this chain. It has been moved aside, to {}, \
+                 and nothing will write over it. This wallet is reading this chain from the \
+                 oldest block its node holds, which is all there is to read: money on the \
+                 retired network does not carry over to this one. Nothing is lost on this \
+                 chain and the key file is not touched: it is the same key here.",
+                lost.kept_as.display()
+            );
+        }
     };
     format!(
         "This wallet did not read back the account it had written down. {because} It has \
@@ -1534,7 +1562,7 @@ impl Wallet {
         data: &Path,
     ) -> Result<(Self, usize), WalletError> {
         let secret = keyfile::read(path).map_err(WalletError::CouldNotStart)?;
-        let mine = secret.public_key();
+        let mine = Address::from(secret.public_key());
         let listen: SocketAddr = "0.0.0.0:0"
             .parse()
             .map_err(|_| WalletError::CouldNotStart("bad listen address".to_owned()))?;
@@ -1594,10 +1622,17 @@ impl Wallet {
         ))
     }
 
-    /// The public key money is paid to.
+    /// The address money is paid to: the hash of this wallet's key.
     #[must_use]
-    pub fn address(&self) -> PublicKey {
-        self.secret.public_key()
+    pub fn address(&self) -> Address {
+        Address::from(self.secret.public_key())
+    }
+
+    /// The same, written for this wallet's network, as a person reads it and
+    /// as anybody paying it types it.
+    #[must_use]
+    pub fn address_text(&self) -> String {
+        self.address().to_text(self.params.network)
     }
 
     #[must_use]
@@ -1629,8 +1664,8 @@ impl Wallet {
     /// Exactly what the pool asks now, and no more, which is the number to
     /// show beside a fee and the least a named fee may be. It is not the fee
     /// to pay when none is named: see [`Wallet::fee_for`].
-    pub fn floor_for(&self, recipient: PublicKey, amount: Amount) -> Amount {
-        self.quoted(recipient, amount, |draft| draft.floor)
+    pub fn floor_for(&self, recipient: impl Into<Address>, amount: Amount) -> Amount {
+        self.quoted(recipient.into(), amount, |draft| draft.floor)
     }
 
     /// What this wallet pays to carry `amount` to `recipient` when nobody
@@ -1649,8 +1684,8 @@ impl Wallet {
     /// it holds: a full pool makes room only for a better rate, and a quote at
     /// the floor into a pool kept full at the floor was refused for as long
     /// as somebody paid to keep it so.
-    pub fn fee_for(&self, recipient: PublicKey, amount: Amount) -> Amount {
-        self.quoted(recipient, amount, |draft| {
+    pub fn fee_for(&self, recipient: impl Into<Address>, amount: Amount) -> Amount {
+        self.quoted(recipient.into(), amount, |draft| {
             let cheapest = self.node.with_chain(|chain| {
                 crowded(
                     chain.pool_len(),
@@ -1667,7 +1702,7 @@ impl Wallet {
     /// in until the transfer it prices is the one that would be built.
     fn quoted(
         &self,
-        recipient: PublicKey,
+        recipient: Address,
         amount: Amount,
         price: impl Fn(&Draft) -> Amount,
     ) -> Amount {
@@ -1708,7 +1743,7 @@ impl Wallet {
     fn draft(
         &self,
         holdings: &Holdings,
-        recipient: PublicKey,
+        recipient: Address,
         amount: Amount,
         needed: Amount,
     ) -> Result<Draft, NoDraft> {
@@ -3212,11 +3247,11 @@ impl Wallet {
     /// because paying over the odds is sometimes exactly what was meant.
     pub fn send(
         &self,
-        recipient: PublicKey,
+        recipient: impl Into<Address>,
         amount: Amount,
         fee: Amount,
     ) -> Result<Sent, WalletError> {
-        self.spend(recipient, amount, fee, false)
+        self.spend(recipient.into(), amount, fee, false)
     }
 
     /// The same spend, with a fee out of all proportion taken as meant.
@@ -3228,11 +3263,11 @@ impl Wallet {
     /// cannot is a wallet deciding how much their own hurry is worth.
     pub fn send_over_the_odds(
         &self,
-        recipient: PublicKey,
+        recipient: impl Into<Address>,
         amount: Amount,
         fee: Amount,
     ) -> Result<Sent, WalletError> {
-        self.spend(recipient, amount, fee, true)
+        self.spend(recipient.into(), amount, fee, true)
     }
 
     /// Why a spend of `amount` paying `fee` could not even be drafted, if it
@@ -3245,16 +3280,16 @@ impl Wallet {
     /// is the question sending asks first, asked once for both.
     pub fn could_not_draft(
         &self,
-        recipient: PublicKey,
+        recipient: impl Into<Address>,
         amount: Amount,
         fee: Amount,
     ) -> Option<WalletError> {
-        self.drafted(recipient, amount, fee).err()
+        self.drafted(recipient.into(), amount, fee).err()
     }
 
     fn drafted(
         &self,
-        recipient: PublicKey,
+        recipient: Address,
         amount: Amount,
         fee: Amount,
     ) -> Result<Draft, WalletError> {
@@ -3283,7 +3318,7 @@ impl Wallet {
 
     fn spend(
         &self,
-        recipient: PublicKey,
+        recipient: Address,
         amount: Amount,
         fee: Amount,
         meant: bool,
@@ -3877,7 +3912,7 @@ struct ReadOf {
 
 /// What a payment takes from the key `mine` if a block carries it: what it
 /// pays and its fee, or only the fee when it pays this key itself.
-fn taken_from_this_key(one: &Handed, mine: PublicKey) -> Amount {
+fn taken_from_this_key(one: &Handed, mine: Address) -> Amount {
     if one.to == mine {
         one.fee
     } else {
@@ -3902,7 +3937,7 @@ fn taken_from_this_key(one: &Handed, mine: PublicKey) -> Amount {
 fn waiting_on(
     chain: &ChainStore,
     values: &BTreeMap<NoteId, Amount>,
-    mine: PublicKey,
+    mine: Address,
     handed: &[Handed],
     said: &BTreeMap<Hash32, String>,
 ) -> (BTreeSet<NoteId>, Vec<Waiting>) {
@@ -4179,6 +4214,76 @@ mod tests {
         );
     }
 
+    /// **Only a public key in the old form is refused as one: sixty four
+    /// characters that are all hexadecimal, and not either alone.**
+    ///
+    /// A mainnet address is sixty four characters long, and a short string of
+    /// hexadecimal is not a key of any form. A reader that asked for either
+    /// the length or the digits, rather than both, refused every mainnet
+    /// address as an old key and told whoever typed `ab` it was a public key;
+    /// every address in the tests was a test network's, sixty five long, so
+    /// nothing noticed.
+    #[test]
+    fn only_sixty_four_hexadecimal_characters_are_taken_for_an_old_key() {
+        let mainnet = cairn_ledger::note::NetworkId::MAINNET;
+        let address =
+            super::Address::from(SecretKey::from_bytes(&[8; 32]).public_key()).to_text(mainnet);
+        assert_eq!(address.len(), 64, "a mainnet address is sixty four long");
+        assert!(
+            super::parse_address(&address, mainnet).is_ok(),
+            "a mainnet address was refused"
+        );
+        let short = super::parse_address("abcdef", mainnet)
+            .expect_err("six hexadecimal characters are no address")
+            .to_string();
+        assert!(
+            !short.contains("public key"),
+            "six hexadecimal characters were called a public key"
+        );
+    }
+
+    /// **Every typo of one character in an address, and every swap of two
+    /// neighbours, is refused by the reader every face of this wallet uses.**
+    ///
+    /// An address was sixty four hexadecimal characters with nothing to catch
+    /// a typo but whether the bytes were a usable key, which about one string
+    /// in sixteen is: measured over four addresses before the checksum, 242 of
+    /// the 3 840 single-character substitutions were taken as an address, each
+    /// one nobody holds, and the payment gone.
+    #[test]
+    fn every_typo_of_one_character_in_an_address_is_refused() {
+        let testnet = cairn_ledger::note::NetworkId::TESTNET;
+        for seed in 1..=4u8 {
+            let real = super::Address::from(SecretKey::from_bytes(&[seed; 32]).public_key())
+                .to_text(testnet);
+            assert!(super::parse_address(&real, testnet).is_ok());
+            let written: Vec<char> = real.chars().collect();
+            for at in 0..written.len() {
+                for typed in (0x21u8..=0x7e).map(char::from) {
+                    if typed == written[at] {
+                        continue;
+                    }
+                    let mut bent = written.clone();
+                    bent[at] = typed;
+                    let bent: String = bent.into_iter().collect();
+                    assert!(
+                        super::parse_address(&bent, testnet).is_err(),
+                        "an address one character away from a real one was taken"
+                    );
+                }
+                if at + 1 < written.len() && written[at] != written[at + 1] {
+                    let mut swapped = written.clone();
+                    swapped.swap(at, at + 1);
+                    let swapped: String = swapped.into_iter().collect();
+                    assert!(
+                        super::parse_address(&swapped, testnet).is_err(),
+                        "an address with two neighbours swapped was taken"
+                    );
+                }
+            }
+        }
+    }
+
     /// A bad address is answered as a bad address, in the same words by both
     /// faces.
     ///
@@ -4192,7 +4297,9 @@ mod tests {
     /// was taken by the form and refused by `send`.
     #[test]
     fn a_bad_address_is_answered_as_one_and_not_as_an_amount() {
-        let error = super::parse_address("not an address").expect_err("this is not an address");
+        let testnet = cairn_ledger::note::NetworkId::TESTNET;
+        let error =
+            super::parse_address("not an address", testnet).expect_err("this is not an address");
         assert!(
             matches!(error, super::WalletError::BadAddress(_, _)),
             "a fault in the address is answered as one, and this said {error}"
@@ -4202,39 +4309,40 @@ mod tests {
             "and it quotes what was typed, so a person can see their own typo: {error}"
         );
 
-        // The other way in, which the case above cannot reach: thirty two
-        // bytes of good hexadecimal that are not a key anybody holds. Two
-        // construction sites, and only one of them was covered until taking
-        // the quoted text out of this one left the test green.
-        let outside = "11".repeat(32);
-        let error = super::parse_address(&outside).expect_err("not a usable key");
-        assert!(
-            matches!(error, super::WalletError::BadAddress(_, _)),
-            "a point outside the prime order subgroup is a bad address, not \
-             something else: {error}"
-        );
-        assert!(
-            error.to_string().contains(&outside),
-            "and this way in quotes what was typed too: {error}"
-        );
-
-        // A real address, and not any thirty two bytes of hexadecimal. Written
-        // first with `"ab"` repeated, which is not a point anybody holds, so
-        // both sides of the comparison below were refusals and the comparison
-        // held whatever the trimming did. Caught by taking the trimming out
-        // and watching this stay green.
-        let real = cairn_primitives::hex::encode(
+        // The other way in, which the case above cannot reach: a key in the
+        // form an address had before it was a hash. Two construction sites,
+        // and only one of them was covered until taking the quoted text out
+        // of this one left the test green.
+        let old = cairn_primitives::hex::encode(
             &cairn_crypto::SecretKey::from_bytes(&[7u8; 32])
                 .public_key()
                 .to_bytes(),
         );
+        let error = super::parse_address(&old, testnet).expect_err("the old form");
         assert!(
-            super::parse_address(&real).is_ok(),
+            matches!(error, super::WalletError::BadAddress(_, _)),
+            "a public key in the old form is a bad address, not something else: {error}"
+        );
+        assert!(
+            error.to_string().contains(&old),
+            "and this way in quotes what was typed too: {error}"
+        );
+
+        // A real address, and not any string of the right length. Written
+        // first with `"ab"` repeated, which is not an address anybody holds,
+        // so both sides of the comparison below were refusals and the
+        // comparison held whatever the trimming did. Caught by taking the
+        // trimming out and watching this stay green.
+        let real =
+            super::Address::from(cairn_crypto::SecretKey::from_bytes(&[7u8; 32]).public_key())
+                .to_text(testnet);
+        assert!(
+            super::parse_address(&real, testnet).is_ok(),
             "the fixture has to be an address, or the next line compares two \
              refusals"
         );
         assert!(
-            super::parse_address(&format!("  {real}  ")).is_ok(),
+            super::parse_address(&format!("  {real}  "), testnet).is_ok(),
             "what sits on either side of a pasted address is not something \
              the person typed on purpose, and the command line used to refuse \
              what the form took"
@@ -4629,7 +4737,7 @@ mod tests {
         use crate::pending::{Handed, Pending};
         use cairn_ledger::transaction::{Input, Transfer};
 
-        let to = SecretKey::generate().unwrap().public_key();
+        let to = super::Address::from(SecretKey::generate().unwrap().public_key());
         let spends = NoteId::new(Hash32::from_bytes([2; 32]), 0);
         let one = Handed {
             transfer: Transfer::new(vec![Input::hot(spends)], vec![Note::new(cairn("1"), to)]),
@@ -4899,7 +5007,7 @@ mod tests {
         use cairn_ledger::transaction::{Input, Transfer};
 
         let (mut wallet, directory) = opened("forget-unwritten");
-        let to = SecretKey::generate().unwrap().public_key();
+        let to = super::Address::from(SecretKey::generate().unwrap().public_key());
         let spends = NoteId::new(Hash32::from_bytes([3; 32]), 0);
         let one = Handed {
             transfer: Transfer::new(vec![Input::hot(spends)], vec![Note::new(cairn("1"), to)]),
@@ -5662,6 +5770,10 @@ mod tests {
             (Discarded::DidNotVerify, "the disk changed it"),
             (Discarded::FromANewerVersion, "your disk is fine"),
             (Discarded::WouldNotOpen, "would not open"),
+            (
+                Discarded::BeforeTheAddress,
+                "retired, so none of it is on this chain",
+            ),
         ];
         for (why, own) in cases {
             let said = Progress {
@@ -5715,6 +5827,27 @@ mod tests {
         )
         .unwrap();
         (wallet, directory)
+    }
+
+    /// **The address a wallet shows is the one it is paid at, written for its
+    /// network.**
+    ///
+    /// Every face prints it, the command line, the page and the backup's
+    /// words, and a person copies it from there to whoever pays them. Nothing
+    /// read what was printed back as an address, so a wallet showing another
+    /// network's prefix, or nothing, passed.
+    #[test]
+    fn the_address_a_wallet_shows_is_the_one_it_is_paid_at() {
+        let (wallet, directory) = opened("shows");
+        let shown = wallet.address_text();
+        let read = super::parse_address(&shown, wallet.params().network).ok();
+        wallet.shutdown();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            read,
+            Some(wallet.address()),
+            "the address a wallet shows does not read back as the one it is paid at"
+        );
     }
 
     /// Leaves `lock` poisoned, the way a thread that panicked holding it does.

@@ -277,9 +277,10 @@ fn a_transfer_the_chain_would_refuse_never_reaches_the_pool() {
         &thief,
         Amount::ZERO,
     );
+    // The thief's key is in the input, and its hash is not the note's owner.
     assert!(matches!(
         store.accept_transfer(stolen),
-        Err(TransferError::InvalidSignature { .. })
+        Err(TransferError::KeyNotOwner { .. })
     ));
 
     let invented = spend(
@@ -1084,7 +1085,8 @@ fn a_transfer_whose_signature_does_not_hold_never_reaches_the_pool() {
     let miner = wallet(1);
     let (mut store, notes) = funded(2, &miner);
 
-    // Signed by somebody who does not own the note.
+    // Signed by somebody who does not own the note, and carrying the owner's
+    // key, so the key hashes to the owner and the signature is what fails.
     let stranger = wallet(9);
     let mut forged = Transfer::new(
         vec![Input::hot(notes[0].0)],
@@ -1094,6 +1096,7 @@ fn a_transfer_whose_signature_does_not_hold_never_reaches_the_pool() {
         )],
     );
     forged.sign_input(params.network, 0, &notes[0].1, &stranger);
+    forged.inputs[0].key = miner.public_key().to_bytes();
 
     assert!(
         matches!(

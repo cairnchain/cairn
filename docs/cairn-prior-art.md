@@ -689,7 +689,7 @@ pas payer celui qui utilise sa monnaie normalement.
       La difficulté principale rencontrée en production ailleurs est le
       poids des en-têtes dans les preuves. Les nôtres font 182 octets.
       C'est mesuré depuis : environ 3 Mo pour rejoindre trente ans de
-      chaîne, en-têtes et chemins compris, contre les 197 Go qu'ils
+      chaîne, en-têtes et chemins compris, contre les 229 Go qu'ils
       remplacent.
     </span>
   </li>

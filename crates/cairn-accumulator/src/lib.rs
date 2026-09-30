@@ -17,9 +17,10 @@
 //!
 //! Hash functions are not broken by quantum computers, unlike the elliptic
 //! curve and hidden order groups the shorter alternatives rest on. That holds
-//! for this structure and not for the money in it: notes are locked to Ed25519
-//! keys, and an address is the key itself, so the key is on the chain from the
-//! moment a note is made.
+//! for this structure and not for the money in it: notes are spent by Ed25519
+//! keys. A note is locked to the hash of its key, so the key is on the chain
+//! only once a note paid to that address has been spent, and an address used
+//! again leaves its other notes behind a key everybody has seen.
 
 pub mod forest;
 pub mod key;

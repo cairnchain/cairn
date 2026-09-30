@@ -12,7 +12,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cairn_crypto::{PublicKey, SecretKey};
+use cairn_crypto::SecretKey;
+use cairn_ledger::note::{Address, NetworkId};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::seeds;
 use cairn_primitives::Amount;
@@ -28,13 +29,14 @@ cairn-wallet, a Cairn wallet that is itself a node
   cairn-wallet new <key file>
       make a key and write it down
 
-  cairn-wallet address <key file>
-      print the public key to be paid at
+  cairn-wallet address <key file> [--network <name>]
+      print the address to be paid at, on that network: the hash of the
+      key, written with a checksum that refuses a typo
 
   cairn-wallet balance <key file> [network options]
       join the network, verify the chain, and add up what this key holds
 
-  cairn-wallet send <key file> --to <public key> --amount <cairn> [options]
+  cairn-wallet send <key file> --to <address> --amount <cairn> [options]
       spend, and offer the transfer to the network's peers; only a block
       confirms it
 
@@ -96,9 +98,10 @@ What the network learns
   somebody says where it sits, the wallet asks only peers started with
   --archive, and the question tells them which notes are stuck and whose.
 
-  This wallet uses one address for everything, the public key `address`
-  prints. Anyone who knows it can read on the chain everything it was paid,
-  everything it spent, and what it holds.
+  This wallet uses one address for everything, the one `address` prints.
+  Anyone who knows it can read on the chain everything it was paid,
+  everything it spent, and what it holds. The key itself appears on the
+  chain only in a payment that spends from it.
 
 Backing up
 
@@ -379,10 +382,17 @@ fn back_up(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The address of a key file, written for the network named, or the one the
+/// wallet follows by default.
+///
+/// The key is the same on every network and so is its hash. What differs is
+/// the prefix, which is what stops an address for one network from being
+/// typed into another.
 fn show_address(arguments: &[String]) -> Result<(), String> {
     let flags = Flags::parse(arguments)?;
+    let network = rules_of(&flags)?.network;
     let secret = keyfile::read(&flags.key_file()?)?;
-    println!("{}", secret.public_key());
+    println!("{}", Address::from(secret.public_key()).to_text(network));
     Ok(())
 }
 
@@ -442,7 +452,7 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
     let fallen = holdings.notes.iter().filter(|held| held.is_cold()).count();
 
     println!();
-    println!("address   {}", wallet.address());
+    println!("address   {}", wallet.address_text());
     println!(
         "height    {}",
         progress
@@ -781,7 +791,9 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     // The one reader, in the library, so this face and the web face answer the
     // same question about the same string. They did not: this one refused a
     // pasted address with a space on the end and the web face took it.
-    let recipient = cairn_wallet::parse_address(recipient).map_err(|error| error.to_string())?;
+    let network = rules_of(&flags)?.network;
+    let recipient =
+        cairn_wallet::parse_address(recipient, network).map_err(|error| error.to_string())?;
     let amount = flags
         .value("amount")
         .ok_or_else(|| "how much? use --amount".to_owned())?;
@@ -835,7 +847,7 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     // `12.5` against `125` is the same one keystroke. The saying and the
     // paying used to be consecutive statements, so nobody could act on what
     // was said.
-    for line in about_to_pay(recipient, amount, fee, wallet.address()) {
+    for line in about_to_pay(recipient, amount, fee, wallet.address(), network) {
         println!("{line}");
     }
     let asking = must_ask(std::io::stdin().is_terminal(), flags.given("yes"));
@@ -925,10 +937,16 @@ fn when_nobody_took_it(sent: &Sent, forgot: bool) -> Option<String> {
 /// typed. And a payment to this wallet's own address, which is what pasting
 /// the output of `cairn-wallet address` in place of the recipient's does,
 /// went without a word and showed in the history as the fee sent.
-fn about_to_pay(recipient: PublicKey, amount: Amount, fee: Amount, own: PublicKey) -> Vec<String> {
+fn about_to_pay(
+    recipient: Address,
+    amount: Amount,
+    fee: Amount,
+    own: Address,
+    network: NetworkId,
+) -> Vec<String> {
     let mut lines = vec![
         String::new(),
-        format!("paying    {amount} to {recipient}"),
+        format!("paying    {amount} to {}", recipient.to_text(network)),
         format!("fee       {fee} to carry it"),
     ];
     match amount.checked_add(fee) {
@@ -1045,7 +1063,7 @@ fn open_page(arguments: &[String]) -> Result<(), String> {
     let link = opened.hand_over(&data, std::io::stdout().is_terminal())?;
 
     println!();
-    println!("address   {}", wallet.address());
+    println!("address   {}", wallet.address_text());
     match &link {
         serve::Link::Shown(url) => println!("open      {url}"),
         serve::Link::Written(path) => println!("open      the address is in {}", path.display()),
@@ -1761,12 +1779,21 @@ mod tests {
     /// printed in the middle of sending.
     #[test]
     fn what_is_about_to_be_paid_is_said_whole() {
-        let somebody = cairn_crypto::SecretKey::generate().unwrap().public_key();
-        let me = cairn_crypto::SecretKey::generate().unwrap().public_key();
-        let lines = about_to_pay(somebody, pebbles(700), pebbles(7), me);
+        let network = cairn_ledger::note::NetworkId::TESTNET;
+        let somebody = cairn_ledger::note::Address::from(
+            cairn_crypto::SecretKey::generate().unwrap().public_key(),
+        );
+        let me = cairn_ledger::note::Address::from(
+            cairn_crypto::SecretKey::generate().unwrap().public_key(),
+        );
+        let lines = about_to_pay(somebody, pebbles(700), pebbles(7), me, network);
         assert!(says(
             &lines,
-            &format!("paying    {} to {somebody}", pebbles(700))
+            &format!(
+                "paying    {} to {}",
+                pebbles(700),
+                somebody.to_text(network)
+            )
         ));
         assert!(says(
             &lines,
@@ -1777,7 +1804,7 @@ mod tests {
             "the total is not said before paying"
         );
         assert!(!says(&lines, "own address"), "{lines:?}");
-        let lines = about_to_pay(me, pebbles(700), pebbles(7), me);
+        let lines = about_to_pay(me, pebbles(700), pebbles(7), me, network);
         assert!(
             says(&lines, "That is this wallet's own address"),
             "a payment to this wallet's own address is not said to be one"

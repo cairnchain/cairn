@@ -71,7 +71,7 @@ fn a_twin_with_its_signatures_removed_does_not_lock_the_real_one_out() {
 
     let (id, entry) = state
         .hot_notes()
-        .find(|(_, entry)| entry.note.owner == miner.public_key())
+        .find(|(_, entry)| entry.note.owner == miner.public_key().into())
         .expect("the miner was paid");
     let note = entry.note;
     let half = note.value.as_pebbles() / 2;

@@ -44,8 +44,14 @@ const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 22;
 /// Draws per tip, and tips per forgery. Small: what is being pinned is which
 /// check answers, not a rate to three figures.
+///
+/// Sixty four tips because at the depth the second test forges, about one
+/// tip in thirty gets past the draw, and that column has to be exercised for
+/// the agreement to mean anything. It was twenty four, and those drew none
+/// once a note's owner became an address and every block identifier moved
+/// with it; sixty four draw two on this chain.
 const COUNT: usize = 32;
-const TIPS: usize = 24;
+const TIPS: usize = 64;
 
 /// Long enough that the draw spreads over two halvings rather than one.
 ///

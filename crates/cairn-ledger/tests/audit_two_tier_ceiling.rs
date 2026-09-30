@@ -153,7 +153,7 @@ fn spend_one_from_grace(node: &mut Node, owner: &SecretKey, payee: &SecretKey) -
         .rev()
         .flatten()
         .copied()
-        .find(|(_, _, note)| note.owner == owner.public_key())
+        .find(|(_, _, note)| note.owner == owner.public_key().into())
         .expect("something the miner owns fell recently");
 
     let mut transfer = Transfer::new(
@@ -619,7 +619,7 @@ fn every_note_in_the_window_has_a_proof_that_still_verifies() {
                 .rev()
                 .flatten()
                 .copied()
-                .find(|(_, _, note)| note.owner == miner.public_key())
+                .find(|(_, _, note)| note.owner == miner.public_key().into())
             {
                 None => Vec::new(),
                 Some((id, _, note)) => {
@@ -1265,7 +1265,7 @@ fn build_branch(
                 .rev()
                 .flatten()
                 .copied()
-                .find(|(_, _, note)| note.owner == wallet(1).public_key())
+                .find(|(_, _, note)| note.owner == wallet(1).public_key().into())
             {
                 let mut transfer = Transfer::new(
                     vec![Input::hot(id)],

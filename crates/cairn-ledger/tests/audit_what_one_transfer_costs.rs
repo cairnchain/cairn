@@ -166,10 +166,19 @@ fn cost_of_refusing(notes: usize) -> Cost {
     let (state, params, held) = a_state_holding(notes);
     let holder = owner();
 
-    // Every input signed by nobody, which is what an attacker sends: the
-    // signatures are the last thing checked and the first bad one ends it, so
-    // everything before that point is work the sender did not pay for.
-    let spending: Vec<Input> = held.iter().map(|(id, _)| Input::hot(*id)).collect();
+    // Every input carrying the owner's key and signed by nobody, which is
+    // what an attacker who has seen the key sends: the key hashes to the
+    // owner, the signatures are the last thing checked and the first bad one
+    // ends it, so everything before that point is work the sender did not
+    // pay for. A key that is not the owner's would be refused sooner, at one
+    // hash an input.
+    let spending: Vec<Input> = held
+        .iter()
+        .map(|(id, _)| Input {
+            key: holder.public_key().to_bytes(),
+            ..Input::hot(*id)
+        })
+        .collect();
     let paying: Vec<Note> = (0..notes)
         .map(|_| Note::new(Amount::from_pebbles(1).unwrap(), holder.public_key()))
         .collect();
@@ -246,11 +255,13 @@ fn the_message_a_signature_covers_is_the_one_it_always_was() {
 
 /// The one that was found: hashing has to stay proportional to the message.
 ///
-/// It stands at 40 458 bytes hashed for 36 106 received, which is 1.1 times.
+/// It stands at 48 906 bytes hashed for 44 298 received, which is 1.1 times:
+/// the body once, a message an input, and the thirty three bytes each input's
+/// key is hashed on to be compared with its note's owner.
 /// Four times is a bound with room in it, because the point is the order and
 /// not the constant. The same measurement before the fix read 5 023 754 bytes
-/// for the same 36 106, which is 139.1 times, and missed a bound of four by a
-/// factor of thirty five.
+/// for the 36 106 the same transfer took before its inputs carried keys, which
+/// is 139.1 times, and missed a bound of four by a factor of thirty five.
 #[test]
 fn refusing_a_full_transfer_hashes_about_what_it_received() {
     let cost = cost_of_refusing(256);
@@ -267,8 +278,8 @@ fn refusing_a_full_transfer_hashes_about_what_it_received() {
 ///
 /// A bound at one size can be met by a constant that happens to be generous.
 /// Four times the notes for four times the work is the shape that says the
-/// cost follows the message: it reads 10 122 bytes at 64 and 40 458 at 256,
-/// a factor of exactly 4.0. Squared it would be sixteen, and it was: the same
+/// cost follows the message: it reads 12 234 bytes at 64 and 48 906 at 256,
+/// a factor of 4.0. Squared it would be sixteen, and it was: the same
 /// pair before the fix read 322 058 and 5 023 754, a factor of 15.6.
 #[test]
 fn four_times_the_notes_is_about_four_times_the_work() {
@@ -349,12 +360,14 @@ const NOTES_IN_A_FRAME: u32 = 26_214;
 
 /// The ceiling is read off the declared count, before a note is built.
 ///
-/// Every note carries a public key and reading one is an Edwards
+/// Every note carried a public key and reading one was an Edwards
 /// decompression: 7.7 microseconds on the machine
 /// `cairn-crypto/examples/verify.rs` was last run on. A megabyte of wire holds
 /// 26 214 forty-byte notes, so a peer could buy about two hundred milliseconds
 /// of curve arithmetic with one message, and the shape check would then refuse
-/// it for having too many outputs, having built the whole of it first.
+/// it for having too many outputs, having built the whole of it first. A
+/// note's owner is an address now and reads as bytes, and building a
+/// megabyte of notes that are then refused is still work for nothing.
 ///
 /// `UnexpectedEnd` here would mean the decoder went looking for notes that are
 /// not in the frame, which is the behaviour this replaced.

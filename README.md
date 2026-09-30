@@ -112,10 +112,10 @@ Each network starts from a block written into the source, so two nodes that
 have never met are on the same chain by construction and neither has to take a
 stranger's word for where the story begins.
 
-A block holds 128 kilobytes, which is about 686 ordinary payments, or eleven a
-second. That number decides three things at once and is small because of the
+A block holds 128 kilobytes, which is about 587 ordinary payments, or nearly
+ten a second. That number decides three things at once and is small because of the
 first two: a node keeps a record of every block it could still reorganise
-away, so it decides the largest thing every node must hold, 466 MB on a chain
+away, so it decides the largest thing every node must hold, 400 MB on a chain
 of full blocks; it sets how fast the hot set turns over and with it how long a
 fallen note stays spendable without a proof; and it is how many people can be
 paid in a minute.
@@ -243,7 +243,7 @@ Make a key, and start a node that mines to it on a throwaway network:
 ```
 ./target/release/cairn-wallet new alice.key
 ./target/release/cairnd --network devnet --data node \
-    --mine $(./target/release/cairn-wallet address alice.key)
+    --mine $(./target/release/cairn-wallet address alice.key --network devnet)
 ```
 
 From another terminal, open the wallet. It joins the network as a node of its
@@ -267,7 +267,7 @@ The same things without a browser, for scripts and for servers:
 ./target/release/cairn-wallet balance alice.key \
     --network devnet --data wallet --seed 127.0.0.1:9944
 
-./target/release/cairn-wallet send alice.key --to <public key> \
+./target/release/cairn-wallet send alice.key --to <address> \
     --amount 12.5 --fee 0.25 \
     --network devnet --data wallet --seed 127.0.0.1:9944
 ```
@@ -370,7 +370,7 @@ safety policy, not a consensus rule, and it is written down as such.
 What a node must hold to validate is capped by the rules, and none of it grows
 with the chain's age: 68 MB of hot notes; 8.6 MB of block bodies it could still
 have to undo, with the headers of the rest; the record of every one of those
-blocks, 51 MB of undo records at 64 payments a block and 466 MB on a chain of
+blocks, 51 MB of undo records at 64 payments a block and 400 MB on a chain of
 full blocks, which is the largest term there is; and at most 17 MB of paths
 beside the grace window. It reads an older body back off its own disk when a
 switch that fails partway needs one, and the store allows itself 168 MB of

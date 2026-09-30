@@ -355,7 +355,7 @@ fn the_walk_never_settles_holding_a_branch_the_node_left() {
 
         // And the balances follow from that.
         let theirs = walk
-            .owner(&left.payee)
+            .owner(left.payee)
             .map(index::OwnerRecord::balance)
             .unwrap_or(Amount::ZERO);
         assert_eq!(

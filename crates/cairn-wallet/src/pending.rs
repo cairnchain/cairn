@@ -25,7 +25,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use cairn_crypto::PublicKey;
+use cairn_ledger::note::Address;
 use cairn_ledger::transaction::Transfer;
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{hash, Domain, HASH_LEN};
@@ -40,7 +40,12 @@ pub(crate) const PENDING_FILE: &str = "pending.dat";
 /// guards against a disk that changed under a file and not against anybody.
 /// This is what keeps the two files apart: an account copied over this one
 /// verifies and then fails here rather than being read as payments.
-const MAGIC: &[u8; 16] = b"cairn pending v1";
+///
+/// The second form, since a payment's recipient became an address rather
+/// than a key. A record in the first form is about a network this build does
+/// not follow, and it is set aside unread like any record that does not read
+/// back.
+const MAGIC: &[u8; 16] = b"cairn pending v2";
 
 /// Payments the record keeps.
 ///
@@ -91,7 +96,7 @@ pub(crate) struct Handed {
     /// evidence in it and the same identifier.
     pub(crate) transfer: Transfer,
     /// Who it pays.
-    pub(crate) to: PublicKey,
+    pub(crate) to: Address,
     /// What it pays them.
     pub(crate) amount: Amount,
     /// What it pays to be carried.
@@ -200,7 +205,7 @@ impl Decode for Handed {
     fn decode_from(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         Ok(Self {
             transfer: Transfer::decode_from(reader)?,
-            to: PublicKey::decode_from(reader)?,
+            to: Address::decode_from(reader)?,
             amount: Amount::decode_from(reader)?,
             fee: Amount::decode_from(reader)?,
             made_at: u64::decode_from(reader)?,
@@ -583,7 +588,50 @@ fn set_aside(path: &Path) -> NotReadBack {
 mod tests {
     use super::{Handed, NotReadBack, Pending, HELD_AFTER_REFUSAL, MOST_KEPT, NAMED_FOR};
     use cairn_crypto::SecretKey;
+    use cairn_ledger::note::Address;
     use cairn_primitives::codec::Encode as _;
+
+    /// A record written before a payment's recipient was an address is set
+    /// aside unread, under a name of its own.
+    ///
+    /// Its bytes are the same length as a record of this form, so they decode,
+    /// and every recipient in it would be read as an address that is in fact
+    /// a key, on a network this build no longer follows. Nothing told the two
+    /// forms apart, so a wallet read a record about a retired network as its
+    /// own and handed its payments over again.
+    #[test]
+    fn a_record_from_before_the_address_is_set_aside_unread() {
+        let directory = scratch("before-the-address");
+        let path = directory.join(super::PENDING_FILE);
+        let mut pending = Pending::default();
+        pending.hand(handed(1, 10));
+
+        let mut old = b"cairn pending v1".to_vec();
+        pending.encode_to(&mut old);
+        let stamp =
+            cairn_primitives::hash::hash(cairn_primitives::hash::Domain::WalletHistory, &old);
+        old.extend_from_slice(stamp.as_bytes());
+        std::fs::write(&path, &old).unwrap();
+
+        let (read, set_aside) = Pending::load(&path);
+        let kept = directory.join("pending.dat.unread");
+        let moved = kept.exists();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            read.live().count(),
+            0,
+            "a record from before the address was read as this wallet's payments"
+        );
+        assert_eq!(
+            set_aside,
+            Some(NotReadBack::Moved(kept)),
+            "a record from before the address was not set aside by name"
+        );
+        assert!(
+            moved,
+            "and what was set aside is not where it was said to be"
+        );
+    }
 
     /// How deep a switch reaches, in the tests of what the record keeps.
     const REACH: u64 = 1_024;
@@ -604,9 +652,9 @@ mod tests {
 
     /// Who the payments here pay: one key for the whole run, so the same
     /// seed makes the same payment twice.
-    fn payee() -> cairn_crypto::PublicKey {
-        static ONE: std::sync::OnceLock<cairn_crypto::PublicKey> = std::sync::OnceLock::new();
-        *ONE.get_or_init(|| SecretKey::generate().unwrap().public_key())
+    fn payee() -> Address {
+        static ONE: std::sync::OnceLock<Address> = std::sync::OnceLock::new();
+        *ONE.get_or_init(|| SecretKey::generate().unwrap().public_key().into())
     }
 
     fn handed(seed: u8, made_at: u64) -> Handed {
@@ -696,8 +744,9 @@ mod tests {
         assert_eq!(set_aside, None);
         assert_eq!(again, pending, "the marks did not read back");
 
-        // Written as the release before the marks wrote it: the list alone.
-        let mut old = b"cairn pending v1".to_vec();
+        // Written the way the release before the marks wrote it, the list
+        // alone, under this form's magic: a record with no marks still reads.
+        let mut old = super::MAGIC.to_vec();
         let plain: Vec<Handed> = pending
             .all()
             .cloned()

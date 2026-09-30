@@ -716,6 +716,54 @@ echo "network      $network (0x00000000)""#;
         }
     }
 
+    /// **The installer takes an address to mine to, and still a public key
+    /// in the old form, and refuses anything else before it builds.**
+    ///
+    /// A note's owner is the hash of a key, and `cairnd --mine` takes the
+    /// address `cairn-wallet address` prints. The installer asked `MINE` to be
+    /// sixty four hexadecimal characters before anything was built, so the
+    /// form the node now names in its own summary was refused by the script
+    /// that installs it, and nothing ran the script with one.
+    #[test]
+    fn the_installer_takes_an_address_to_mine_to() {
+        // The address and the key of the specification's signature vectors,
+        // so neither is a literal made up for this test.
+        let address = "tcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqtk5uk3";
+        let key = "47da95e3585bde332648ce1bf660eb1d68bb4fd9a6b206f80996056edd78995c";
+        for shell in shells() {
+            let machine = Machine::new(&INSTALL, "mine", shell);
+            machine.running("testnet-6", "testnet-6");
+            machine.building("testnet-6", "testnet-6");
+            machine.installed("--network testnet-6");
+
+            for (what, mine) in [("an address", address), ("a public key", key)] {
+                let output = machine.run(&[("MINE", mine)]);
+                assert!(
+                    output.status.success(),
+                    "the installer refused {what} to mine to: {}",
+                    said(&output)
+                );
+                assert!(
+                    format!("{} ", machine.exec_start()).contains(&format!(" --mine {mine} ")),
+                    "the installer did not write {what} into the line it installed"
+                );
+            }
+
+            let before = machine.unit();
+            let output = machine.run(&[("MINE", "not-an-address")]);
+            assert!(
+                !output.status.success(),
+                "the installer took a word that is neither an address nor a key"
+            );
+            assert!(
+                said(&output).contains("MINE is not an address"),
+                "the installer did not say what MINE should be: {}",
+                said(&output)
+            );
+            assert_eq!(machine.unit(), before, "and it changed the unit anyway");
+        }
+    }
+
     /// A `cairn.conf` wherever the installer is started from has no say in
     /// the network, and a check that fails for another reason does not hand
     /// the machine another network.

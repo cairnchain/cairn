@@ -92,10 +92,11 @@ worth taking.
 
 Mining does not break this rule, because a miner is told the address rewards
 are paid to and nothing more. The key that spends them stays wherever you keep
-it. Set `MINE` to a public key and the node will mine to it:
+it. Set `MINE` to an address, as `cairn-wallet address <key file>` prints it,
+and the node will mine to it:
 
 ```
-MINE="<public key>" sh /usr/local/src/cairn/deploy/install.sh
+MINE="<address>" sh /usr/local/src/cairn/deploy/install.sh
 ```
 
 A node set to mine waits until it has a peer, and until the chain has stopped
@@ -186,7 +187,7 @@ A node that was mining therefore keeps mining, which is what a test network
 lives on: a miner that quietly stopped is how one goes still without anybody
 noticing. Stopping it is `MINE=`, said out loud, and nothing else. It writes
 `--mine off` on the command line, which also stops a key named in
-`cairn.conf`, and later updates carry it until `MINE` names a key again.
+`cairn.conf`, and later updates carry it until `MINE` names an address again.
 
 When the network changes, because it was named or because the new build no
 longer has the old one, the old network's chain is moved aside to

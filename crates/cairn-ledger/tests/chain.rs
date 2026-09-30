@@ -233,11 +233,12 @@ fn a_note_can_only_be_spent_by_its_owner() {
 
     let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let outcome = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 0);
+    // The thief's key is in the input, and its hash is not the note's owner.
     assert!(matches!(
         outcome,
         Err(BlockError::InvalidTransfer {
             index: 0,
-            source: TransferError::InvalidSignature { input_index: 0 }
+            source: TransferError::KeyNotOwner { input_index: 0 }
         })
     ));
 }
@@ -254,7 +255,7 @@ fn changing_an_output_after_signing_breaks_the_signature() {
         &[(funded_id, funded, &miner)],
         vec![Note::new(pebbles(1), wallet(2).public_key())],
     );
-    transfer.outputs[0].owner = attacker.public_key();
+    transfer.outputs[0].owner = attacker.public_key().into();
 
     let coinbase = coinbase_paying(1, miner.public_key(), params.initial_reward);
     let outcome = assemble_block(&state, coinbase, vec![transfer], &params, 2_000, 0);

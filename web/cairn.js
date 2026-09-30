@@ -2011,13 +2011,12 @@ searchForm.addEventListener('submit', async (event) => {
   try {
     const answer = await api('search?q=' + encodeURIComponent(query));
     if (answer.target) {
-      // A transaction identifier and an address are both thirty two bytes, so
-      // anything the site has not read falls through to the address page. It
-      // used to go there without a word, and somebody looking up their own
-      // transaction was told, in effect, that it was an address holding
-      // nothing. The page is still shown, because an address nobody has paid
-      // is not in the index either; what is no longer left out is that this
-      // was a guess made off part of a chain.
+      // An address is written with its network's prefix and a checksum, so a
+      // transaction identifier this site has not read no longer falls through
+      // to the address page. What an address page shows is still made off the
+      // part of the chain this site has read, and that is said rather than
+      // left out: an address paid below where the reading starts shows less
+      // than it holds.
       const guessed = answer.kind === 'address' && answer.coverage && answer.coverage.whole === false;
       searchInput.value = '';
       go(answer.target);

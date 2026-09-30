@@ -41,7 +41,7 @@
     "placeholder": "Hauteur, bloc, transaction, adresse, billet",
     "action": "Chercher",
     "nothing": "Rien sur cette chaîne ne correspond.",
-    "guessed": "Rien de ce que ce site a lu ne correspond. Cela peut être une adresse, alors c'est une adresse qui vous est montrée. Si vous avez collé une transaction, elle est peut-être dans la partie de la chaîne que ce site n'a pas encore lue."
+    "guessed": "Ce site n'a pas encore lu toute la chaîne : ce qu'il montre pour cette adresse peut être en dessous de ce qu'elle détient."
   },
 
   "common": {
@@ -364,7 +364,7 @@
     },
     "outputs": {
       "plain": "Ce sont les nouveaux billets. Chacun appartient à une adresse et pourra être dépensé exactement une fois, plus tard, par celui qui détient le secret correspondant.",
-      "curious": "Chaque sortie est une valeur verrouillée sur une clé publique. Son identifiant vient de la transaction qui l'a créée et de sa position dans la liste.",
+      "curious": "Chaque sortie est une valeur verrouillée sur une adresse, qui est l'empreinte d'une clé publique : la clé elle-même n'apparaît que lorsque le billet est dépensé. Son identifiant vient de la transaction qui l'a créée et de sa position dans la liste.",
       "technical": "Un identifiant de billet est l'identifiant de la transaction source et un indice. L'ordre sur les identifiants est défini pour que l'ensemble des billets ait une énumération canonique unique, dont dépend l'engagement d'état."
     },
     "address": {
@@ -390,7 +390,7 @@
     "holders": {
       "plain": "Qui détient le plus. Sur un réseau de test, cela ne dit pas grand-chose : c'est surtout celui qui a laissé un ordinateur miner le plus longtemps.",
       "curious": "Calculé depuis l'index de l'explorateur, en comptant les billets non dépensés par propriétaire. Un propriétaire peut détenir autant d'adresses qu'il veut : c'est donc une vue des adresses, pas des personnes.",
-      "technical": "Les soldes sont la somme des billets non dépensés par clé publique sur la branche suivie. Une réorganisation est défaite bloc par bloc ; seule une réorganisation plus profonde que les 128 blocs que l'index sait défaire l'oblige à relire la chaîne."
+      "technical": "Les soldes sont la somme des billets non dépensés par adresse sur la branche suivie. Une réorganisation est défaite bloc par bloc ; seule une réorganisation plus profonde que les 128 blocs que l'index sait défaire l'oblige à relire la chaîne."
     },
     "emission": {
       "plain": "L'argent neuf n'apparaît qu'en paiement du travail de recherche des blocs. Le montant est divisé par deux régulièrement, puis cesse de baisser et reste à un petit chiffre pour toujours, afin qu'il y ait toujours une raison de faire tourner le réseau.",
@@ -448,7 +448,7 @@
           "Cela ressemble à un détail. Ce n'en est pas un : parce qu'un billet n'est jamais modifié, seulement créé puis détruit, un ordinateur peut oublier entièrement un vieux billet et rester certain de ceux qui restent."
         ],
         "curious": [
-          "Le modèle des sorties non dépensées, comme dans Bitcoin, plutôt que celui des comptes. Un billet est une valeur verrouillée sur une clé publique, identifiée par la transaction qui l'a créé et son indice dans les sorties.",
+          "Le modèle des sorties non dépensées, comme dans Bitcoin, plutôt que celui des comptes. Un billet est une valeur verrouillée sur une adresse, l'empreinte d'une clé publique, identifiée par la transaction qui l'a créé et son indice dans les sorties.",
           "L'immuabilité est la raison de ce choix ici. Un solde de compte doit être lu et réécrit, donc le compte doit être détenu. Un billet est créé une fois et consommé une fois, ce qui permet à un nœud de détenir un engagement plutôt que le billet lui-même."
         ],
         "technical": [
@@ -675,7 +675,7 @@
       "title": "Miner",
       "body": {
         "plain": ["C'est ainsi qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
-        "curious": ["Minage dans le nœud, sur tous les cœurs sauf un, ce qui suffit pour un réseau de test. Les récompenses vont à la clé que vous indiquez, et cette clé peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
+        "curious": ["Minage dans le nœud, sur tous les cœurs sauf un, ce qui suffit pour un réseau de test. Les récompenses vont à l'adresse que vous indiquez, et la clé qui est derrière peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
         "technical": ["La difficulté d'ouverture de testnet-6 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire."]
       }
     },

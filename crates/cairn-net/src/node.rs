@@ -24,11 +24,10 @@ use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_chain::{
     first_to_offer, Accepted, Bodies, ChainError, ChainStore, Located, Outdated, MAX_REORG_DEPTH,
 };
-use cairn_crypto::PublicKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::genesis;
 use cairn_ledger::handover::{accept, Handover, HandoverError};
-use cairn_ledger::note::NetworkId;
+use cairn_ledger::note::{Address, NetworkId};
 use cairn_ledger::pow::RECENT_HEADERS;
 use cairn_ledger::sampling::{check_start, open_start, SampledStart, StartError, Weighed, SAMPLES};
 use cairn_ledger::state::header_leaf;
@@ -3785,10 +3784,10 @@ impl Shared {
     /// before it is read, and the first one it refuses ends the batch there:
     /// nothing after it is read. Each comes back with that weight. The whole
     /// batch used to be read first and priced after, and reading a block off
-    /// the disk decodes it, which is a key off the curve for every owner in
-    /// it: a hundred and twenty eight old full blocks cost this node eight
-    /// seconds of processor for one ask, whatever the peer's window then
-    /// allowed it to be sent.
+    /// the disk decodes it, which while a note's owner was a key was a key off
+    /// the curve for every owner in it: a hundred and twenty eight old full
+    /// blocks cost this node eight seconds of processor for one ask, whatever
+    /// the peer's window then allowed it to be sent.
     fn blocks_at(
         &self,
         heights: &[u64],
@@ -4254,7 +4253,7 @@ impl Node {
         params: ConsensusParams,
         address: SocketAddr,
         directory: impl Into<PathBuf>,
-        owners: &[PublicKey],
+        owners: &[Address],
     ) -> Result<(Self, Restored), NodeError> {
         Self::open_with(params, address, directory, false, owners)
     }
@@ -4279,7 +4278,7 @@ impl Node {
         address: SocketAddr,
         directory: impl Into<PathBuf>,
         archiving: bool,
-        owners: &[PublicKey],
+        owners: &[Address],
     ) -> Result<(Self, Restored), NodeError> {
         let directory = directory.into();
         let lock = DirectoryLock::acquire(&directory)?;
@@ -9674,8 +9673,9 @@ fn read_loop(
         // the protocol allows between nodes that know each other; this is what
         // a stranger gets, and a handshake is a fixed set of fields a few
         // hundred bytes long. Before it arrives, a megabyte of notes bought
-        // one and a third seconds of this node's processor, because decoding
-        // one decompresses a curve point for every owner in it.
+        // one and a third seconds of this node's processor while a note's
+        // owner was a key, because decoding one decompressed a curve point
+        // for every owner in it.
         //
         // Lifted by the introduction and not by the port it names. It was
         // lifted once the peer had an address worth writing down, which a
@@ -12749,14 +12749,14 @@ mod peers_and_loops {
 
     /// A frame the peer's window cannot pay for is not decoded.
     ///
-    /// Decoding is where a frame of notes costs this node its processor: an
-    /// owner's key off the curve and checked for its subgroup, about fifty
-    /// microseconds a note, nine tenths of a second for eight hundred
-    /// kilobytes of them. The window was asked only once a message had been
-    /// built, so a peer that had spent it went on sending frames of owners,
-    /// and each was decoded in full and then answered with silence. Nothing
-    /// asked which came first, so a node that decoded before it priced passed
-    /// every test there was.
+    /// Decoding is where a frame of notes cost this node its processor while a
+    /// note's owner was a key: an owner's key off the curve and checked for its
+    /// subgroup, about fifty microseconds a note, nine tenths of a second for
+    /// eight hundred kilobytes of them. The window was asked only once a
+    /// message had been built, so a peer that had spent it went on sending
+    /// frames of owners, and each was decoded in full and then answered with
+    /// silence. Nothing asked which came first, so a node that decoded before
+    /// it priced passed every test there was.
     ///
     /// Measured by what the node does with a frame it could only have refused
     /// by decoding it: one that is not a message at all. Read after the window
@@ -15613,14 +15613,15 @@ mod tests {
     /// A block the asking peer's window cannot pay for is not read off the
     /// disk.
     ///
-    /// Reading a record back decodes it, and decoding a block decompresses a
-    /// key off the curve for every owner in it: sixty five milliseconds for a
-    /// full one. The batch was read whole and priced after, so a peer with
-    /// nothing left in its window still had a hundred and twenty eight old
-    /// blocks read and decoded for every ask, which is eight seconds of this
-    /// node's processor an ask for full ones, and was then sent none of them.
-    /// Nothing counted what serving read, so a node that read everything and
-    /// sent what was paid for passed every test there was.
+    /// Reading a record back decodes it, and while a note's owner was a key,
+    /// decoding a block decompressed a key off the curve for every owner in it:
+    /// sixty five milliseconds for a full one. The batch was read whole and
+    /// priced after, so a peer with nothing left in its window still had a
+    /// hundred and twenty eight old blocks read and decoded for every ask,
+    /// which is eight seconds of this node's processor an ask for full ones,
+    /// and was then sent none of them. Nothing counted what serving read, so a
+    /// node that read everything and sent what was paid for passed every test
+    /// there was.
     ///
     /// Counted by the bytes hashed on this thread: reading a record back hashes
     /// its transactions to hold them to its header, and nothing else in

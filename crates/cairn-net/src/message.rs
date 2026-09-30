@@ -62,11 +62,14 @@ use cairn_primitives::Hash32;
 /// alone. The field changes the weighing's encoding, so a node on eight could
 /// not read a weighing from nine, and would take it for a peer that is broken.
 ///
-/// Ten comes with testnet-7. A block's transaction root is taken over each
-/// transfer's whole encoding, so a node on nine refuses every block of ten
-/// that carries a transfer; the draw hashes under a domain of its own, so the
-/// two ask a chain different questions; and the handshake no longer carries
-/// the tip nothing read, so neither can read the other's introduction.
+/// Ten comes with testnet-7. A note's owner is the hash of a key and an input
+/// carries the key it spends with, so a note, a transfer and a block of ten
+/// do not decode as nine's, nor the other way round; a block's transaction
+/// root is taken over each transfer's whole encoding, so a node on nine
+/// refuses every block of ten that carries a transfer; the draw hashes under a
+/// domain of its own, so the two ask a chain different questions; and the
+/// handshake no longer carries the tip nothing read, so neither can read the
+/// other's introduction.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Identifiers one announcement may carry.

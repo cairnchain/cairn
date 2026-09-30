@@ -68,10 +68,14 @@ trust.
 
 ## Notes, and why they are not balances
 
-Cairn keeps notes rather than accounts. A note is a value locked to a
-public key, identified by the transaction that created it and its index
-among that transaction's outputs. It is written once and consumed once.
-This is the unspent output model, as in Bitcoin.
+Cairn keeps notes rather than accounts. A note is a value locked to an
+address, which is the hash of a public key, identified by the transaction
+that created it and its index among that transaction's outputs. It is
+written once and consumed once. This is the unspent output model, as in
+Bitcoin. The key itself appears on the chain only when the note is spent,
+in the input that spends it, so an unspent note shows nothing a future
+computer could work a secret back from, and reading one costs a node no
+curve arithmetic.
 
 The choice is not stylistic. An account balance must be read and written,
 so the account has to be held. A note is created once and destroyed once,
@@ -81,18 +85,23 @@ remains. Everything that follows depends on this property.
 
 Ordering over note identifiers is defined, so the note set has exactly
 one canonical enumeration, which the state commitment depends on.
-Transfer identifiers exclude signatures and witnesses. That gives
-malleability resistance, and more importantly it means a stale inclusion
-proof can be replaced with a fresh one without changing any identifier
-that anything else has committed to.
+Transfer identifiers exclude signatures and witnesses, and the keys that
+travel with the signatures. That gives malleability resistance, and more
+importantly it means a stale inclusion proof can be replaced with a fresh
+one without changing any identifier that anything else has committed to.
+A block commits to all three, so a block has one body.
 
 Hashing is BLAKE3 with a distinct derived key per domain, so a value
 hashed as a note leaf can never be read as a header leaf or a Merkle
 node. Signatures are Ed25519 with four restrictions beyond what the
 standard requires. A key must be canonically encoded, not of small
-order, and in the prime order subgroup, all three refused at
-construction, so two byte strings can never name one key and no note can
-be paid to a key nobody holds. And a signature is checked by the
+order, and in the prime order subgroup, all three asked of the key an
+input carries once its hash has matched the note's owner, so two byte
+strings can never name one key and no spend is taken under a key nobody
+holds. A note can be paid to an address nobody holds a key for, as on
+every chain that pays to the hash of a key; an address is written with a
+checksum that refuses any typo of up to four characters, which is what
+stops one being typed by mistake. And a signature is checked by the
 cofactorless equation against an `R` that is canonical and not of small
 order, the choice the standard leaves open and verifiers in use make
 differently, so a signature one node takes is one every node takes. Every
@@ -424,7 +433,7 @@ unbounded, and this is where the design was weakest.
 ### The measured cost of arrival
 
 On this implementation, at one block per minute with blocks carrying 64
-ordinary payments, thirty years of chain is 197 GB to download and every
+ordinary payments, thirty years of chain is 229 GB to download and every
 one of its blocks to revalidate, to arrive at a validation state
 weighing 68 MB.
 
@@ -774,11 +783,11 @@ spent, are held in full by every node and require no proof at all. The
 obligation falls only on value that has not moved recently. How recently
 is worth stating plainly rather than leaving to the word: the hot set is
 capped at a *number* of notes, so how long a note stays in it
-depends on how busy the chain is. Measured at full blocks (686 payments
+depends on how busy the chain is. Measured at full blocks (587 payments
 a block, which is what success looks like), a note falls to the cold set
-in **3.2 hours**, and the grace window that follows lasts
-about twelve minutes. At a tenth of that traffic it is 32 hours, and at a
-hundredth, thirteen days.
+in **3.7 hours**, and the grace window that follows lasts
+about fourteen minutes. At a tenth of that traffic it is 37 hours, and at
+a hundredth, fifteen days.
 
 So the honest statement is that the validator's cost is capped and the
 saver's inconvenience is not: the busier the chain, the more of anyone's
@@ -854,9 +863,9 @@ estimated, on one core of an ordinary machine.
   <div><span class="k">Halving interval</span><span class="v">1 051 200 blocks</span></div>
   <div><span class="k">Tail reward</span><span class="v">0.01 CAIRN, perpetual</span></div>
   <div><span class="k">Header size</span><span class="v">182 bytes</span></div>
-  <div><span class="k">Ordinary payment</span><span class="v">191 bytes</span></div>
+  <div><span class="k">Ordinary payment</span><span class="v">223 bytes</span></div>
   <div><span class="k">Empty block</span><span class="v">244 bytes</span></div>
-  <div><span class="k">Block with 64 ordinary payments</span><span class="v">12 468 bytes</span></div>
+  <div><span class="k">Block with 64 ordinary payments</span><span class="v">14 516 bytes</span></div>
 </div>
 
 <div class="scroll">
@@ -872,7 +881,7 @@ estimated, on one core of an ordinary machine.
     <tbody>
       <tr>
         <td>All blocks, to download</td>
-        <td class="n">197 GB</td>
+        <td class="n">229 GB</td>
         <td>No, grows with history</td>
       </tr>
       <tr>
@@ -942,8 +951,8 @@ estimated, on one core of an ordinary machine.
   What a node holds is every row marked as its own, and the largest of them
   is not the hot set. A node keeps a record of every block it could still
   undo, what the block did and how to take it back, and at 64 payments a
-  block those records come to the 51 MB above; they come to 466 MB on a
-  chain of full blocks, where every block spends and creates ten times as
+  block those records come to the 51 MB above; they come to 400 MB on a
+  chain of full blocks, where every block spends and creates nine times as
   much. That term was left out of this table until the records were
   counted, and it is the one that decides what a phone has to hold on a
   busy chain. Beside it, the paths a node keeps for the notes in its grace

@@ -129,6 +129,7 @@ thing it exists for.
     <tr><td>coinbase id</td><td><code>cairn v1 coinbase id</code></td></tr>
     <tr><td>block header id</td><td><code>cairn v1 block header id</code></td></tr>
     <tr><td>signature message</td><td><code>cairn v1 signature message</code></td></tr>
+    <tr><td>address</td><td><code>cairn v1 address</code></td></tr>
     <tr><td>merkle leaf</td><td><code>cairn v1 merkle leaf</code></td></tr>
     <tr><td>merkle node</td><td><code>cairn v1 merkle node</code></td></tr>
     <tr><td>merkle empty</td><td><code>cairn v1 merkle empty</code></td></tr>
@@ -169,13 +170,13 @@ where the structure is specified.
 
 ## Notes
 
-A note is an amount and the public key that may spend it.
+A note is an amount and the address that may spend it.
 
 <table>
   <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
   <tbody>
     <tr><td>value</td><td>amount</td><td class="n">8</td></tr>
-    <tr><td>owner</td><td>public key</td><td class="n">32</td></tr>
+    <tr><td>owner</td><td>address</td><td class="n">32</td></tr>
   </tbody>
 </table>
 
@@ -191,22 +192,59 @@ transaction's outputs.
   </tbody>
 </table>
 
-A public key is 32 bytes and is an Ed25519 verifying key. A decoder MUST refuse
-bytes that are not a canonical encoding of a point on the curve, MUST refuse a
-key of small order, and MUST refuse a key that is not in the prime order
-subgroup. All three refusals happen at decode, so a structure that decoded
-holds no unusable key.
+An address is the hash, under the address domain, of a scheme byte followed
+by a public key:
 
-The third is the one that carries the sentence after it. Ed25519's group has a
-cofactor of eight, so a point may be `A + T` for a prime order point `A` and a
-non-identity point `T` of order dividing eight. Such a point is canonically
-encoded, decodes cleanly, and is not of small order, so the first two refusals
-pass it. No signer can produce a signature that verifies under it: Ed25519
-clamping clears the low three bits of the scalar, so a public key is always a
-multiple of eight times the basepoint and therefore always lies in the prime
-order subgroup. Seven of every eight byte strings that pass the first two
-refusals are addresses nobody holds a secret for, and a note paid to one is
-unspendable.
+```text
+address = H(address, 0x00 || key)
+```
+
+`0x00` is Ed25519, and `key` is the 32-byte public key. It is the only scheme a
+version 1 transfer knows. The scheme byte is inside the hash so that a key of
+another scheme with the same 32 bytes can never name the same owner. An address
+is 32 bytes and a decoder reads it as bytes: nothing about it can be checked
+until a key is presented for it, and a decoder does no curve arithmetic for it.
+
+So a note shows no key. The key appears on the chain once, in the input that
+spends the note, and it is checked there twice: that it hashes to the note's
+owner, as soon as the input has resolved, and that it is a key a signer can
+hold, when the signature is verified (*How a signature is verified*). A note
+can be paid to an address nobody holds a key for, as on any chain that pays to
+the hash of a key; the text form below is what stops one being typed by
+mistake.
+
+### Addresses as text
+
+An address is written in Bech32m, as BIP 350 defines it: a prefix naming the
+kind of network, the separator `1`, the 32 bytes as 52 characters of five bits
+each, the last padded with zero bits, and six characters of checksum. There is
+no version character: the scheme is inside the hash.
+
+<table>
+  <thead><tr><th>Network</th><th>Prefix</th><th class="n">Characters</th></tr></thead>
+  <tbody>
+    <tr><td>mainnet</td><td>cairn</td><td class="n">64</td></tr>
+    <tr><td>every test network</td><td>tcairn</td><td class="n">65</td></tr>
+    <tr><td>devnet</td><td>dcairn</td><td class="n">65</td></tr>
+  </tbody>
+</table>
+
+Test networks share a prefix, so an address stays the same across the restarts
+a test network goes through. A reader MUST refuse a string that mixes capital
+and small letters, a prefix other than its network's, a checksum that is not
+Bech32m's, spare bits in the last character that are not zero, and data of any
+length but 32 bytes. It MAY read the same string written all in capitals, which
+is how a QR code carries it. Bech32m detects every error of up to four
+characters in a string this long, so every single-character typo is refused.
+
+These are the address of the key in the signature vectors below, under each
+prefix:
+
+```text
+cairn   cairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqkvxac6
+tcairn  tcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysqtk5uk3
+dcairn  dcairn1yzdmhpelkqzgvxufa7jn6aeds27hkym0klz387872lgs4s348ysq5lsh2e
+```
 
 ## Transactions
 
@@ -225,13 +263,16 @@ that exist. A coinbase creates them, and exactly one appears in each block.
 </table>
 
 An input names a note, says how its existence is being shown, and carries the
-signature that authorises spending it.
+public key whose address owns the note and the signature that authorises
+spending it. The key is 32 bytes, read as bytes, and decoded only to verify the
+signature.
 
 <table>
   <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
   <tbody>
     <tr><td>note_id</td><td>note identifier</td><td class="n">36</td></tr>
     <tr><td>witness</td><td>witness</td><td class="n">1 or more</td></tr>
+    <tr><td>key</td><td>public key</td><td class="n">32</td></tr>
     <tr><td>signature</td><td>signature</td><td class="n">64</td></tr>
   </tbody>
 </table>
@@ -255,8 +296,10 @@ note's leaf up to the root of its tree, bottom first, as *Proofs* gives them.
 
 **A transfer's identifier is not the hash of its wire encoding.** It is the
 hash, under the transfer domain, of the version, the count of inputs, each
-input's note identifier alone, and the outputs. Signatures and witnesses are
-left out.
+input's note identifier alone, and the outputs. Keys, signatures and witnesses
+are left out. A key goes with its signature: it is known once the input is
+signed and not before, and leaving it out lets no other key in, since only one
+key hashes to a note's owner.
 
 <table>
   <thead><tr><th>Field</th><th>Type</th><th class="n">Bytes</th></tr></thead>
@@ -301,14 +344,15 @@ input's index, and the value and owner of the note being spent.
     <tr><td>transfer</td><td>hash</td><td class="n">32</td></tr>
     <tr><td>index</td><td>u32</td><td class="n">4</td></tr>
     <tr><td>value</td><td>amount</td><td class="n">8</td></tr>
-    <tr><td>owner</td><td>public key</td><td class="n">32</td></tr>
+    <tr><td>owner</td><td>address</td><td class="n">32</td></tr>
   </tbody>
 </table>
 
 That is 82 bytes. `network` is the identifier the network's headers carry,
 `version` is the transfer's, `transfer` is its identifier, `index` is the
 input's position among the transfer's inputs counting from nought, and `value`
-and `owner` are the spent note's.
+and `owner` are the spent note's: its owner is its address, not the key that
+signs.
 
 The last two matter and are not obvious. Without them a wallet shown a false
 value for the note it is spending would sign a transaction whose real fee is
@@ -321,8 +365,28 @@ scalar `S`, little-endian, in the last 32. It is pure Ed25519 as RFC 8032
 defines it, with the 32 bytes of the digest above as the message: no prehash
 and no context, so neither Ed25519ph nor Ed25519ctx.
 
+The key is the one the input carries, and by the time a signature is verified
+its hash has been found to be the note's owner (`KeyNotOwner` otherwise, among
+the state-dependent refusals). It is decoded here and nowhere else, as an
+Ed25519 verifying key, and a node MUST refuse bytes that are not a canonical
+encoding of a point on the curve, MUST refuse a key of small order, and MUST
+refuse a key that is not in the prime order subgroup. A key refused here
+refuses the signature, as `InvalidSignature`: only whoever chose to be paid at
+the hash of those bytes can present them.
+
+The third refusal is the one that carries the sentence after it. Ed25519's
+group has a cofactor of eight, so a point may be `A + T` for a prime order
+point `A` and a non-identity point `T` of order dividing eight. Such a point is
+canonically encoded, decodes cleanly, and is not of small order, so the first
+two refusals pass it. No signer can produce a signature that verifies under
+it: Ed25519 clamping clears the low three bits of the scalar, so a public key
+is always a multiple of eight times the basepoint and therefore always lies in
+the prime order subgroup. Seven of every eight byte strings that pass the first
+two refusals are keys nobody holds a secret for, and a note paid to the address
+of one is unspendable.
+
 RFC 8032 leaves a verifier two choices, and the verifiers in use differ
-exactly there, so this protocol makes both. With `A` the owner's public key,
+exactly there, so this protocol makes both. With `A` the input's key,
 `B` the base point, `M` the message, and `L` the order of the prime order
 subgroup, which is `2^252 + 27742317777372353535851937790883648493`, a node
 MUST accept a signature if and only if all four of these hold:
@@ -335,9 +399,9 @@ MUST accept a signature if and only if all four of these hold:
    reduced modulo `L`. The equation is checked as written, without multiplying
    either side by the cofactor.
 
-Any other signature is refused, and the refusal is `InvalidSignature`. `A` is a
-key that passed the three refusals in *Notes*, so it is never of small order
-itself.
+Any other signature is refused, and the refusal is `InvalidSignature`. `A` is
+the input's key, decoded with the three refusals above, so it is never of small
+order itself.
 
 The third and the fourth are the choices. RFC 8032 never asks about the order
 of `R`, and without the third a signature whose `R` is the identity and whose
@@ -520,10 +584,12 @@ sent it.
 comes after the header's own arithmetic, which costs nothing, and before the
 body is looked at, which costs a great deal. A forged block therefore costs its
 sender the work or costs the reader one hash, once it has been read. Reading it
-is paid for separately and first: decoding a block decompresses a key off the
-curve for every owner in it, a frame may be eight times the largest block the
-rules allow, and so a frame is charged to its sender's allowance by its size
-before it is decoded. See the allowance.
+is paid for separately and first: a frame may be eight times the largest block
+the rules allow, and so a frame is charged to its sender's allowance by its size
+before it is decoded. See the allowance. Decoding a block does no curve
+arithmetic: an owner is an address, and each input's key is carried as bytes
+and decoded once, when its signature is verified, after its hash has matched
+the note's owner.
 
 **Sixteen is the one refusal in this list that two honest nodes on the same
 build can disagree about.** It is measured against the reading node's own
@@ -1121,7 +1187,7 @@ A node MAY keep a current proof for the fallen notes of owners it was asked to
 follow, which is what lets a wallet spend later without asking anyone. A node
 that does SHOULD bound how many such notes it follows, and SHOULD choose which
 to let go of by a rule that makes displacing one cost more than the note is
-worth. An owner is a public key on a public chain, so the set of notes paid to
+worth. An owner is an address on a public chain, so the set of notes paid to
 a followed owner is chosen by strangers: without a bound, a dust note costs its
 sender one transfer and costs the node an entry and a full path for good. The
 reference implementation follows at most 8 192 notes and lets go of the least
@@ -2785,10 +2851,12 @@ honest pair of nodes behind one address is, and pooling makes two people behind
 one carrier gateway invisible to each other.
 
 **A frame is charged by its size before it is decoded.** Decoding is not
-free: every note in a frame is an owner's key decompressed off the curve and
-checked for its subgroup, which costs about what verifying a signature does, so
-eight hundred kilobytes of note owners are most of a second of processor before
-anything in them has been priced. A node SHOULD charge every frame from a peer
+free: it builds everything the frame describes before anything in it has been
+priced. While a note's owner was a key, every note in a frame was also a key
+decompressed off the curve and checked for its subgroup, about what verifying a
+signature costs, and eight hundred kilobytes of note owners were most of a
+second of processor. An owner is an address now and reads as bytes, and the
+charge still pays for the building. A node SHOULD charge every frame from a peer
 that has introduced itself one unit per 512 bytes, rounded up, before it decodes
 it, and SHOULD NOT decode a frame the peer's window cannot pay for. That charge
 counts toward the price of the message the frame carried, so a message pays the
@@ -2842,12 +2910,15 @@ one answer whose size the ask cannot state, since a block is anything up to what
 the consensus rules allow and only whoever read it off the disk knows which;
 headers and paths are bounded by the ask and are charged there instead.
 
-**A transfer costs what taking it in costs.** An input is a note resolved and a
-signature verified. An output is a key decompressed off the curve and checked
-for its subgroup while the frame is decoded, which costs about the same, so it
-is priced the same. Priced by its inputs alone, a transfer of one input and 256
-outputs cost what an ordinary payment does and bought over a hundred times the
-processor for each unit.
+**A transfer costs what taking it in costs.** An input is a note resolved, its
+key hashed and then decoded, and a signature verified. An output was a key
+decompressed off the curve while the frame was decoded, which cost about what an
+input's verification does, and it was priced the same. That decoding has moved
+to the input that spends the note, and the reference implementation keeps both
+prices, so an ordinary payment of one input and two outputs still pays twelve
+units, about what taking it in costs. Priced by its inputs alone, a transfer of
+one input and 256 outputs cost what an ordinary payment does and bought over a
+hundred times the processor for each unit.
 
 **A block this node asked for is discounted once it has earned it.** It pays
 for its bytes like any other block, and has all of that but one unit handed back
@@ -2859,9 +2930,9 @@ costs its sender nothing to make, and keeps its price.
 A batch SHOULD be charged block by block as it is served, and each block before
 it is read, from what its record says it weighs, so a peer that has spent its
 window is handed what it could afford and the rest is not read, not encoded and
-not queued. Reading a block back off a disk decodes it, so a batch read first
-and priced after costs its reader a decode of every owner in a hundred and
-twenty eight blocks whatever the peer can pay. A short batch is what a peer
+not queued. Reading a block back off a disk reads it, decodes it and hashes its
+transactions, so a batch read first and priced after costs its reader all of
+that for a hundred and twenty eight blocks whatever the peer can pay. A short batch is what a peer
 already gets for heights this node no longer holds, so it asks again for the
 rest.
 

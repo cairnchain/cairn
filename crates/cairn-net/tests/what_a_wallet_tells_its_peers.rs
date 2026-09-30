@@ -79,7 +79,7 @@ fn a_node_opened_for_a_wallet_is_not_written_into_its_peers_books() {
     let wallets_directory = scratch("wallet");
     let owner = SecretKey::from_bytes(&[1; 32]).public_key();
     let (wallet, _) =
-        Node::open_watching(params(), loopback(), &wallets_directory, &[owner]).unwrap();
+        Node::open_watching(params(), loopback(), &wallets_directory, &[owner.into()]).unwrap();
     wallet.connect(wallets_peer.address()).unwrap();
     wait_for("the peer to read the wallet's introduction", || {
         wallets_peer.peers_introduced() >= 1

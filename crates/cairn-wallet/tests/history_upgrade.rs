@@ -152,7 +152,9 @@ fn nothing_migrates_an_unstamped_file() {
     let path = scratch("nomigration");
     an_account(mine).save(&path).unwrap();
     let stamped = std::fs::read(&path).unwrap();
-    let body = &stamped[..stamped.len() - 32];
+    // The account alone: no magic in front, which the release before the
+    // stamp did not write either, and no stamp behind.
+    let body = &stamped[cairn_wallet::history::MAGIC.len()..stamped.len() - 32];
     std::fs::write(&path, body).unwrap();
 
     let (read, why) = History::load(&path);
@@ -185,9 +187,10 @@ fn a_file_from_a_newer_wallet_is_named_as_newer_rather_than_as_damage() {
     let mine = key(1);
     let path = scratch("newer");
 
-    // What a version with one more field would write: the body this build
-    // knows, then something it does not, then the stamp over both.
-    let mut body = an_account(mine).encode();
+    // What a version with one more field would write: the magic and the body
+    // this build knows, then something it does not, then the stamp over all.
+    let mut body = cairn_wallet::history::MAGIC.to_vec();
+    body.extend_from_slice(&an_account(mine).encode());
     body.extend_from_slice(&[0xab; 9]);
     let mut bytes = body.clone();
     bytes.extend_from_slice(hash(Domain::WalletHistory, &body).as_bytes());
@@ -199,5 +202,38 @@ fn a_file_from_a_newer_wallet_is_named_as_newer_rather_than_as_damage() {
         why,
         Some(Discarded::FromANewerVersion),
         "the stamp held, so nothing changed the file"
+    );
+}
+
+/// An account written before a note's owner was the hash of a key is set
+/// aside as exactly that, and not read.
+///
+/// It verifies under its stamp and decodes, and every note it lists is on a
+/// test network this build no longer follows. Nothing told it apart from an
+/// account this build wrote, so a wallet on the new network read it as its
+/// own and counted money that is not on the chain it follows.
+#[test]
+fn an_account_from_before_the_address_is_set_aside_as_such() {
+    use cairn_primitives::hash::{hash, Domain};
+
+    let mine = key(1);
+    let path = scratch("before-the-address");
+
+    // Byte for byte what `save` wrote from the stamp until the address: the
+    // account, then the stamp over it, with nothing in front.
+    let body = an_account(mine).encode();
+    let mut bytes = body.clone();
+    bytes.extend_from_slice(hash(Domain::WalletHistory, &body).as_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let (read, why) = History::load(&path);
+    assert!(
+        read.is_empty(),
+        "an account about a retired network was read as this wallet's own"
+    );
+    assert_eq!(
+        why,
+        Some(Discarded::BeforeTheAddress),
+        "an account from before the address was named as something else"
     );
 }

@@ -48,11 +48,13 @@ fn main() {
     println!("{ROUNDS} verifications in {taken:?}, {verification:.2} us each");
 
     // Reading a key is not verifying with it, and the two get confused because
-    // the expensive half of a verification is the same decompression. Every
-    // note on the wire carries a key and every one of them is decompressed
-    // while the frame is being decoded, which is before any rule has looked at
-    // the frame. So this is what a peer can make a node spend per forty bytes
-    // it sends, and it is worth knowing on its own.
+    // the expensive half of a verification is the same decompression. While a
+    // note carried its owner's key, every note on the wire was decompressed
+    // while the frame was being decoded, before any rule had looked at the
+    // frame, and this was what a peer could make a node spend per forty bytes
+    // it sent. A note carries an address now, and a key is read only for the
+    // input that spends a note, beside its verification: this is what that
+    // input adds to it.
     let keys = a_key_each(ROUNDS);
     let started = Instant::now();
     let mut read = 0usize;

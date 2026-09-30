@@ -79,6 +79,11 @@ fn wallet(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
 }
 
+/// The address of `key` as the site writes it and reads it back.
+fn address_of(key: PublicKey) -> String {
+    cairn_ledger::note::Address::from(key).to_text(params().network)
+}
+
 /// Mines blocks on a private ledger, so a branch can be built off to the side.
 #[derive(Clone)]
 struct Forge {
@@ -276,6 +281,52 @@ fn body(answer: &Response) -> String {
 /// which is the same trade the site's own translation check makes.
 fn says(answer: &Response, field: &str, value: &str) -> bool {
     body(answer).contains(&format!("\"{field}\":{value}"))
+}
+
+/// **Every owner the site writes is the address a wallet on this network
+/// reads, and the search finds an address by that text.**
+///
+/// An owner was a public key, and every page wrote it as sixty four
+/// hexadecimal characters. It is the hash of a key now, written with its
+/// network's prefix and a checksum, and a page that wrote anything else would
+/// hand a person a string no wallet takes: the pages' own reader was held to
+/// the wallet's, and what they wrote was held to nothing.
+#[test]
+fn every_owner_the_site_writes_is_an_address_a_wallet_reads() {
+    let params = params();
+    let miner = wallet(1);
+    let mut forge = Forge::new(params);
+    let blocks = forge.mine_many(&miner, 3);
+    let explorer = explorer(params);
+    feed(&explorer, &blocks);
+    explorer.refresh();
+
+    let text = address_of(miner.public_key());
+    let page = ask(&explorer, &format!("address/{text}"));
+    assert!(
+        says(&page, "address", &format!("\"{text}\"")),
+        "an address page does not name the address it is about the way a wallet writes it: {}",
+        body(&page)
+    );
+    let listed = ask(&explorer, "blocks");
+    assert!(
+        says(&listed, "miner", &format!("\"{text}\"")),
+        "the list of blocks does not name who each paid the way a wallet writes it: {}",
+        body(&listed)
+    );
+    let block = ask(&explorer, "block/1");
+    assert!(
+        body(&block).contains(&format!("\"owner\":\"{text}\"")),
+        "a block's outputs do not name their owner the way a wallet writes it: {}",
+        body(&block)
+    );
+    let found = ask(&explorer, &format!("search?q={text}"));
+    assert!(
+        says(&found, "target", &format!("\"\\/address\\/{text}\"")),
+        "the search does not find an address by the text a wallet shows: {}",
+        body(&found)
+    );
+    explorer.node().shutdown();
 }
 
 /// A transaction is never served under another transaction's identifier.
@@ -497,7 +548,7 @@ fn an_index_that_has_read_nothing_does_not_call_nought_exact() {
 
     // Before the first pass over the chain, which on a real chain is minutes
     // and is exactly when the site is first reachable.
-    let address = miner.public_key().to_string();
+    let address = address_of(miner.public_key());
     let answer = ask(&explorer, &format!("address/{address}"));
     assert!(says(&answer, "balance", "\"0\""));
     assert!(
@@ -1139,14 +1190,16 @@ fn while_the_index_is_still_reading_the_answers_say_so() {
     assert_eq!(note.status, 404);
     assert!(says(&note, "whole", "false"), "{}", body(&note));
 
-    // The search box still guesses, because an address nobody has paid is not
-    // in the index either. What it no longer leaves out is that it guessed
-    // against part of a chain.
+    // The search box used to guess an address here, and took somebody's
+    // transaction for an address holding nothing. An address is written with
+    // its network's prefix and a checksum now, and hexadecimal is not one, so
+    // what it has not reached it says it has not found, and against how much
+    // of the chain.
     let found = ask(&explorer, &format!("search?q={moved}"));
-    assert!(says(&found, "kind", "\"address\""), "{}", body(&found));
+    assert!(says(&found, "kind", "\"unknown\""), "{}", body(&found));
     assert!(
         says(&found, "whole", "false"),
-        "the guess says what it was made against: {}",
+        "the answer says what it was made against: {}",
         body(&found)
     );
 
@@ -1608,7 +1661,7 @@ fn the_notes_an_address_holds_are_paged_and_not_repeated() {
     feed(&explorer, &blocks);
     explorer.refresh();
 
-    let owner = miner.public_key();
+    let owner = address_of(miner.public_key());
     let first = ask(&explorer, &format!("address/{owner}"));
     assert_eq!(first.status, 200, "{}", body(&first));
     assert!(
@@ -2375,7 +2428,10 @@ fn an_address_page_dates_its_movements_without_reading_their_blocks() {
     held.explorer.refresh();
     damage(&held, 3);
 
-    let answer = ask(&held.explorer, &format!("address/{}", miner.public_key()));
+    let answer = ask(
+        &held.explorer,
+        &format!("address/{}", address_of(miner.public_key())),
+    );
     let dated = format!(
         "\"height\":3,\"direction\":\"in\",\"transaction\":\"{}\",\"value\":\"{}\",\"timestamp\":{}",
         blocks[3].coinbase.id(),

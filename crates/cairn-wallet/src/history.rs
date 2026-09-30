@@ -23,9 +23,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use cairn_crypto::PublicKey;
 use cairn_ledger::block::Block;
-use cairn_ledger::note::NoteId;
+use cairn_ledger::note::{Address, NoteId};
 use cairn_primitives::codec::{CodecError, Decode, Encode, Reader};
 use cairn_primitives::hash::{hash, Domain, HASH_LEN};
 use cairn_primitives::{Amount, Hash32};
@@ -506,6 +505,13 @@ pub enum Discarded {
     /// here, and telling somebody their disk is suspect over it would send
     /// them looking at hardware that is fine.
     FromANewerVersion,
+    /// Written, and stamped, by a wallet from before a note's owner was the
+    /// hash of a key.
+    ///
+    /// Whole, and about a test network that has been retired: the notes it
+    /// lists are not on the chain this build follows. Nothing in it can be
+    /// used and nothing is wrong with the disk.
+    BeforeTheAddress,
     /// There and would not open.
     ///
     /// The one case that is not about the bytes, because nothing here got to
@@ -584,7 +590,9 @@ impl History {
     /// found the newest block read in place, and the losing blocks under it
     /// stayed in the account for good. Refused, the next look finds where the
     /// two branches part.
-    pub fn take(&mut self, block: &Block, mine: PublicKey) -> bool {
+    /// `mine` is this wallet's address; a key stands for its own.
+    pub fn take(&mut self, block: &Block, mine: impl Into<Address>) -> bool {
+        let mine = mine.into();
         if block.header.height != self.next {
             return false;
         }
@@ -682,7 +690,7 @@ impl History {
     fn take_transfer(
         &mut self,
         transfer: &cairn_ledger::transaction::Transfer,
-        mine: PublicKey,
+        mine: Address,
         height: u64,
         at: u64,
     ) {
@@ -1188,10 +1196,18 @@ impl History {
         // is simply newer, which is what a downgrade looks like from here.
         //
         // Anything else is a file that was there and is not what was written.
+        //
+        // A file whose stamp holds over a body with no magic in front was
+        // written between the stamp and the address, and what it lists is on
+        // a network this build does not follow.
         let why = if Self::decode(&bytes).is_ok() {
             Discarded::BeforeTheStamp
         } else if Self::stamped(&bytes) {
-            Discarded::FromANewerVersion
+            if bytes.starts_with(MAGIC_STEM) {
+                Discarded::FromANewerVersion
+            } else {
+                Discarded::BeforeTheAddress
+            }
         } else {
             Discarded::DidNotVerify
         };
@@ -1239,7 +1255,7 @@ impl History {
         if hash(Domain::WalletHistory, body).as_bytes() != stamp {
             return None;
         }
-        Self::decode(body).ok()
+        Self::decode(body.strip_prefix(MAGIC.as_slice())?).ok()
     }
 
     /// Writes it beside itself and moves it into place, so a wallet stopped
@@ -1262,13 +1278,14 @@ impl History {
         Self::write(path, &self.snapshot())
     }
 
-    /// What [`History::save`] writes: the account's bytes and the stamp after
-    /// them.
+    /// What [`History::save`] writes: the magic, the account's bytes and the
+    /// stamp after both.
     ///
     /// Apart from the writing, so that a wallet can take it while it holds the
     /// account and write it once it has let go.
     pub(crate) fn snapshot(&self) -> Vec<u8> {
-        let mut bytes = self.encode();
+        let mut bytes = MAGIC.to_vec();
+        self.encode_to(&mut bytes);
         bytes.extend_from_slice(hash(Domain::WalletHistory, &bytes).as_bytes());
         bytes
     }
@@ -1338,6 +1355,18 @@ impl History {
 /// directory holding this many has something wrong with it that another name
 /// would not help.
 const SET_ASIDE_NAMES: u32 = 1000;
+
+/// What the first bytes of the account say it is, and which form.
+///
+/// The first form had none, and it needed one the day a note's owner became
+/// the hash of a key. A file from before that verifies under its stamp and
+/// decodes, and what it describes is notes on a network that has been
+/// retired. Without this it was read as a file from a newer wallet, since the
+/// stamp held over bytes this build could not decode.
+pub const MAGIC: &[u8; 16] = b"cairn history v2";
+
+/// What every form of the account that carries a magic starts with.
+const MAGIC_STEM: &[u8] = b"cairn history v";
 
 /// Writes `bytes` to `partial`, made new, and moves it onto `path`.
 fn write_and_move(partial: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1645,8 +1674,8 @@ mod tests {
     use cairn_ledger::note::{NetworkId, Note};
     use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 
-    fn key(seed: u8) -> PublicKey {
-        SecretKey::from_bytes(&[seed; 32]).public_key()
+    fn key(seed: u8) -> Address {
+        SecretKey::from_bytes(&[seed; 32]).public_key().into()
     }
 
     fn amount(text: &str) -> Amount {
@@ -1655,18 +1684,13 @@ mod tests {
 
     /// [`block`], built on whatever `history` read last, the way a chain
     /// builds it.
-    fn next_block(
-        history: &History,
-        height: u64,
-        to: PublicKey,
-        transfers: Vec<Transfer>,
-    ) -> Block {
+    fn next_block(history: &History, height: u64, to: Address, transfers: Vec<Transfer>) -> Block {
         let mut block = block(height, to, transfers);
         block.header.previous = history.recent.back().copied().unwrap_or(Hash32::ZERO);
         block
     }
 
-    fn block(height: u64, to: PublicKey, transfers: Vec<Transfer>) -> Block {
+    fn block(height: u64, to: Address, transfers: Vec<Transfer>) -> Block {
         Block {
             header: BlockHeader {
                 version: 1,
