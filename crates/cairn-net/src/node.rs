@@ -9858,7 +9858,7 @@ fn paid_and_decoded(
     if !peer.afford_reading(frame, now, || shared.choosing().asked_join(id)) {
         return Ok(None);
     }
-    Ok(Some(Message::decode(frame)?))
+    Ok(Some(Message::from_frame(frame)?))
 }
 
 /// Whether this node lets a message reach the layer that decides about it.
@@ -11976,6 +11976,17 @@ mod peers_and_loops {
             let _ = write_message(&mut self.far, self.node.shared.network(), message);
         }
 
+        /// A frame carrying `body` as it is, for what this build would never
+        /// write itself.
+        fn send_body(&mut self, body: &[u8]) {
+            use std::io::Write as _;
+            let mut frame = Vec::new();
+            self.node.shared.network().as_u32().encode_to(&mut frame);
+            u32::try_from(body.len()).unwrap().encode_to(&mut frame);
+            frame.extend_from_slice(body);
+            let _ = self.far.write_all(&frame);
+        }
+
         /// Whether the node answers with something `wanted` picks out.
         fn hears(&self, wanted: impl Fn(&Message) -> bool) -> bool {
             while let Ok((message, _)) = self.said.recv_timeout(Duration::from_secs(10)) {
@@ -13700,6 +13711,48 @@ mod peers_and_loops {
                  nothing, and dropped on its third"
             );
         }
+    }
+
+    /// A dialled address that answered from protocol nine, laid out as nine
+    /// lays out its introduction, is not charged a miss for it.
+    ///
+    /// Nine's introduction carries the tip's identifier that ten no longer
+    /// has, so it is 32 bytes longer than ten's. It used to be decoded with
+    /// ten's layout before its version was compared, came out a broken frame,
+    /// and was booked as a dial that came to nothing and the host as one to
+    /// refuse. The test above answers with ten's layout, so a node forgetting
+    /// every node one version behind it passed.
+    #[test]
+    fn a_dialled_address_that_answered_in_an_older_versions_layout_is_not_charged_a_miss() {
+        let ours = Handshake {
+            version: PROTOCOL_VERSION,
+            network: ConsensusParams::testnet().network,
+            genesis: Hash32::ZERO,
+            height: 0,
+            total_work: 0,
+            listen: 9_944,
+            nonce: 7,
+            keeps: Keeps::default(),
+        }
+        .encode();
+        let mut nine = vec![1u8];
+        9u32.encode_to(&mut nine);
+        nine.extend_from_slice(&ours[4..40]);
+        nine.extend_from_slice(&[0xAB; 32]);
+        nine.extend_from_slice(&ours[40..]);
+
+        let node = quiet();
+        let dialled = on_its_last_chance(&node, 9_966);
+        let mut line = Line::open(node, Some(dialled));
+        line.send_body(&nine);
+        let ended = line.ends();
+        let node = line.close();
+        assert!(ended, "a peer on protocol nine was kept");
+        assert!(
+            node.shared.book().contains(&dialled),
+            "an address that answered from protocol nine was read as a broken frame, counted \
+             as a dial that came to nothing, and dropped on its third"
+        );
     }
 
     /// A dialled address that took the connection and shut it before saying a

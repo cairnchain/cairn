@@ -1559,11 +1559,18 @@ fn field_burned_in_all(json: &mut Writer, context: &Context<'_>, totals: &Totals
 /// on a first block paying nobody, a reward that was never issued. That
 /// difference less the burn is what the coinbase left unclaimed, which is its
 /// own field. Either is null where it is not known: above what the index has
-/// read, on an index that did not start at the first block, or without the
-/// fees.
+/// read, on an index that did not start at the first block, on an index that
+/// has not yet read this block, or without the fees.
 fn field_destroyed(json: &mut Writer, context: &Context<'_>, block: &Block, fees: Option<Amount>) {
     let params = context.params();
-    let burned = context.index.burned_at(block.header.height);
+    // The index keeps a burn per height and can be half a second behind a
+    // switch, when its figure at this height is the block the node left.
+    let height = block.header.height;
+    let burned = if context.index.height_of(&block.id()) == Some(height) {
+        context.index.burned_at(height)
+    } else {
+        None
+    };
     match burned {
         Some(burned) => json.field_str("destroyed", &burned.as_pebbles().to_string()),
         None => json.field_null("destroyed"),

@@ -343,7 +343,9 @@ fn every_message_variant_refuses_or_round_trips() {
     );
 }
 
-/// A message this node would send comes back the same through its own wire.
+/// A message this node would send comes back the same through its own wire,
+/// and an introduction from another protocol version comes back naming that
+/// version, which is all of it a node reads (see `Message::from_frame`).
 #[test]
 fn a_framed_message_survives_the_round_trip_over_the_wire() {
     let campaign = Campaign::named("net: framing");
@@ -356,11 +358,22 @@ fn a_framed_message_survives_the_round_trip_over_the_wire() {
 
         let mut source = Feeding::new(framed);
         match read_message(&mut source, NetworkId::TESTNET, MAX_FRAME_BYTES) {
-            Ok(Incoming::Message(back)) => assert_eq!(
-                back.encode(),
-                message.encode(),
-                "a message changed on its way through the wire (case {case})"
-            ),
+            Ok(Incoming::Message(back)) => match (&message, &back) {
+                (Message::Hello(sent), Message::Hello(read))
+                | (Message::Welcome(sent), Message::Welcome(read))
+                    if sent.version != PROTOCOL_VERSION =>
+                {
+                    assert_eq!(
+                        read.version, sent.version,
+                        "an introduction from another version lost its version (case {case})"
+                    );
+                }
+                _ => assert_eq!(
+                    back.encode(),
+                    message.encode(),
+                    "a message changed on its way through the wire (case {case})"
+                ),
+            },
             other => panic!("the wire would not read back what it wrote: {other:?} (case {case})"),
         }
     });

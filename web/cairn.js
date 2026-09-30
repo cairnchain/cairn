@@ -1210,9 +1210,11 @@ async function block(reference, parameters) {
     row(t('field.reward'), cairn(data.reward) + ' CAIRN'),
     row(t('field.fees'), data.fees === null ? t('field.unknown') : cairn(data.fees) + ' CAIRN'),
     row(t('destroyed.block'), data.destroyed === null ? t('field.unknown') : cairn(data.destroyed) + ' CAIRN', el('span', { class: 'row-note', text: ' ' + t('destroyed.block.note') })),
-    data.unclaimed && data.unclaimed !== '0'
-      ? row(t('destroyed.unclaimed'), cairn(data.unclaimed) + ' CAIRN', el('span', { class: 'row-note', text: ' ' + t('destroyed.unclaimed.note') }))
-      : null,
+    data.unclaimed === null
+      ? row(t('destroyed.unclaimed'), t('field.unknown'), el('span', { class: 'row-note', text: ' ' + t('destroyed.unclaimed.note') }))
+      : data.unclaimed !== '0'
+        ? row(t('destroyed.unclaimed'), cairn(data.unclaimed) + ' CAIRN', el('span', { class: 'row-note', text: ' ' + t('destroyed.unclaimed.note') }))
+        : null,
     el(
       'div',
       { class: 'row lv-technical' },

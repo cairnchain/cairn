@@ -1085,11 +1085,6 @@ pub fn local_handshake(chain: &ChainStore, keeps: Keeps, listen: u16, nonce: u64
 }
 
 fn accept_handshake(chain: &ChainStore, theirs: &Handshake) -> Result<(), DropReason> {
-    if theirs.version != PROTOCOL_VERSION {
-        return Err(DropReason::WrongVersion {
-            theirs: theirs.version,
-        });
-    }
     if theirs.network != chain.params().network {
         return Err(DropReason::WrongNetwork {
             theirs: theirs.network,
@@ -1128,7 +1123,17 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
     if peer.greeted {
         return Reaction::close(DropReason::RepeatedHandshake);
     }
-    // Before anything else, and before the address is written down: a node
+    // The version before any other field, because an introduction from
+    // another version is read no further than its version (see
+    // `Message::from_frame`), and what the rest of it says, the nonce below
+    // included, is not what that peer sent. A node reaching itself speaks its
+    // own version, so it still meets the check after this one.
+    if theirs.version != PROTOCOL_VERSION {
+        return Reaction::close(DropReason::WrongVersion {
+            theirs: theirs.version,
+        });
+    }
+    // Before the rest, and before the address is written down: a node
     // that reaches itself would otherwise spend one of its few connections on
     // itself, and keep its own address in the book to try again later.
     if theirs.nonce == local.nonce {

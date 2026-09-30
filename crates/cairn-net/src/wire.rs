@@ -353,7 +353,9 @@ pub fn read_message<R: Read>(
     most: usize,
 ) -> Result<Incoming, WireError> {
     match read_frame(reader, network, most)? {
-        Framed::Frame(body) => Ok(Incoming::Message(crate::message::Message::decode(&body)?)),
+        Framed::Frame(body) => Ok(Incoming::Message(crate::message::Message::from_frame(
+            &body,
+        )?)),
         Framed::Quiet => Ok(Incoming::Quiet),
     }
 }

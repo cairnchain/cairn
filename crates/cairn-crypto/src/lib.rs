@@ -187,26 +187,55 @@ fn is_canonically_encoded(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PublicKey([u8; PUBLIC_KEY_LEN]);
 
+/// The point `bytes` encode, once it has passed the three refusals.
+fn decoded(bytes: &[u8; PUBLIC_KEY_LEN]) -> Result<VerifyingKey, CryptoError> {
+    if !is_canonically_encoded(bytes) {
+        return Err(CryptoError::NonCanonicalPublicKey);
+    }
+    let key = VerifyingKey::from_bytes(bytes).map_err(|_| CryptoError::MalformedPublicKey)?;
+    if key.is_weak() {
+        return Err(CryptoError::WeakPublicKey);
+    }
+    // And the rest of the keys nobody holds. `is_weak` is exactly
+    // `is_small_order`, so it catches the eight torsion points themselves
+    // and nothing else: a real key with one of them added is not small
+    // order, and no signer can reach it. Kept as its own refusal rather
+    // than folded into the one above, because the two are different
+    // sentences and whoever reads the error is looking for a different
+    // thing.
+    if !key.to_edwards().is_torsion_free() {
+        return Err(CryptoError::UnusablePublicKey);
+    }
+    Ok(key)
+}
+
 impl PublicKey {
     pub fn from_bytes(bytes: &[u8; PUBLIC_KEY_LEN]) -> Result<Self, CryptoError> {
-        if !is_canonically_encoded(bytes) {
-            return Err(CryptoError::NonCanonicalPublicKey);
-        }
-        let key = VerifyingKey::from_bytes(bytes).map_err(|_| CryptoError::MalformedPublicKey)?;
-        if key.is_weak() {
-            return Err(CryptoError::WeakPublicKey);
-        }
-        // And the rest of the keys nobody holds. `is_weak` is exactly
-        // `is_small_order`, so it catches the eight torsion points themselves
-        // and nothing else: a real key with one of them added is not small
-        // order, and no signer can reach it. Kept as its own refusal rather
-        // than folded into the one above, because the two are different
-        // sentences and whoever reads the error is looking for a different
-        // thing.
-        if !key.to_edwards().is_torsion_free() {
-            return Err(CryptoError::UnusablePublicKey);
-        }
-        Ok(Self(*bytes))
+        decoded(bytes).map(|_| Self(*bytes))
+    }
+
+    /// Reads `bytes` as a key and verifies `signature` over `message` under
+    /// it, decoding the point once.
+    ///
+    /// The same answer as [`Self::from_bytes`] followed by [`Self::verify`],
+    /// refusal for refusal and in the same order, so a key that is refused is
+    /// refused whatever its signature says. What it saves is the second
+    /// decoding: `verify` decodes the point again rather than holding it,
+    /// which is right for a key kept and wrong for one read to verify one
+    /// signature, which is what every input a node checks presents.
+    ///
+    /// # Errors
+    ///
+    /// Whichever refusal [`Self::from_bytes`] makes of the key, and then
+    /// [`CryptoError::BadSignature`].
+    pub fn verify_bytes(
+        bytes: &[u8; PUBLIC_KEY_LEN],
+        message: &[u8],
+        signature: &Signature,
+    ) -> Result<(), CryptoError> {
+        decoded(bytes)?
+            .verify_strict(message, &signature.0)
+            .map_err(|_| CryptoError::BadSignature)
     }
 
     pub fn to_bytes(self) -> [u8; PUBLIC_KEY_LEN] {

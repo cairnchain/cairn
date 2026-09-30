@@ -1097,7 +1097,9 @@ fn a_priced_pools_rates_are_what_a_miner_keeps_after_every_move() {
 /// one no block may carry. The margin a wallet quotes is exactly that place.
 #[test]
 fn a_pooled_payment_whose_note_falls_is_kept_when_it_paid_the_margin() {
-    let params = priced().with_hot_capacity(16).with_max_evictions(16);
+    // A cap above the coinbase's sixteen, as every network's is: at sixteen a
+    // full tier leaves a block no place for a payment, and the pool takes none.
+    let params = priced().with_hot_capacity(16).with_max_evictions(32);
     let miner = wallet(1);
     let (mut store, notes) = funded_widely_under(params, 16, &miner);
     assert_eq!(store.state().hot_len(), 16, "the tier is full");
@@ -1609,5 +1611,192 @@ fn the_reserve_is_what_a_block_spends_before_its_first_transfer() {
         "a typical block head is {} bytes and the reserve is {reserved}, so the reserve \
          is no longer the worst case",
         typical.encode().len()
+    );
+}
+
+/// The place price is what the bytes a cold witness adds to a spend cost at
+/// the pool's floor rate, rounded up to a thousand pebbles, for a note in a
+/// tree of height seventeen.
+///
+/// Both constants say they are changed together, and they live in two
+/// crates: `PLACE_PRICE` in the ledger, measured at `MIN_FEE_PER_WEIGHT` here.
+/// Nothing tied them, so either could move alone and every test passed.
+#[test]
+fn the_place_price_is_a_cold_witness_at_the_floor_rate() {
+    let id = NoteId::new(cairn_primitives::Hash32::ZERO, 0);
+    let note = Note::new(pebbles(1), wallet(1).public_key());
+    let proof = cairn_accumulator::ForestProof {
+        siblings: vec![cairn_primitives::Hash32::ZERO; 17],
+    };
+    let hot = Input::hot(id).encode().len();
+    let cold = Input::cold(id, note, 0, proof).encode().len();
+    let grown = cold - hot;
+    assert_eq!(
+        grown, 596,
+        "a cold witness in a tree of height seventeen no longer adds the 596 bytes the \
+         place price was measured on"
+    );
+    let price = (u64::try_from(grown).unwrap() * MIN_FEE_PER_WEIGHT).div_ceil(1_000) * 1_000;
+    assert_eq!(
+        PLACE_PRICE.as_pebbles(),
+        price,
+        "the place price is not what a cold witness costs at the pool's floor rate"
+    );
+}
+
+/// The ordinary rules with devnet's tier, eviction cap and place price, and
+/// rewards spendable at once.
+fn devnet_shape() -> ConsensusParams {
+    let devnet = ConsensusParams::for_network("devnet").unwrap();
+    let rules = params()
+        .with_hot_capacity(devnet.hot_capacity)
+        .with_max_evictions(devnet.max_evictions_per_block)
+        .with_place_price(devnet.place_price);
+    assert_eq!(
+        rules.max_outputs_per_transfer,
+        devnet.max_outputs_per_transfer
+    );
+    assert_eq!(rules.max_coinbase_outputs, devnet.max_coinbase_outputs);
+    rules
+}
+
+/// A block paying the whole reward to `miner` in as many notes as a coinbase
+/// may make, carrying nothing else, and the notes it paid.
+fn a_full_coinbase(
+    store: &mut ChainStore,
+    rules: &ConsensusParams,
+    miner: &SecretKey,
+    clock: u64,
+) -> Vec<(NoteId, Note)> {
+    let height = store.state().next_height().unwrap();
+    let count = rules.max_coinbase_outputs;
+    let each = rules.reward_at(height).as_pebbles() / u64::try_from(count).unwrap();
+    let outputs: Vec<Note> = (0..count)
+        .map(|_| Note::new(pebbles(each), miner.public_key()))
+        .collect();
+    let coinbase = CoinbaseTransaction::new(height, outputs.clone());
+    let block = assemble_block(store.state(), coinbase, Vec::new(), rules, clock, 0).unwrap();
+    let block = mine_block(block, ATTEMPTS).unwrap();
+    let paid = outputs
+        .into_iter()
+        .zip(0u32..)
+        .map(|(note, index)| (NoteId::new(block.coinbase.id(), index), note))
+        .collect();
+    store.add_block(block, NOW).unwrap();
+    paid
+}
+
+/// A devnet-shaped chain whose tier is full, and the notes of each block,
+/// oldest first.
+fn a_full_devnet_tier(miner: &SecretKey) -> (ChainStore, Vec<Vec<(NoteId, Note)>>, u64) {
+    let rules = devnet_shape();
+    let mut store = ChainStore::new(rules);
+    let mut clock = 1_000;
+    let mut blocks = Vec::new();
+    while store.state().hot_len() < rules.hot_capacity {
+        clock += 600;
+        blocks.push(a_full_coinbase(&mut store, &rules, miner, clock));
+    }
+    (store, blocks, clock)
+}
+
+/// Spends `spent` into `outputs` notes of a thousand pebbles each, the rest
+/// left as a fee far above any floor.
+fn fanned_out(
+    rules: &ConsensusParams,
+    spent: &[(NoteId, Note)],
+    owner: &SecretKey,
+    outputs: usize,
+) -> Transfer {
+    let inputs = spent.iter().map(|(id, _)| Input::hot(*id)).collect();
+    let notes = (0..outputs)
+        .map(|_| Note::new(pebbles(1_000), wallet(9).public_key()))
+        .collect();
+    let mut transfer = Transfer::new(inputs, notes);
+    for (index, (_, note)) in (0u32..).zip(spent) {
+        transfer.sign_input(rules.network, index, note, owner);
+    }
+    transfer
+}
+
+/// A transfer taking more places than a block has for transfers once the
+/// tier is full is refused, naming both numbers, and one taking exactly that
+/// many is taken.
+///
+/// A full tier leaves a block its eviction cap less the coinbase it keeps
+/// room for: on devnet thirty two less sixteen. A transfer may make two
+/// hundred and fifty six notes, and the pool asked a transfer's bytes against
+/// a block's room and never its places, so one spending a note into forty was
+/// taken, ranked above every payment, never carried by any block and never
+/// paid for, while its sender was told it was on its way. Nothing asked it.
+#[test]
+fn a_transfer_taking_more_places_than_a_full_tier_leaves_a_block_is_refused() {
+    let miner = wallet(1);
+    let (mut store, blocks, _) = a_full_devnet_tier(&miner);
+    let rules = *store.params();
+    let limit = rules.max_evictions_per_block - rules.max_coinbase_outputs;
+    assert_eq!(store.places_for_transfers(), limit);
+    let newest = blocks.last().unwrap();
+
+    let wide = fanned_out(&rules, &newest[..1], &miner, limit + 24);
+    assert_eq!(
+        store.accept_transfer(wide),
+        Err(TransferError::TooManyPlacesForABlock {
+            places: limit + 23,
+            limit,
+        }),
+        "a transfer no block can carry on a full tier was not refused as one"
+    );
+    assert_eq!(store.pool_len(), 0, "and nothing was kept");
+
+    let fitting = fanned_out(&rules, &newest[1..3], &miner, limit + 2);
+    assert_eq!(
+        store.accept_transfer(fitting),
+        Ok(true),
+        "a transfer taking exactly the places a full tier leaves a block was refused"
+    );
+}
+
+/// A pooled transfer whose notes fall out of the tier, so that it frees
+/// nothing and takes more places than a block has for it, is dropped, and
+/// one still at the limit is kept.
+///
+/// A note spent after it fell gives no place back, so the same transfer
+/// takes more places than it did when it arrived. The pool asks its floor
+/// again then and nothing else, so one taken at the limit stayed once its
+/// notes fell, with no block able to carry it.
+#[test]
+fn a_pooled_transfer_whose_notes_fall_past_the_limit_is_dropped() {
+    let miner = wallet(1);
+    let (mut store, blocks, clock) = a_full_devnet_tier(&miner);
+    let rules = *store.params();
+    let limit = rules.max_evictions_per_block - rules.max_coinbase_outputs;
+    let oldest = blocks.first().unwrap();
+    let newest = blocks.last().unwrap();
+
+    let transfer = fanned_out(&rules, &oldest[..2], &miner, limit + 2);
+    let id = transfer.id();
+    assert_eq!(store.accept_transfer(transfer), Ok(true));
+    // Its twin spending notes that stay, and so still at the limit after.
+    let staying = fanned_out(&rules, &newest[..2], &miner, limit + 2);
+    let staying_id = staying.id();
+    assert_eq!(store.accept_transfer(staying), Ok(true));
+
+    a_full_coinbase(&mut store, &rules, &miner, clock + 600);
+    assert!(
+        oldest[..2]
+            .iter()
+            .all(|(spent, _)| store.state().hot_note(spent).is_none()
+                && store.state().within_grace(spent).is_some()),
+        "the premise: the notes it spends fell, and can still be spent"
+    );
+    assert!(
+        store.pooled(&id).is_none(),
+        "a transfer whose notes fell, taking more places than a full tier leaves a block, \
+         was kept"
+    );
+    assert!(
+        store.pooled(&staying_id).is_some(),
+        "a transfer taking exactly the places a full tier leaves a block was dropped"
     );
 }

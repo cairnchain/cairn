@@ -29,7 +29,9 @@ use std::time::{Duration, Instant};
 
 use cairn_ledger::note::NetworkId;
 use cairn_net::message::{Joining, Message, JOIN_PART_BYTES};
-use cairn_net::wire::{read_message, write_message, WireError, MAX_FRAME_BYTES, PROGRESS_BYTES};
+use cairn_net::wire::{
+    read_message, write_message, Incoming, WireError, MAX_FRAME_BYTES, PROGRESS_BYTES,
+};
 
 // ---------------------------------------------------------------------------
 // CLAIM 2: the allowance window is kept per ADDRESS.
@@ -92,11 +94,13 @@ fn an_honest_slow_link_carries_a_join_piece_to_the_end() {
     let outcome = read_message(&mut slow, network, MAX_FRAME_BYTES);
     let took = started.elapsed();
     let delivered = slow.delivered;
-    // The bytes are zeros rather than a message, so what comes back is a
-    // decode failure. That is the point: the frame was carried to the end
-    // instead of being cut off partway, which is what `Stalled` would say.
+    // The bytes are zeros rather than a message, so what comes back is
+    // whatever zeros read as: an introduction naming protocol version nought,
+    // which is read no further than its version. That is the point: the frame
+    // was carried to the end instead of being cut off partway, which is what
+    // `Stalled` would say.
     assert!(
-        matches!(outcome, Err(WireError::Malformed(_))),
+        matches!(outcome, Ok(Incoming::Message(Message::Hello(_)))),
         "a 20 KiB/s honest sender was cut off after {took:?} with {delivered} \
          of {body} bytes delivered: {outcome:?}"
     );

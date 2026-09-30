@@ -772,6 +772,15 @@ pub enum TransferError {
     /// be refused as `BlockTooLarge` instead.
     #[error("transfer takes {bytes} bytes, more than the {limit} a block carries")]
     TooLargeForABlock { bytes: usize, limit: usize },
+    /// Raised by the pool, never by a block rule: the places a transfer takes
+    /// in the hot set are more than the next block has for transfers, the
+    /// room the tier has left plus its eviction cap, less the coinbase's. A
+    /// block carrying it would be refused as `TooManyEvictions`.
+    #[error(
+        "transfer takes {places} places in the hot set, more than the {limit} the next block \
+         has for transfers"
+    )]
+    TooManyPlacesForABlock { places: usize, limit: usize },
     /// Raised by the pool, never by a block rule: what a block may carry is
     /// not priced, what a node will carry for a stranger is.
     #[error("transfer pays {fee}, below the {floor} its bytes and new notes ask")]
@@ -977,10 +986,12 @@ impl Pending {
     /// here, as a signature that does not verify. Only whoever chose to be
     /// paid at the hash of bytes that are not a key can present one, and
     /// nobody can sign under it.
+    ///
+    /// The point is decoded once for both questions. Reading the key and then
+    /// verifying with it decoded it twice, since a `PublicKey` keeps the bytes
+    /// and decodes them again to verify.
     fn holds(&self) -> bool {
-        PublicKey::from_bytes(&self.key)
-            .and_then(|key| key.verify(self.message.as_bytes(), &self.signature))
-            .is_ok()
+        PublicKey::verify_bytes(&self.key, self.message.as_bytes(), &self.signature).is_ok()
     }
 }
 
@@ -1360,7 +1371,7 @@ fn resolve_transfer(
     // Only a note spent out of the hot set gives a place back. One spent
     // through the grace window or with a proof had already left the tier, so
     // every output beside it is a note pushed out of a full one.
-    let places = transfer.outputs.len().saturating_sub(from_hot.len());
+    let places = places_taken(transfer.outputs.len(), from_hot.len());
     let burn = params
         .burn_for(places)
         .ok_or(TransferError::ValueOverflow)?;
@@ -1374,6 +1385,19 @@ fn resolve_transfer(
         spent_hot: from_hot,
         spent_cold: from_cold,
     })
+}
+
+/// The places a transfer making `outputs` notes takes in the hot set, when
+/// `freed` of the notes it spends were in it: its outputs less those, or none
+/// when it gives room back.
+///
+/// One count for the rule and for everything that quotes it, as
+/// [`ConsensusParams::burn_for`] is one price: the pool's floor, its ranking
+/// and a wallet's quote read it here, so none of them can count a place the
+/// block does not.
+#[must_use]
+pub const fn places_taken(outputs: usize, freed: usize) -> usize {
+    outputs.saturating_sub(freed)
 }
 
 /// What applying a block body does to the state, computed without mutation.

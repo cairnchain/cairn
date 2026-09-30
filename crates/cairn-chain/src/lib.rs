@@ -176,9 +176,12 @@ const RATE_SCALE: u128 = 1 << 16;
 /// note that falls between the quote and the block. A wallet quotes a place
 /// over the floor for each note that can fall, and is told the number when it
 /// is short, which is the answer to a price that moves.
+///
+/// Counted by the ledger's [`cairn_ledger::validation::places_taken`], which
+/// is the count the block burns for, so the two cannot drift apart.
 #[must_use]
 pub fn places_taken(transfer: &Transfer, freed: usize) -> usize {
-    transfer.outputs.len().saturating_sub(freed)
+    cairn_ledger::validation::places_taken(transfer.outputs.len(), freed)
 }
 
 /// What carrying a transfer takes from a block: its bytes, plus a share of
@@ -529,11 +532,24 @@ impl ChainError {
     /// settles may be remembered against one: a timestamp out of range, a
     /// parent that is not there, work that was not done.
     ///
-    /// Anything the body decides (a signature, a root that does not match, a
-    /// coinbase that overpays) says nothing about another body carrying the
-    /// same identifier. Remembering that would let anyone lock the real block
-    /// out of a node by sending a corrupted twin first, at the cost of copying
-    /// it: the twin inherits the real block's work, so it is free.
+    /// A root that does not match is a verdict on a twin: the door asks it
+    /// of every body before anything else looks at one, and it says nothing
+    /// about the real body under the same identifier. Remembering it would
+    /// let anyone lock the real block out of a node by sending a corrupted
+    /// twin first, at the cost of copying it: the twin inherits the real
+    /// block's work, so it is free.
+    ///
+    /// Every other verdict on a body is reached only by a body whose root
+    /// matches its header, and the root covers every byte of the body, so
+    /// barring a collision of the hash it is the one body that header names.
+    /// Those that depend on nothing but the parent state and the body (a
+    /// signature, a key that is not the owner's, places left unpaid, a
+    /// coinbase that overpays, a state root that does not match) could be
+    /// remembered against the identifier for that reason. They are not, and
+    /// a mined block that fails one is validated again whenever a peer
+    /// offers it, which is what declining to remember costs. A verdict that
+    /// depends on the reader must never be: a proof this node no longer
+    /// holds (`MissingProof`), and the two below.
     ///
     /// Listed rather than excluded, so a failure added later is not condemned
     /// by default. Refusing to remember costs one validation. Remembering
@@ -1642,8 +1658,23 @@ impl ChainStore {
         let cost = pooled_cost(bytes, transfer.inputs.len());
 
         let freed = outcome.spent_hot.len();
+        let places = places_taken(&transfer, freed);
+
+        // The same blockade in places rather than bytes. A full tier leaves a
+        // block its eviction cap less the coinbase for transfers, sixteen on
+        // devnet, and a transfer may make two hundred and fifty six notes:
+        // one taking more was taken, ranked on the fee it promised, and never
+        // carried or paid while the tier stayed full.
+        let most = self.places_for_transfers();
+        if places > most {
+            return Err(TransferError::TooManyPlacesForABlock {
+                places,
+                limit: most,
+            });
+        }
+
         let weight = transfer_weight(&transfer, bytes, freed);
-        let floor = fee_floor(bytes, places_taken(&transfer, freed), &self.params);
+        let floor = fee_floor(bytes, places, &self.params);
         if outcome.fee < floor {
             return Err(TransferError::FeeBelowFloor {
                 fee: outcome.fee,
@@ -1756,6 +1787,23 @@ impl ChainStore {
         max_block_bytes.saturating_sub(Self::BLOCK_OVERHEAD_BYTES)
     }
 
+    /// How many notes the next block may add to the hot set for its
+    /// transfers before it would push out more than the rules let one block
+    /// push.
+    ///
+    /// Room the tier itself still has counts, and the coinbase is allowed for
+    /// as if it were full, because it is not known yet. What `selection`
+    /// packs to, and what `accept_transfer` and `prune_pool` hold a transfer
+    /// to, so the pool keeps nothing the node's own miner could never pick.
+    #[must_use]
+    pub fn places_for_transfers(&self) -> usize {
+        self.params
+            .hot_capacity
+            .saturating_sub(self.state.hot_len())
+            .saturating_add(self.params.max_evictions_per_block)
+            .saturating_sub(self.params.max_coinbase_outputs)
+    }
+
     /// Transfers a miner can put in the next block, and what of their fees
     /// its coinbase may claim: what they gave up, less what their places
     /// burn.
@@ -1789,16 +1837,7 @@ impl ChainStore {
         // What is left for transfers once the rest of the block is allowed for.
         let mut room = Self::room_for_transfers(self.params.max_block_bytes);
 
-        // How many notes the block may still add to the hot set before it
-        // would push out more than the rules let one block push. Room the tier
-        // itself still has counts, and the coinbase is allowed for as if it
-        // were full, because it is not known yet.
-        let mut places = self
-            .params
-            .hot_capacity
-            .saturating_sub(self.state.hot_len())
-            .saturating_add(self.params.max_evictions_per_block)
-            .saturating_sub(self.params.max_coinbase_outputs);
+        let mut places = self.places_for_transfers();
 
         for transfer in ordered {
             if chosen.len() >= limit {
@@ -1940,6 +1979,7 @@ impl ChainStore {
     /// nothing here assumes which.
     fn prune_pool(&mut self) {
         let params = self.params;
+        let most = self.places_for_transfers();
         let state = &self.state;
         let mut ranked: BTreeSet<(u128, Hash32)> = BTreeSet::new();
         let mut spenders: BTreeMap<NoteId, Hash32> = BTreeMap::new();
@@ -1978,6 +2018,12 @@ impl ChainStore {
                     // past it, and waiting is what a note falling takes.
                     let places = places_taken(&held.transfer, freed);
                     if outcome.fee < fee_floor(held.bytes, places, &params) {
+                        return false;
+                    }
+                    // And the places against what a block has for them, for
+                    // the same reason: a note that fell gives no place back,
+                    // so a transfer taken at the limit is past it now.
+                    if places > most {
                         return false;
                     }
                     held.fee = outcome.fee;

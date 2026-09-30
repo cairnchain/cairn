@@ -457,6 +457,83 @@ fn a_transaction_is_never_served_under_another_ones_identifier() {
     assert!(says(&answer, "id", &format!("\"{}\"", theirs.id())));
 }
 
+/// A block's page never shows what a block on a branch the node left
+/// destroyed at the same height.
+///
+/// The index keeps what each height burned and is refreshed every half
+/// second, and the page read that figure by height alone. For the half
+/// second after a switch, the winning block at that height was printed with
+/// the losing block's burn, and what its coinbase left unclaimed was worked
+/// out from one branch's burn and the other's coinbase. The page's siblings
+/// ask whether the index read this block before trusting it; this did not,
+/// and nothing switched branches under it.
+#[test]
+fn a_block_is_not_shown_with_the_burn_of_the_block_it_replaced() {
+    let price = cairn_ledger::validation::PLACE_PRICE;
+    let params = params().with_place_price(price);
+    let miner = wallet(1);
+    let rival = wallet(9);
+
+    let mut base = Forge::new(params);
+    let common = base.mine_many(&miner, 3);
+
+    // The branch that loses carries a payment taking one place, so its block
+    // at height three burns the price.
+    let (id, note) = reward(&common, 0);
+    let fee = price.as_pebbles() + 1_000;
+    let half = note.value.as_pebbles() / 2;
+    let mut paying = Transfer::new(
+        vec![Input::hot(id)],
+        vec![
+            Note::new(Amount::from_pebbles(half).unwrap(), wallet(3).public_key()),
+            Note::new(
+                Amount::from_pebbles(note.value.as_pebbles() - half - fee).unwrap(),
+                miner.public_key(),
+            ),
+        ],
+    );
+    paying.sign_input(params.network, 0, &note, &miner);
+    let mut losing = base.fork();
+    let lost = vec![losing.carrying(&miner, vec![paying])];
+    let mut winning = base.fork();
+    let won = winning.mine_many(&rival, 2);
+
+    let explorer = explorer(params);
+    feed(&explorer, &common);
+    feed(&explorer, &lost);
+    explorer.refresh();
+    let burn = format!("\"{}\"", price.as_pebbles());
+    let before = ask(&explorer, "block/3");
+    assert!(
+        says(&before, "destroyed", &burn),
+        "the premise: the losing block is shown burning the price: {}",
+        body(&before)
+    );
+
+    // The rival branch wins, and the index has not read it yet.
+    feed(&explorer, &won);
+    assert_eq!(explorer.node().height(), Some(4), "the rival branch won");
+    let between = ask(&explorer, "block/3");
+    assert!(
+        says(&between, "id", &format!("\"{}\"", won[0].id())),
+        "the premise: the page is the winning block's: {}",
+        body(&between)
+    );
+    assert!(
+        says(&between, "destroyed", "null") && says(&between, "unclaimed", "null"),
+        "the winning block was shown with the burn of the block it replaced: {}",
+        body(&between)
+    );
+
+    explorer.refresh();
+    let after = ask(&explorer, "block/3");
+    assert!(
+        says(&after, "destroyed", "\"0\""),
+        "once the index has read it, the winning block says it destroyed nothing: {}",
+        body(&after)
+    );
+}
+
 /// A note from a branch this node has left is not reported as sitting safely
 /// in the cold set.
 ///

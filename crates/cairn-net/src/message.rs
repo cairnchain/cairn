@@ -69,7 +69,9 @@ use cairn_primitives::Hash32;
 /// refuses every block of ten that carries a transfer; the draw hashes under a
 /// domain of its own, so the two ask a chain different questions; and the
 /// handshake no longer carries the tip nothing read, so neither can read the
-/// other's introduction.
+/// rest of the other's introduction. Each reads the version that opens it,
+/// which is why an introduction's version is compared before anything after
+/// it is decoded: see [`Message::from_frame`].
 pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Identifiers one announcement may carry.
@@ -193,6 +195,9 @@ fn claimed(reader: &mut Reader<'_>) -> Result<bool, CodecError> {
 }
 
 /// What a node tells a peer about itself when the connection opens.
+///
+/// The version comes first, and of an introduction from another version it
+/// is the only field read: see [`Message::from_frame`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handshake {
     pub version: u32,
@@ -564,6 +569,52 @@ impl Message {
             | Self::GetHeaders { .. } => 0,
         };
         carried.saturating_add(OVERHEAD)
+    }
+
+    /// Reads the body of one frame, an introduction's version before the rest
+    /// of it.
+    ///
+    /// A handshake's version is its first field, and what follows it is laid
+    /// out as the sender's version lays it out. Nine carried the tip's
+    /// identifier that ten dropped, so either read the other's introduction
+    /// 32 bytes short or long, and a frame that cannot be read is a peer that
+    /// is broken or probing, whose host is refused. That is the one refusal a
+    /// node on another version must not meet, so the version is compared
+    /// first, and an introduction from any other is read no further: it comes
+    /// back as a handshake naming that version and nothing else, which is
+    /// refused on its version alone.
+    ///
+    /// Anything else, this version's introductions included, is read whole by
+    /// [`Decode::decode`].
+    ///
+    /// # Errors
+    ///
+    /// When the body is not a message this version reads, or an introduction
+    /// too short to name its version.
+    pub fn from_frame(body: &[u8]) -> Result<Self, CodecError> {
+        let mut reader = Reader::new(body);
+        let tag = u8::decode_from(&mut reader)?;
+        if tag <= 1 {
+            let version = u32::decode_from(&mut reader)?;
+            if version != PROTOCOL_VERSION {
+                let named = Handshake {
+                    version,
+                    network: NetworkId::new(0),
+                    genesis: Hash32::ZERO,
+                    height: 0,
+                    total_work: 0,
+                    listen: 0,
+                    nonce: 0,
+                    keeps: Keeps::default(),
+                };
+                return Ok(if tag == 0 {
+                    Self::Hello(named)
+                } else {
+                    Self::Welcome(named)
+                });
+            }
+        }
+        Self::decode(body)
     }
 
     const fn tag(&self) -> u8 {
