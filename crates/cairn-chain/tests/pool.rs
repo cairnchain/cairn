@@ -1614,6 +1614,36 @@ fn the_reserve_is_what_a_block_spends_before_its_first_transfer() {
     );
 }
 
+/// The place price is what the bytes a cold witness adds to a spend cost at
+/// the pool's floor rate, rounded up to a thousand pebbles, for a note in a
+/// tree of height seventeen.
+///
+/// Both constants say they are changed together, and they live in two
+/// crates: `PLACE_PRICE` in the ledger, measured at `MIN_FEE_PER_WEIGHT` here.
+/// Nothing tied them, so either could move alone and every test passed.
+#[test]
+fn the_place_price_is_a_cold_witness_at_the_floor_rate() {
+    let id = NoteId::new(cairn_primitives::Hash32::ZERO, 0);
+    let note = Note::new(pebbles(1), wallet(1).public_key());
+    let proof = cairn_accumulator::ForestProof {
+        siblings: vec![cairn_primitives::Hash32::ZERO; 17],
+    };
+    let hot = Input::hot(id).encode().len();
+    let cold = Input::cold(id, note, 0, proof).encode().len();
+    let grown = cold - hot;
+    assert_eq!(
+        grown, 596,
+        "a cold witness in a tree of height seventeen no longer adds the 596 bytes the \
+         place price was measured on"
+    );
+    let price = (u64::try_from(grown).unwrap() * MIN_FEE_PER_WEIGHT).div_ceil(1_000) * 1_000;
+    assert_eq!(
+        PLACE_PRICE.as_pebbles(),
+        price,
+        "the place price is not what a cold witness costs at the pool's floor rate"
+    );
+}
+
 /// The ordinary rules with devnet's tier, eviction cap and place price, and
 /// rewards spendable at once.
 fn devnet_shape() -> ConsensusParams {

@@ -1371,7 +1371,7 @@ fn resolve_transfer(
     // Only a note spent out of the hot set gives a place back. One spent
     // through the grace window or with a proof had already left the tier, so
     // every output beside it is a note pushed out of a full one.
-    let places = transfer.outputs.len().saturating_sub(from_hot.len());
+    let places = places_taken(transfer.outputs.len(), from_hot.len());
     let burn = params
         .burn_for(places)
         .ok_or(TransferError::ValueOverflow)?;
@@ -1385,6 +1385,19 @@ fn resolve_transfer(
         spent_hot: from_hot,
         spent_cold: from_cold,
     })
+}
+
+/// The places a transfer making `outputs` notes takes in the hot set, when
+/// `freed` of the notes it spends were in it: its outputs less those, or none
+/// when it gives room back.
+///
+/// One count for the rule and for everything that quotes it, as
+/// [`ConsensusParams::burn_for`] is one price: the pool's floor, its ranking
+/// and a wallet's quote read it here, so none of them can count a place the
+/// block does not.
+#[must_use]
+pub const fn places_taken(outputs: usize, freed: usize) -> usize {
+    outputs.saturating_sub(freed)
 }
 
 /// What applying a block body does to the state, computed without mutation.

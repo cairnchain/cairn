@@ -16,6 +16,9 @@ cairn-primitives.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# For `tests/pool.rs`, which builds a cold witness to tie the place price to
+# the floor rate it was measured at.
+cairn-accumulator.workspace = true
 cairn-crypto.workspace = true
 # For the relay-cost test in `tests/pool.rs`, which counts bytes hashed rather
 # than timing anything. Only the test build asks for it.

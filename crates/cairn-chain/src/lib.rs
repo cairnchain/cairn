@@ -176,9 +176,12 @@ const RATE_SCALE: u128 = 1 << 16;
 /// note that falls between the quote and the block. A wallet quotes a place
 /// over the floor for each note that can fall, and is told the number when it
 /// is short, which is the answer to a price that moves.
+///
+/// Counted by the ledger's [`cairn_ledger::validation::places_taken`], which
+/// is the count the block burns for, so the two cannot drift apart.
 #[must_use]
 pub fn places_taken(transfer: &Transfer, freed: usize) -> usize {
-    transfer.outputs.len().saturating_sub(freed)
+    cairn_ledger::validation::places_taken(transfer.outputs.len(), freed)
 }
 
 /// What carrying a transfer takes from a block: its bytes, plus a share of
@@ -529,11 +532,24 @@ impl ChainError {
     /// settles may be remembered against one: a timestamp out of range, a
     /// parent that is not there, work that was not done.
     ///
-    /// Anything the body decides (a signature, a root that does not match, a
-    /// coinbase that overpays) says nothing about another body carrying the
-    /// same identifier. Remembering that would let anyone lock the real block
-    /// out of a node by sending a corrupted twin first, at the cost of copying
-    /// it: the twin inherits the real block's work, so it is free.
+    /// A root that does not match is a verdict on a twin: the door asks it
+    /// of every body before anything else looks at one, and it says nothing
+    /// about the real body under the same identifier. Remembering it would
+    /// let anyone lock the real block out of a node by sending a corrupted
+    /// twin first, at the cost of copying it: the twin inherits the real
+    /// block's work, so it is free.
+    ///
+    /// Every other verdict on a body is reached only by a body whose root
+    /// matches its header, and the root covers every byte of the body, so
+    /// barring a collision of the hash it is the one body that header names.
+    /// Those that depend on nothing but the parent state and the body (a
+    /// signature, a key that is not the owner's, places left unpaid, a
+    /// coinbase that overpays, a state root that does not match) could be
+    /// remembered against the identifier for that reason. They are not, and
+    /// a mined block that fails one is validated again whenever a peer
+    /// offers it, which is what declining to remember costs. A verdict that
+    /// depends on the reader must never be: a proof this node no longer
+    /// holds (`MissingProof`), and the two below.
     ///
     /// Listed rather than excluded, so a failure added later is not condemned
     /// by default. Refusing to remember costs one validation. Remembering
