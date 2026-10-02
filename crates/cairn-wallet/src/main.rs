@@ -26,8 +26,9 @@ use cairn_wallet::{
 const HELP: &str = "\
 cairn-wallet, a Cairn wallet that is itself a node
 
-  cairn-wallet new <key file>
-      make a key and write it down
+  cairn-wallet new <key file> [--network <name>]
+      make a key, write it down, and print the address to be paid at on
+      that network, as `address` does
 
   cairn-wallet address <key file> [--network <name>]
       print the address to be paid at, on that network: the hash of the
@@ -309,12 +310,18 @@ impl Flags {
 fn make_key(arguments: &[String]) -> Result<(), String> {
     let flags = Flags::parse(arguments)?;
     let path = flags.key_file()?;
+    // Asked before the key exists, so a misspelt network leaves no file behind.
+    let network = rules_of(&flags)?.network;
 
     let secret = SecretKey::generate().map_err(|error| format!("no entropy available: {error}"))?;
     keyfile::write(&path, &secret)?;
 
     println!("key written to {}", path.display());
-    println!("address        {}", secret.public_key());
+    // It printed the key here, under this word, after addresses became its hash.
+    println!(
+        "address        {}",
+        Address::from(secret.public_key()).to_text(network)
+    );
     say(
         "Anyone holding that file holds the money: it is plain text with no passphrase, \
          so keep it where only you can read it.",
