@@ -37,8 +37,10 @@ fn said(output: &Output) -> String {
 fn address_line(output: &Output) -> String {
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
-        .find_map(|line| line.strip_prefix("address"))
-        .map(|rest| rest.trim().to_owned())
+        .find_map(|line| {
+            line.strip_prefix("address")
+                .map(|rest| rest.trim().to_owned())
+        })
         .unwrap_or_else(|| panic!("`new` names an address: {}", said(output)))
 }
 
