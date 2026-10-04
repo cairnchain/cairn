@@ -1,0 +1,85 @@
+# The test network, looked at every fifteen minutes by something other than a
+# person remembering to.
+#
+# On 2 October an outside miner froze the network for a day, and the way it was
+# found was somebody happening to open the explorer. A chain that has stopped
+# looks exactly like a chain that is quiet: a height, a supply, a list of
+# blocks, and no complaint. So this asks the questions a person would ask if
+# they were looking, on a schedule, and says so in an issue when the answer is
+# wrong: the tip is old, the difficulty swung, blocks came in a burst, the
+# explorer's own figures disagree, its node reports a fault, a block seen
+# earlier was replaced, or the explorer or the seed does not answer.
+#
+# One open issue per kind of alarm, labelled `testnet-alarm`, found by a marker
+# in its body so that it is never duplicated: opened when the alarm starts,
+# commented when its figures change materially, closed with a comment when it
+# clears. What the checks are and why each threshold is where it is: the
+# constants at the top of `.github/scripts/watch_testnet.py`.
+#
+# A schedule is not a promise. GitHub delays scheduled runs when it is busy,
+# sometimes by many minutes and sometimes by dropping one, and switches a
+# schedule off after sixty days without any activity in the repository. The
+# minutes below avoid the top of the hour, where the delays are worst, and the
+# listing it reads is two hours of blocks so that a late run still overlaps
+# the one before it. This is a smoke detector and not a pager.
+#
+# Never on a pull request or a push: it reads the live network and opens
+# issues, and neither is something a change under review should do.
+
+name: watch-testnet
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+# The one write is to issues. `contents: read` is only for the checkout, as in
+# every other workflow here, and is written out because the permissions of a
+# workflow that does not name them are a setting in a web page.
+permissions:
+  contents: read
+  issues: write
+
+# Two runs at once would both see no issue and both open one. A run that has to
+# wait is not cancelled for the next: what it found is still true.
+concurrency:
+  group: watch-testnet
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    # Every request has its own limit, and this is the one above all of them.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Before the live check, so that a change to a check that breaks it is
+      # found by a red run and not by an issue that never gets opened. These
+      # touch 127.0.0.1 and nothing else.
+      - name: Run the unit tests of the checks
+        run: python3 -m unittest discover -s .github/scripts -v
+      # What the last run saw, as one small file: the last two hours of block
+      # identifiers, the coinbase owners met, the reorganisations still held.
+      # A cache entry cannot be written twice, so each run saves under a key of
+      # its own and the next restores the newest by prefix. They are a few
+      # kilobytes each and age out after seven days unused. Saved only when the
+      # job succeeds, so a run that could not reach `gh` is repeated from the
+      # state it started with.
+      - name: Restore what the last run saw
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .watch-state
+          key: watch-testnet-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            watch-testnet-state-
+      # Where the network is lives here and nowhere in the script, so that
+      # moving to the next testnet is a change to these two lines, if the
+      # explorer and the seed move at all. The network itself is read from the
+      # API, which is why the checks need no change for it.
+      - name: Look at the network and keep the issues in step with it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WATCH_API: https://cairnchain.org
+          WATCH_SEED: seed.cairnchain.org:9944
+          WATCH_STATE: .watch-state/state.json
+        run: python3 .github/scripts/watch_testnet.py
