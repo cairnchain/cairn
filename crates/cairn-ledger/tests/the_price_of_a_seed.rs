@@ -429,9 +429,8 @@ fn tied_to_the_run(network: &Network, fall: u64, gaps: &[u128]) -> Price {
 /// at most [`MOST_TAIL`] headers and the tip has to stand within [`MOST_FALL`]
 /// of the hardest of them, which is the band over 2^18 whatever the rule
 /// between, and a faster walk only lets the forger come closer to it. The tie
-/// to the pinned header alone, which nobody applies, went from 2^10.2 to
-/// 2^11.2: climbing out of a cheap pinned header now has to be dated ahead of
-/// a schedule, and a schedule is not something a run can take back.
+/// to the pinned header alone, which nobody applies, came out at 2^11.2 where
+/// it was 2^10.2, and nothing here rests on it.
 #[test]
 fn a_tip_held_to_the_hardest_header_of_its_run_costs_what_the_documents_state() {
     let mut measured = Vec::new();
