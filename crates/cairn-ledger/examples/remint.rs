@@ -82,7 +82,10 @@ fn run() -> Result<(), String> {
             .ok_or_else(|| format!("this build has no rules for `{name}`"))?;
         let network = params.network.name().ok_or("a network with no name")?;
         let old = cairn_ledger::genesis::block(params.network);
-        let message = match messages.iter().find(|(asked, _)| asked == name || asked == network) {
+        let message = match messages
+            .iter()
+            .find(|(asked, _)| asked == name || asked == network)
+        {
             Some((_, message)) => message.clone(),
             None => old
                 .as_ref()
@@ -102,7 +105,10 @@ fn run() -> Result<(), String> {
         if let Some(old) = &old {
             traces.extend(traces_of(old, &block));
         }
-        constants.push((constant_of(network), cairn_primitives::hex::encode(&block.encode())));
+        constants.push((
+            constant_of(network),
+            cairn_primitives::hex::encode(&block.encode()),
+        ));
     }
     println!();
 
@@ -133,7 +139,12 @@ fn run() -> Result<(), String> {
     for (path, text) in &rewritten {
         for (number, line) in text.lines().enumerate() {
             if line.to_lowercase().contains("provisional") {
-                settle.push(format!("  {}:{}: {}", path.display(), number + 1, line.trim()));
+                settle.push(format!(
+                    "  {}:{}: {}",
+                    path.display(),
+                    number + 1,
+                    line.trim()
+                ));
             }
         }
     }
@@ -247,7 +258,11 @@ fn traces_of(old: &Block, new: &Block) -> Vec<Trace> {
             ends_a_word: false,
         },
         Trace::word("a timestamp", &old_time.to_string(), &new_time.to_string()),
-        Trace::word("a timestamp", &underscored(old_time), &underscored(new_time)),
+        Trace::word(
+            "a timestamp",
+            &underscored(old_time),
+            &underscored(new_time),
+        ),
         Trace::word("a date", &when(old_time), &when(new_time)),
     ]
 }

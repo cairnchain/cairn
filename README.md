@@ -32,36 +32,29 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-7` opened on 30 September 2026.
-Its money is worth nothing, is meant to be worth nothing, and the network
-will be reset.
+Pre-alpha, and running in public. `testnet-8` opens on the day this restart
+ships (the network table below carries a provisional first block, minted
+while the restart was written; the real one is minted at the opening, with
+`cargo run --release -p cairn-ledger --example remint`, because the
+difficulty's schedule starts at its timestamp). Its money is worth nothing, is
+meant to be worth nothing, and the network will be reset.
 
-It is the seventh because a place in the hot set was free to a miner, a block
-did not commit to its signatures, an address showed its key, and two hash
-domains were told apart only by the length of what they hashed. A transfer
-could take as many places in the hot set as it liked for the price of its
-bytes alone, and a miner packing its own blocks with them paid not even that;
-a header named its body by a root that left out every signature and proof, so
-a copy that changed only those still passed as the same block; a note's owner
-was the public key itself, decoded straight off the chain, so every unspent
-note stood exposed to whatever could someday break that key; and two domains
-each hashed two kinds of value apart only because every caller happened to
-keep their lengths fixed and different. All four change what a header commits
-to or what a note is.
+It is the eighth because a few minutes of hired hash rate could nearly stop
+the chain for a day and a half. On 2 October 2026 a stranger mined eighty
+blocks in two minutes and left. The difficulty was a moving average over
+ninety blocks that rose fast and fell slowly; it had climbed about six hundred
+times, and the network's own miner needed a day and a half to work it back
+down. The difficulty now follows a schedule fixed at the first block, twice as
+hard for every hour a chain runs ahead of it and half as hard for every hour
+behind, so a burst that leaves costs the honest chain about an eighty seventh
+of what it paid. That changes the difficulty every block must carry.
 
-`testnet-6` is retired and nothing on it carries over: it opened on
-1 September 2026, because three audit passes in one day found three things,
-and the last of them was not a hole an attacker exploits but the central
-mechanism not working at all. A ledger whose grace window held a note
-somebody had spent could not be handed to a newcomer, and that window turns
-over in twelve blocks on a busy chain, so joining without reading every block
-was broken essentially always. Nothing complained, because nobody had yet
-tried to join a chain that had seen traffic. Alongside it: a block reward
-could be spent before its block was settled, so a two-block reorganisation
-could take back money somebody had already been paid; and the ledger could
-not state how much money existed, so a defect that minted a pebble would have
-been agreed by every node and noticed by none. All three changed what a
-header commits to.
+`testnet-7` is retired and nothing on it carries over: it opened on
+30 September 2026, because a place in the hot set was free to a miner, a
+block did not commit to its signatures, an address showed its key, and two
+hash domains were told apart only by the length of what they hashed. All four
+changed what a header commits to or what a note is. The six before it, and
+why each was retired, are a paragraph each in `crates/cairn-ledger/src/note.rs`.
 
 There is no mainnet. A network exists once its first block does, and that one
 will be mined in the open on the day it is announced.

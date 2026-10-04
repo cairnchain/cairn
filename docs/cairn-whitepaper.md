@@ -8,7 +8,7 @@ strap:
   carried in sixty four hashes.
 byline: Draft, 31 August 2026
 byline: [github.com/cairnchain/cairn](https://github.com/cairnchain/cairn)
-byline: testnet-7, no mainnet exists
+byline: testnet-8, no mainnet exists
 abstract: Abstract
 footer: Cairn · draft whitepaper · 29 August 2026
 footer: Nothing here is investment advice
@@ -1098,7 +1098,7 @@ failures have in common.
 
 **A rule changes at a height, and a node that has not updated by
 then is on another chain.** Renumbering the network, which is what
-the test networks did six times, throws every balance away with the
+the test networks did seven times, throws every balance away with the
 chain; on a network carrying value that is not a mechanism but a loss. So
 a rule that changes names the height it takes effect at, and blocks below
 it go on being judged by the rule that judged them: nothing already mined

@@ -106,6 +106,7 @@ fn in_french(value: usize) -> &'static str {
     match value {
         5 => "cinq",
         6 => "six",
+        7 => "sept",
         8 => "huit",
         64 => "soixante-quatre",
         other => panic!(
@@ -810,7 +811,7 @@ fn the_ledger_a_newcomer_is_handed_is_the_size_the_paper_gives() {
 ///
 /// The whitepaper's limitations said the test networks were renumbered three
 /// times and the design paper said the same twice, while `note.rs` carries
-/// seven test networks, each taken because a rule changed. Three was true at
+/// eight test networks, each taken because a rule changed. Three was true at
 /// testnet-4. A count of how often something happened is a figure like any
 /// other, and the identifiers are where it is written down.
 #[test]
@@ -1828,6 +1829,7 @@ fn spelled(value: u64) -> &'static str {
     match value {
         5 => "five",
         6 => "six",
+        7 => "seven",
         11 => "eleven",
         15 => "fifteen",
         16 => "sixteen",

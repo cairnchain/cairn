@@ -476,17 +476,18 @@ fn a_loss_of_nine_tenths_of_the_hash_rate_settles_in_hours() {
 /// schedule from the start, and is asked the least the bound allows, down to
 /// the floor, until it has caught up.
 ///
-/// The schedule starts at the first block. The devnet's pinned first block is
+/// The schedule starts at the first block. The devnet's pinned first block was
 /// dated twenty nine days before it was mined, so that a test could mine a long
-/// chain forward from it behind the wall clock; a devnet node opened the day
-/// it was mined is twenty nine days behind. Measured on the devnet's own rules
-/// and first block, with blocks dated as fast as the median allows from that
-/// day on: the floor at the thirteenth block, and the floor every block after
-/// it for about half a million blocks, until the chain has caught the schedule
-/// up. Under the moving average a late opening cost one easy block. So a
-/// published network's first block is minted at its opening, which the
-/// specification requires, and the devnet's has to be minted again close to
-/// the day it is used.
+/// chain forward from it behind the wall clock, and a devnet node opened the
+/// day it was mined stood twenty nine days behind. Measured on the devnet's
+/// own rules and first block opened that late, with blocks dated as fast as
+/// the median allows from that day on: the floor at the thirteenth block, and
+/// the floor every block after it for about half a million blocks, until the
+/// chain has caught the schedule up. Under the moving average a late opening
+/// cost one easy block. So a published network's first block is minted at its
+/// opening, which the specification requires, and the devnet's is minted again
+/// with every restart and dated only `genesis::DEVNET_DATED_EARLY` early, which
+/// is what that test needs.
 #[test]
 fn a_network_opened_long_after_its_first_block_is_nearly_free_until_it_catches_up() {
     let params = cairn_ledger::validation::ConsensusParams::for_network("devnet").unwrap();

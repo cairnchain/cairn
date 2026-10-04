@@ -367,8 +367,16 @@ fn testnet_7_and_the_second_devnet_are_named_and_retired() {
         let retired = NetworkId::new(marker);
         assert_eq!(retired, id);
         assert_eq!(retired.to_string(), name);
-        assert_ne!(retired, NetworkId::TESTNET, "{name} is still the current one");
-        assert_ne!(retired, NetworkId::DEVNET, "{name} is still the current one");
+        assert_ne!(
+            retired,
+            NetworkId::TESTNET,
+            "{name} is still the current one"
+        );
+        assert_ne!(
+            retired,
+            NetworkId::DEVNET,
+            "{name} is still the current one"
+        );
         assert!(
             ConsensusParams::for_network(name).is_none(),
             "a retired network's rules were answered for: {name}"

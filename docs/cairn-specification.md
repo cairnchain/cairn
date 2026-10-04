@@ -744,7 +744,7 @@ reports it, which is why it is written as a rule here rather than left as a
 number an implementation picks.
 
 <table>
-  <thead><tr><th>Parameter</th><th>testnet-7</th><th>devnet</th><th>What it bounds</th></tr></thead>
+  <thead><tr><th>Parameter</th><th>testnet-8</th><th>devnet</th><th>What it bounds</th></tr></thead>
   <tbody>
     <tr><td>hot capacity</td><td class="n">131 072</td><td class="n">64</td><td>notes the hot set holds</td></tr>
     <tr><td>evictions per block</td><td class="n">1 024</td><td class="n">32</td><td>notes one block may push out</td></tr>
@@ -766,7 +766,7 @@ capacity to 64 and the eviction cap to 32 with it, so there too the cap is
 below the tier, and emptying the tier takes at least two blocks. The cap goes
 no lower because a miner building a block keeps room for a full coinbase, 16
 notes, out of it: a cap of 16 or less would leave a full devnet tier carrying
-no payment at all. On testnet-7 the cap is a hundred and twenty eighth of the
+no payment at all. On testnet-8 the cap is a hundred and twenty eighth of the
 tier, so emptying the tier takes at least 128 blocks whatever shape the blocks
 take.
 
@@ -2401,7 +2401,7 @@ thirty two times the honest difficulty takes a branch five half lives ahead of
 its schedule, about 2 750 blocks of the honest work, 46 hours of it at a sixty
 second block. Measured after bursts of 33, 64 and 128 times: a thirty year chain
 refuses newcomers for up to about 680 target times after the burst, 11 hours on
-testnet-7, and a young chain of two thousand blocks for 720 to 2 000, 12 to 32
+testnet-8, and a young chain of two thousand blocks for 720 to 2 000, 12 to 32
 hours, while the burst cost four to five times that in honest work. Under the
 moving average three blocks of four times each reached the same tie.
 

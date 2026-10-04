@@ -928,7 +928,7 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
     </p>
 
     <table>
-      <thead><tr><th>Parameter</th><th>testnet-7</th><th>devnet</th><th>What it bounds</th></tr></thead>
+      <thead><tr><th>Parameter</th><th>testnet-8</th><th>devnet</th><th>What it bounds</th></tr></thead>
       <tbody>
         <tr><td>hot capacity</td><td class="n">131 072</td><td class="n">64</td><td>notes the hot set holds</td></tr>
         <tr><td>evictions per block</td><td class="n">1 024</td><td class="n">32</td><td>notes one block may push out</td></tr>
@@ -955,7 +955,7 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       below the tier, and emptying the tier takes at least two blocks. The cap goes
       no lower because a miner building a block keeps room for a full coinbase, 16
       notes, out of it: a cap of 16 or less would leave a full devnet tier carrying
-      no payment at all. On testnet-7 the cap is a hundred and twenty eighth of the
+      no payment at all. On testnet-8 the cap is a hundred and twenty eighth of the
       tier, so emptying the tier takes at least 128 blocks whatever shape the blocks
       take.
     </p>
@@ -1618,7 +1618,7 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       <tbody>
         <tr><td>target block time</td><td class="n">60 s</td><td>the retarget's schedule and its half life of sixty of them</td></tr>
         <tr><td>opening moment</td><td class="n">the first block's timestamp</td><td>no block before it; the retarget's schedule starts there</td></tr>
-        <tr><td>genesis difficulty</td><td class="n">2<sup>27</sup></td><td>the first block, and the difficulty the retarget's schedule starts from</td></tr>
+        <tr><td>genesis difficulty</td><td class="n">2<sup>28</sup></td><td>the first block, and the difficulty the retarget's schedule starts from</td></tr>
         <tr><td>drift allowance</td><td class="n">600 s</td><td>how far ahead of a reader a timestamp may sit: ten target block times</td></tr>
         <tr><td>halving interval</td><td class="n">1 051 200</td><td>the emission schedule</td></tr>
         <tr><td>initial reward</td><td class="n">5 000 000 000 pebbles</td><td>the emission schedule</td></tr>
@@ -2936,11 +2936,14 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       over 2<sup>18</sup>, which on a chain that ran to schedule is at least a
       thousandth of an average block. Measured on a thirty year chain at the two
       networks' opening difficulties, the cheapest tip a forger can present costs
-      2<sup>17.9</sup> hashes on testnet-7 and 2<sup>13.9</sup> on the devnet; held to
-      the pinned header alone it would cost 2<sup>11.2</sup> and 2<sup>8.1</sup>. The
-      faster walk moved the first two by a tenth of a halving from the 2<sup>18.0</sup>
-      and 2<sup>14.0</sup> the moving average gave, because the floor rests on the
-      run's ceiling and the tie, not on the walk. It does not cost the chain's
+      2<sup>18.9</sup> hashes on testnet-8 and 2<sup>13.9</sup> on the devnet; held to
+      the pinned header alone it would cost 2<sup>11.9</sup> and 2<sup>8.1</sup>. The
+      faster walk moved the price by a tenth of a halving from what the moving average
+      gave at the same opening difficulty, 2<sup>18.0</sup> at testnet-7's
+      2<sup>27</sup> and 2<sup>14.0</sup> on the devnet, because the floor rests on
+      the run's ceiling and the tie, not on the walk; testnet-8's opening at
+      2<sup>28</sup> doubled it, since the band is counted in blocks at that
+      difficulty. It does not cost the chain's
       difficulty, and no tie of this kind can make it: a run whose tip fell by the
       tie is what an honest chain looks like after a loss.
     </p>
@@ -2949,7 +2952,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       So the figure MUST be quoted against a grinding budget. At 40 per cent the
       inequality above gives 2^-161.9 a tip, which stays under 2^-128 against
       2<sup>33</sup> tips and not against 2<sup>34</sup>, and 2<sup>33</sup> tips
-      cost 2<sup>50.9</sup> hashes on testnet-7 and 2<sup>46.9</sup> on the devnet at
+      cost 2<sup>51.9</sup> hashes on testnet-8 and 2<sup>46.9</sup> on the devnet at
       those difficulties. The staircase the draw really is is worth more per question
       than the inequality, so that budget is a floor under the real one and not the
       real one; at the measured 42.96 per cent there is no budget at all, since that
@@ -2961,8 +2964,8 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       hash rate with noise of its own, and on chains with random block times the
       hardest header of a run stood up to about 1.6 times as far above the tip as the
       loss alone puts it, so a tie of 32 refused no chain that lost sixteen times its
-      hash rate, sixty-four of them on each network, and on testnet-7 none that lost
-      twenty. A chain that lost twenty four or more cannot be weighed on testnet-7
+      hash rate, sixty-four of them on each network, and on testnet-8 none that lost
+      twenty. A chain that lost twenty four or more cannot be weighed on testnet-8
       from about eight hours after the loss, for up to 28 hours at twenty four, about
       half as long as the ceiling on the run's length refuses it anyway, and for
       under five and a half days at any loss beyond; a newcomer reads such a chain
@@ -2976,7 +2979,7 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       its schedule, about 2 750 blocks of the honest work, 46 hours of it at a sixty
       second block. Measured after bursts of 33, 64 and 128 times: a thirty year chain
       refuses newcomers for up to about 680 target times after the burst, 11 hours on
-      testnet-7, and a young chain of two thousand blocks for 720 to 2 000, 12 to 32
+      testnet-8, and a young chain of two thousand blocks for 720 to 2 000, 12 to 32
       hours, while the burst cost four to five times that in honest work. Under the
       moving average three blocks of four times each reached the same tie.
     </p>
