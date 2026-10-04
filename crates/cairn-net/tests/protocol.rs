@@ -275,41 +275,39 @@ fn a_frame_from_another_network_is_refused_on_its_first_bytes() {
     );
 }
 
-/// A frame marked with devnet-1's old marker is refused as another network,
-/// on its first bytes, and that refusal is not held against the peer that
-/// sent it.
+/// A frame marked with a retired devnet's marker is refused as another
+/// network, on its first bytes, and that refusal is not held against the peer
+/// that sent it.
 ///
-/// Devnet was renumbered alongside testnet-7 so that a directory or a peer
-/// left over from before the restart is told plainly which network it is
-/// on. Nothing distinguishes that marker mismatch from any other one: the
-/// wire check compares the four bytes it reads against the network this
-/// node runs, whichever the two markers are, and the specification says a
-/// node belonging elsewhere is disconnected rather than refused.
+/// Devnet was renumbered alongside testnet-7, and again alongside testnet-8,
+/// so that a directory or a peer left over from before a restart is told
+/// plainly which network it is on. Nothing distinguishes that marker mismatch
+/// from any other one: the wire check compares the four bytes it reads against
+/// the network this node runs, whichever the two markers are, and the
+/// specification says a node belonging elsewhere is disconnected rather than
+/// refused.
 #[test]
-fn a_frame_marked_with_devnet_1s_marker_is_refused_as_another_network_and_not_held_against_the_peer(
+fn a_frame_marked_with_a_retired_devnet_marker_is_refused_as_another_network_and_not_held_against_the_peer(
 ) {
-    let mut framed = Vec::new();
-    write_message(&mut framed, NetworkId::DEVNET_1, &Message::Ping(1)).unwrap();
+    for retired in [NetworkId::DEVNET_1, NetworkId::DEVNET_2] {
+        let mut framed = Vec::new();
+        write_message(&mut framed, retired, &Message::Ping(1)).unwrap();
 
-    let mut cursor = framed.as_slice();
-    let outcome = read_message(&mut cursor, NetworkId::DEVNET, MAX_FRAME_BYTES);
-    assert!(
-        matches!(
-            outcome,
-            Err(WireError::WrongNetwork {
-                found: NetworkId::DEVNET_1,
-                expected: NetworkId::DEVNET,
-            })
-        ),
-        "got {outcome:?}"
-    );
-    assert!(
-        !DropReason::WrongNetwork {
-            theirs: NetworkId::DEVNET_1
-        }
-        .is_misbehaviour(),
-        "a peer that spoke devnet-1's marker was held against as if it had misbehaved"
-    );
+        let mut cursor = framed.as_slice();
+        let outcome = read_message(&mut cursor, NetworkId::DEVNET, MAX_FRAME_BYTES);
+        assert!(
+            matches!(
+                outcome,
+                Err(WireError::WrongNetwork { found, expected })
+                    if found == retired && expected == NetworkId::DEVNET
+            ),
+            "got {outcome:?}"
+        );
+        assert!(
+            !DropReason::WrongNetwork { theirs: retired }.is_misbehaviour(),
+            "a peer that spoke {retired}'s marker was held against as if it had misbehaved"
+        );
+    }
 }
 
 #[test]

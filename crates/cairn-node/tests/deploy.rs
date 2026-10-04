@@ -577,36 +577,40 @@ fi"#;
     /// over the old network's ledger, five times and then for good, under a
     /// closing note saying it was running. Nothing moved the directory, and a
     /// script that left it where it was passed.
+    ///
+    /// Rehearsed on the names of the move the coming restart makes, testnet-7
+    /// to testnet-8, as it was rehearsed on testnet-6 to testnet-7 before the
+    /// last one.
     #[test]
     fn a_retired_network_leaves_its_chain_beside_the_new_one() {
         for shell in shells() {
             for script in [&INSTALL, &EXPLORER] {
                 let machine = Machine::new(script, "retired", shell);
-                machine.running("testnet-6", "testnet-6");
-                machine.building("testnet-7", "testnet-7");
+                machine.running("testnet-7", "testnet-7");
+                machine.building("testnet-8", "testnet-8");
                 let data = machine.at(script.data);
                 fs::create_dir_all(&data).unwrap();
-                fs::write(data.join("blocks.log"), "testnet-6").unwrap();
+                fs::write(data.join("blocks.log"), "testnet-7").unwrap();
                 fs::write(data.join("cairn.conf"), "status = 30\n").unwrap();
-                machine.installed(&format!("--network testnet-6 --data {}", data.display()));
+                machine.installed(&format!("--network testnet-7 --data {}", data.display()));
 
                 let output = machine.run(&[]);
                 assert!(output.status.success(), "{}", said(&output));
                 assert!(
-                    machine.exec_start().contains(" --network testnet-7 "),
+                    machine.exec_start().contains(" --network testnet-8 "),
                     "{} did not move to the network the build has: {}",
                     script.unit,
                     machine.exec_start()
                 );
-                let kept = PathBuf::from(format!("{}.testnet-6", data.display()));
+                let kept = PathBuf::from(format!("{}.testnet-7", data.display()));
                 assert!(
                     kept.join("blocks.log").exists(),
-                    "{} started testnet-7 on testnet-6's chain rather than keeping it aside",
+                    "{} started testnet-8 on testnet-7's chain rather than keeping it aside",
                     script.unit
                 );
                 assert!(
                     !data.join("blocks.log").exists(),
-                    "{} left testnet-6's blocks where testnet-7 will open them",
+                    "{} left testnet-7's blocks where testnet-8 will open them",
                     script.unit
                 );
                 if script.program == "cairnd" {
@@ -629,7 +633,7 @@ fi"#;
     /// network.
     ///
     /// `testnet` names whichever test network is current. A unit written with
-    /// it is on testnet-6 under the build that wrote it and on the next one
+    /// it is on testnet-7 under the build that wrote it and on the next one
     /// under the build after, and the new build does not refuse the word, so
     /// nothing was retired and nothing was moved: the new network opened the
     /// old one's chain.
@@ -637,20 +641,20 @@ fi"#;
     fn the_same_word_naming_another_network_is_a_change_of_network() {
         for script in [&INSTALL, &EXPLORER] {
             let machine = Machine::new(script, "alias", "sh");
-            machine.running("testnet-6", "testnet-6");
-            machine.building("testnet-7", "testnet-7");
+            machine.running("testnet-7", "testnet-7");
+            machine.building("testnet-8", "testnet-8");
             let data = machine.at(script.data);
             fs::create_dir_all(&data).unwrap();
-            fs::write(data.join("blocks.log"), "testnet-6").unwrap();
+            fs::write(data.join("blocks.log"), "testnet-7").unwrap();
             machine.installed(&format!("--network testnet --data {}", data.display()));
 
             let output = machine.run(&[]);
             assert!(output.status.success(), "{}", said(&output));
             assert!(
-                PathBuf::from(format!("{}.testnet-6", data.display()))
+                PathBuf::from(format!("{}.testnet-7", data.display()))
                     .join("blocks.log")
                     .exists(),
-                "{} opened testnet-6's chain on testnet-7 because both are called testnet",
+                "{} opened testnet-7's chain on testnet-8 because both are called testnet",
                 script.unit
             );
         }
@@ -664,12 +668,12 @@ fi"#;
     fn a_network_that_stays_keeps_its_directory() {
         for script in [&INSTALL, &EXPLORER] {
             let machine = Machine::new(script, "stays", "sh");
-            machine.running("testnet-6", "testnet-6");
-            machine.building("testnet-6 testnet-7", "testnet-6");
+            machine.running("testnet-7", "testnet-7");
+            machine.building("testnet-7 testnet-8", "testnet-7");
             let data = machine.at(script.data);
             fs::create_dir_all(&data).unwrap();
-            fs::write(data.join("blocks.log"), "testnet-6").unwrap();
-            machine.installed(&format!("--network testnet-6 --data {}", data.display()));
+            fs::write(data.join("blocks.log"), "testnet-7").unwrap();
+            machine.installed(&format!("--network testnet-7 --data {}", data.display()));
 
             let output = machine.run(&[]);
             assert!(output.status.success(), "{}", said(&output));

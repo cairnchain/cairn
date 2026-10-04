@@ -4,9 +4,9 @@
 //! which pins nothing, so a newcomer there starts with no chain at all. The
 //! two real networks pin theirs, and a node on either lays that block down the
 //! moment it opens a directory. Its chain is then not empty, and everything
-//! that decides whether a node joins asked whether it was: so on testnet-7 and
-//! on the devnet every newcomer read the whole chain block by block, and the
-//! handover ran only in tests.
+//! that decides whether a node joins asked whether it was: so on both of them
+//! every newcomer read the whole chain block by block, and the handover ran
+//! only in tests.
 //!
 //! These run the same exchanges on the devnet, from its real first block.
 
@@ -109,7 +109,11 @@ impl Forge {
         let asked = expected_difficulty(&self.state, &params);
         self.clock += (asked * params.target_block_time).div_ceil(SETTLES_AT);
         let now = wall_clock();
-        assert!(self.clock < now, "the chain would run into the future");
+        assert!(
+            self.clock < now,
+            "the chain would run into the future: the devnet's first block is dated \
+             genesis::DEVNET_DATED_EARLY before it was minted, and this chain needs more"
+        );
         let coinbase =
             CoinbaseTransaction::new(height, vec![Note::new(params.initial_reward, miner)]);
         let block = assemble_block(
@@ -137,6 +141,40 @@ fn a_long_chain() -> &'static (Vec<Block>, Forge) {
         let blocks = (0..count).map(|_| forge.mine()).collect();
         (blocks, forge)
     })
+}
+
+/// The chain this file mines fits in how early the devnet's first block is
+/// dated.
+///
+/// Every block the forge mines is held behind the wall clock, and the chain
+/// starts at the devnet's pinned first block, which is dated
+/// `genesis::DEVNET_DATED_EARLY` before it is minted for this file's sake and
+/// for nothing else: the schedule starts at that timestamp, so every second of
+/// it is a second a devnet opened the day the block is minted stands behind.
+/// The chain's span is the rules' and the forge's, the same whatever day it is
+/// mined, so it is held here against the constant rather than against the
+/// clock. A forge or a rule that lengthens it fails with the number to raise,
+/// where otherwise every test in this file would pass until the morning the
+/// devnet is minted again and fail then.
+#[test]
+fn the_chain_this_file_mines_fits_in_how_early_the_devnet_is_dated() {
+    let params = params();
+    let (_, forge) = a_long_chain();
+    let mut forge = forge.clone();
+    // The longest chain any test here mines: the long one, and a burial past
+    // it.
+    let mut last = forge.clock;
+    for _ in 0..=params.burial {
+        last = forge.mine().header.timestamp;
+    }
+    let span = last - cairn_ledger::genesis::opens_at(params.network);
+    println!("the longest chain here spans {span} s of the devnet's schedule");
+    assert!(
+        span < cairn_ledger::genesis::DEVNET_DATED_EARLY,
+        "the chains here span {span} s, more than the {} s the devnet's first block is dated \
+         before it is minted",
+        cairn_ledger::genesis::DEVNET_DATED_EARLY
+    );
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {
