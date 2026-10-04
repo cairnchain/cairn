@@ -76,6 +76,9 @@ const FOREIGN: NetworkId = NetworkId::new(0xDEAD_BEEF);
 fn mined_under() -> ConsensusParams {
     let mut params = ConsensusParams::testnet().with_burial(BURIAL);
     params.genesis_difficulty = OPENING;
+    // The network opens when its first block is dated, as every published
+    // one does, which is also where the retarget's schedule starts.
+    params.opens_at = CLOCK + params.target_block_time;
     params
 }
 
@@ -332,6 +335,13 @@ fn a_header_dated_at_the_opening_itself_is_weighed() {
         .map(|header| header.timestamp)
         .min()
         .expect("the weighing carries headers");
+    // The opening is also where the retarget's schedule starts, so it can be
+    // moved only to where it already is: the draw over a chain this short
+    // opens the first block, and the first block is dated at the opening.
+    assert_eq!(
+        earliest, joined.first.timestamp,
+        "the weighing does not open the first block, so this asks nothing"
+    );
 
     let mut opening = mined_under();
     opening.opens_at = earliest;

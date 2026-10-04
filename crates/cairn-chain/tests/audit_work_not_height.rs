@@ -155,10 +155,11 @@ fn a_rival_of_more_and_easier_blocks_takes_the_branch_and_lengthens_it() {
     // Ours comes twice as fast, so the rules demand more of each block.
     let mut ours = common.fork();
     let ours_blocks = ours.run(&miner, 3, TARGET / 2);
-    // The rival crawls, so the rules demand less, and it needs more blocks to
-    // outweigh three of ours.
+    // The rival crawls, a block every twenty four minutes, so each of its
+    // blocks stands further behind the schedule and is asked about a quarter
+    // less than the last, and it needs more blocks to outweigh three of ours.
     let mut theirs = common.fork();
-    let their_blocks = theirs.run(&wallet(9), 6, TARGET * 4);
+    let their_blocks = theirs.run(&wallet(9), 6, TARGET * 24);
 
     let ours_work = work_of_run(&ours_blocks);
     let their_work = work_of_run(&their_blocks);
@@ -227,16 +228,16 @@ fn a_rival_of_more_and_easier_blocks_takes_the_branch_and_lengthens_it() {
 /// The other direction: a node made shorter by following the heaviest chain.
 ///
 /// This is the case round eleven built by hand once and nothing kept. Ours is
-/// forty blocks that came so slowly the retarget let the difficulty fall by
-/// six; the rival is sixteen that came fast enough to hold it up. Sixteen
-/// outweigh forty, the node undoes forty and applies sixteen, and its own
-/// height goes down by twenty four.
+/// forty blocks that came so slowly the retarget let the difficulty fall
+/// fifty seven times; the rival is sixteen that came fast enough to hold it
+/// up. Sixteen outweigh forty, the node undoes forty and applies sixteen, and
+/// its own height goes down by twenty four.
 ///
-/// The slow spacing is ten times the target and worth six times it, because
-/// `pow.rs` clamps a solve time into six times the target before the retarget
-/// reads it. That is why a fixture cannot buy a faster collapse by dating its
-/// blocks further apart, and it is why the difficulty falls over forty blocks
-/// rather than over six.
+/// The slow spacing is ten times the target, so each block stands nine
+/// targets further behind the schedule than the last, three twentieths of a
+/// half life, and is asked about a tenth less. Spaced further apart they would
+/// fall faster, by four at most a block, which the bound allows and nothing
+/// here needs.
 #[test]
 fn a_rival_of_fewer_and_harder_blocks_takes_the_branch_and_shortens_it() {
     let params = params();
@@ -287,9 +288,9 @@ fn a_rival_of_fewer_and_harder_blocks_takes_the_branch_and_shortens_it() {
         "a switch that undid {removed} and applied {added}, height 139 -> {}",
         store.height().unwrap()
     );
-    // The fifteenth rival block is where the sum passes ours, so that is the
-    // one the switch happens on; the sixteenth arrives afterwards and extends.
-    assert_eq!((removed, added), (40, 15));
+    // The tenth rival block is where the sum passes ours, so that is the one
+    // the switch happens on; the six after it arrive afterwards and extend.
+    assert_eq!((removed, added), (40, 10));
     assert_eq!(
         store.height(),
         Some(115),

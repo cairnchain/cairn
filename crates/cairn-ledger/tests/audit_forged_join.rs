@@ -26,7 +26,7 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{BlockHeader, BLOCK_VERSION};
 use cairn_ledger::handover::accept;
 use cairn_ledger::note::Note;
-use cairn_ledger::pow::{meets_target, next_difficulty, RECENT_HEADERS};
+use cairn_ledger::pow::{meets_target, next_difficulty, HALF_LIFE_IN_BLOCKS, RECENT_HEADERS};
 use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start, draw, levels_of, seed_of, work_before, Sample, SampledStart, SAMPLES,
@@ -126,8 +126,8 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
     // Long enough that the anchor and the whole window of recent headers under
     // it are headers the forger made: `check_buried` reads the window out of
     // what the sender supplies, and the retarget asks of each header what its
-    // parent, the forger's own, demands: no more than four times a header at
-    // the floor, a block at a time, so the run stays cheap.
+    // parent, the forger's own, demands against a schedule the forger's own
+    // timestamps put it far behind, which is the floor.
     let run = 120u64;
     assert!(
         run >= u64::try_from(RECENT_HEADERS).unwrap() + BURIAL,
@@ -152,6 +152,13 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
 
     for height in HONEST..=tip_height {
         clock += params.target_block_time;
+        // The first forged header is dated thirteen half lives late, twelve
+        // halvings of the opening difficulty and one more, so the whole run
+        // stands far enough behind the schedule that every header the
+        // retarget judges is asked the floor. A forger dates its own headers.
+        if height == HONEST {
+            clock += 13 * HALF_LIFE_IN_BLOCKS * params.target_block_time;
+        }
         // Below the anchor nothing checks a difficulty, so the floor it is.
         // At and above the anchor the run is checked block by block, and each
         // header is asked what the retarget asks of the forger's own header
@@ -277,8 +284,7 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
     // explicit about rather than leaving as a gap somebody rediscovers.
     // `check_buried` seeds its window from the headers the sender supplies,
     // and the retarget asks each header what the forger's own header below it
-    // demands, which from a header at the floor climbs four times a block at
-    // most and stays cheap. What stops the forgery is the weighing above,
+    // demands, which for a run dated far behind its schedule is the floor. What stops the forgery is the weighing above,
     // which is the only gate anything from the network passes through: a node
     // asks for a ledger only from a peer whose tip it has just weighed. The
     // other caller of `accept` is a node reading its own ledger file back at

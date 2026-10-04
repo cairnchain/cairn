@@ -211,9 +211,15 @@ fn an_anchor_from_another_chain_is_caught() {
 
 /// The burial has to have been mined. Before this the sender chose the
 /// difficulties of the run and could put every one of them on the floor, so a
-/// thousand blocks of burial were a thousand hashes. The window decides that
-/// number now, so a window whose blocks came fast demands more than the floor
-/// and an honest-looking run at the floor is refused.
+/// thousand blocks of burial were a thousand hashes. The rules decide that
+/// number now, from the header below each one and the network's schedule.
+///
+/// When the retarget read a window, the sender's own window was part of what
+/// decided it, and a window whose blocks came fast demanded more than the
+/// floor. The retarget reads the anchor alone now, so the same shaking of the
+/// window moves nothing, and what a run is held to is the rules: the same run,
+/// judged under a network whose schedule asks more of it, is refused for the
+/// difficulty it states.
 #[test]
 fn a_run_at_a_difficulty_nobody_demanded_is_refused() {
     let chain = built();
@@ -225,20 +231,39 @@ fn a_run_at_a_difficulty_nobody_demanded_is_refused() {
     for (step, header) in handed.recent[..anchor].iter_mut().enumerate() {
         header.timestamp = 1_000 + step as u64;
     }
-    let refused = check_buried(
+    check_buried(
         &handed.at,
         &handed.tip,
         &handed.before_at,
         &handed.buried,
         &handed.recent,
         &params(),
+    )
+    .expect("nothing the sender writes in the window moves what the run is asked");
+
+    // A network opening at 2^20 asks this chain, fifteen half lives and more
+    // behind its schedule, for 2^5 a block, and the bound lets the first
+    // header above an anchor at the floor rise to four of it.
+    let dearer = ConsensusParams {
+        genesis_difficulty: 1 << 20,
+        ..params()
+    };
+    let refused = check_buried(
+        &handed.at,
+        &handed.tip,
+        &handed.before_at,
+        &handed.buried,
+        &handed.recent,
+        &dearer,
     );
-    assert!(
-        matches!(
-            refused,
-            Err(HandoverError::BuriedAtTheWrongDifficulty { .. })
-        ),
-        "the retarget decides that number, not the sender, and said {refused:?}"
+    assert_eq!(
+        refused,
+        Err(HandoverError::BuriedAtTheWrongDifficulty {
+            at: handed.at.height + 1,
+            stated: 1,
+            demanded: 4,
+        }),
+        "the retarget decides that number, not the sender"
     );
 }
 
