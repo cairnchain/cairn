@@ -1273,7 +1273,7 @@ at a time by whoever starts a node.
   <tbody>
     <tr><td>target block time</td><td class="n">60 s</td><td>the retarget's schedule and its half life of sixty of them</td></tr>
     <tr><td>opening moment</td><td class="n">the first block's timestamp</td><td>no block before it; the retarget's schedule starts there</td></tr>
-    <tr><td>genesis difficulty</td><td class="n">2<sup>27</sup></td><td>the first block, and the difficulty the retarget's schedule starts from</td></tr>
+    <tr><td>genesis difficulty</td><td class="n">2<sup>28</sup></td><td>the first block, and the difficulty the retarget's schedule starts from</td></tr>
     <tr><td>drift allowance</td><td class="n">600 s</td><td>how far ahead of a reader a timestamp may sit: ten target block times</td></tr>
     <tr><td>halving interval</td><td class="n">1 051 200</td><td>the emission schedule</td></tr>
     <tr><td>initial reward</td><td class="n">5 000 000 000 pebbles</td><td>the emission schedule</td></tr>
@@ -2364,18 +2364,21 @@ first. The tie puts a floor under a tip at the band the draw leaves unresolved
 over 2<sup>18</sup>, which on a chain that ran to schedule is at least a
 thousandth of an average block. Measured on a thirty year chain at the two
 networks' opening difficulties, the cheapest tip a forger can present costs
-2<sup>17.9</sup> hashes on testnet-7 and 2<sup>13.9</sup> on the devnet; held to
-the pinned header alone it would cost 2<sup>11.2</sup> and 2<sup>8.1</sup>. The
-faster walk moved the first two by a tenth of a halving from the 2<sup>18.0</sup>
-and 2<sup>14.0</sup> the moving average gave, because the floor rests on the
-run's ceiling and the tie, not on the walk. It does not cost the chain's
+2<sup>18.9</sup> hashes on testnet-8 and 2<sup>13.9</sup> on the devnet; held to
+the pinned header alone it would cost 2<sup>11.9</sup> and 2<sup>8.1</sup>. The
+faster walk moved the price by a tenth of a halving from what the moving average
+gave at the same opening difficulty, 2<sup>18.0</sup> at testnet-7's
+2<sup>27</sup> and 2<sup>14.0</sup> on the devnet, because the floor rests on
+the run's ceiling and the tie, not on the walk; testnet-8's opening at
+2<sup>28</sup> doubled it, since the band is counted in blocks at that
+difficulty. It does not cost the chain's
 difficulty, and no tie of this kind can make it: a run whose tip fell by the
 tie is what an honest chain looks like after a loss.
 
 So the figure MUST be quoted against a grinding budget. At 40 per cent the
 inequality above gives 2^-161.9 a tip, which stays under 2^-128 against
 2<sup>33</sup> tips and not against 2<sup>34</sup>, and 2<sup>33</sup> tips
-cost 2<sup>50.9</sup> hashes on testnet-7 and 2<sup>46.9</sup> on the devnet at
+cost 2<sup>51.9</sup> hashes on testnet-8 and 2<sup>46.9</sup> on the devnet at
 those difficulties. The staircase the draw really is is worth more per question
 than the inequality, so that budget is a floor under the real one and not the
 real one; at the measured 42.96 per cent there is no budget at all, since that
@@ -2385,8 +2388,8 @@ The tie is what an honest chain pays for this. The retarget follows a loss of
 hash rate with noise of its own, and on chains with random block times the
 hardest header of a run stood up to about 1.6 times as far above the tip as the
 loss alone puts it, so a tie of 32 refused no chain that lost sixteen times its
-hash rate, sixty-four of them on each network, and on testnet-7 none that lost
-twenty. A chain that lost twenty four or more cannot be weighed on testnet-7
+hash rate, sixty-four of them on each network, and on testnet-8 none that lost
+twenty. A chain that lost twenty four or more cannot be weighed on testnet-8
 from about eight hours after the loss, for up to 28 hours at twenty four, about
 half as long as the ceiling on the run's length refuses it anyway, and for
 under five and a half days at any loss beyond; a newcomer reads such a chain

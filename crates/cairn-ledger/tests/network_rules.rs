@@ -16,7 +16,7 @@
 use cairn_ledger::validation::ConsensusParams;
 
 /// Every name [`ConsensusParams::for_network`] answers to.
-const NAMED: [&str; 4] = ["mainnet", "testnet", "testnet-7", "devnet"];
+const NAMED: [&str; 4] = ["mainnet", "testnet", "testnet-8", "devnet"];
 
 /// The names that answer today, so a rename cannot quietly empty the checks
 /// below. A test that skips every case passes.
@@ -28,7 +28,7 @@ fn the_networks_that_exist_are_the_ones_these_checks_cover() {
         .collect();
     assert_eq!(
         answering,
-        vec!["testnet", "testnet-7", "devnet"],
+        vec!["testnet", "testnet-8", "devnet"],
         "mainnet is not a network until its first block is mined, and the rest \
          are what the checks below are actually reading"
     );
@@ -130,7 +130,7 @@ fn the_eviction_cap_buys_a_hundred_and_twenty_eight_blocks_and_on_devnet_two() {
             .div_ceil(params.max_evictions_per_block.max(1))
     };
     assert_eq!(
-        blocks_to_empty("testnet-7"),
+        blocks_to_empty("testnet-8"),
         128,
         "the public tier stopped taking a hundred and twenty eight blocks to empty"
     );
@@ -240,7 +240,7 @@ fn every_network_charges_the_place_price_and_only_the_test_rules_do_not() {
 /// The rule set fixtures mine on is a public network's, field by field.
 ///
 /// [`ConsensusParams::mineable_network`] exists because no test can mine
-/// testnet-7, which opens at 2^27. What a test can afford is a lower opening
+/// testnet-8, which opens at 2^28. What a test can afford is a lower opening
 /// difficulty, and for a long time the way to get one was
 /// `ConsensusParams::testnet()`, which opens at the floor. A chain on the floor
 /// cannot retarget downwards, so every fixture in this workspace validated
@@ -250,13 +250,13 @@ fn every_network_charges_the_place_price_and_only_the_test_rules_do_not() {
 /// The danger in answering that with a fourth rule set is that it drifts: a
 /// number changes on the public networks, nothing changes here, and the
 /// fixtures go on rehearsing a shape no network has. So the comparison is made
-/// against `testnet-7` on the whole struct rather than on the fields somebody
+/// against `testnet-8` on the whole struct rather than on the fields somebody
 /// remembered, with only the four this deliberately moves written out. A field
 /// added to `ConsensusParams` is covered the day it is added, without anybody
 /// having to come back here.
 #[test]
 fn the_rules_a_test_can_mine_are_a_public_networks_rules() {
-    let public = ConsensusParams::for_network("testnet-7").expect("a network that answers");
+    let public = ConsensusParams::for_network("testnet-8").expect("a network that answers");
     let mineable = ConsensusParams::mineable_network(public.burial);
 
     // The four. A test mines its own first block, so nothing is pinned and
@@ -271,7 +271,7 @@ fn the_rules_a_test_can_mine_are_a_public_networks_rules() {
     };
     assert_eq!(
         mineable, expected,
-        "the rules fixtures mine on differ from testnet-7 in something other \
+        "the rules fixtures mine on differ from testnet-8 in something other \
          than the network it is not and the difficulty it could not afford"
     );
     assert!(
@@ -321,7 +321,9 @@ fn a_retired_network_is_named_and_not_written_out_in_hexadecimal() {
         (NetworkId::TESTNET_5, "testnet-5"),
         (NetworkId::TESTNET_6, "testnet-6"),
         (NetworkId::TESTNET_7, "testnet-7"),
+        (NetworkId::TESTNET_8, "testnet-8"),
         (NetworkId::DEVNET_1, "devnet-1"),
+        (NetworkId::DEVNET_2, "devnet-2"),
         (NetworkId::DEVNET, "devnet"),
     ] {
         assert_eq!(id.name(), Some(expected), "the table is short a network");
@@ -341,38 +343,46 @@ fn a_retired_network_is_named_and_not_written_out_in_hexadecimal() {
     // And the rules read the same table rather than keeping a second one. It
     // knew two of the eight, so a node on a retired network was told
     // "unnamed" while the constant naming it sat unread two files away.
-    let live = ConsensusParams::for_network("testnet-7").unwrap();
-    assert_eq!(live.network_name(), NetworkId::TESTNET_7.name().unwrap());
+    let live = ConsensusParams::for_network("testnet-8").unwrap();
+    assert_eq!(live.network_name(), NetworkId::TESTNET_8.name().unwrap());
 }
 
-/// The next test network was named before it started, and now it has.
+/// Testnet-7 and the second devnet are retired: still named, and no longer
+/// answered for.
 ///
-/// A node reads a marker's name from its own build, so a node that takes no
-/// release once the network starts over can name the new one only if a
-/// release before the restart already did. Without that, every testnet-6 node
-/// still running when testnet-7 starts reads its peers as `0x4341525a`, which
-/// is the message the table above exists to replace. The name shipped ahead
-/// of the network in 0.10.0; this restart is the release where `for_network`
-/// catches up to it.
+/// Both shipped as networks in 0.11, so a node still on either is told which
+/// network it is on by the table above rather than reading its peers as a
+/// number. But asking `for_network` for a retired name does not bring its
+/// rules back, the way it does not for testnet-6 or devnet-1: an arm left
+/// behind for `testnet-7` would start a node on rules whose first block this
+/// build no longer carries, and `NAMED` above lists only what answers today.
 #[test]
-fn the_next_test_network_is_named_before_it_starts() {
+fn testnet_7_and_the_second_devnet_are_named_and_retired() {
     use cairn_ledger::note::NetworkId;
 
-    let next = NetworkId::new(0x4341_525A);
-    assert_eq!(next, NetworkId::TESTNET_7);
-    assert_eq!(next.name(), Some("testnet-7"));
-    assert_eq!(next.to_string(), "testnet-7");
-    assert!(
-        ConsensusParams::for_network("testnet-7").is_some(),
-        "testnet-7 is the network this restart opens"
-    );
+    for (marker, id, name) in [
+        (0x4341_525A, NetworkId::TESTNET_7, "testnet-7"),
+        (0x4341_5245, NetworkId::DEVNET_2, "devnet-2"),
+    ] {
+        let retired = NetworkId::new(marker);
+        assert_eq!(retired, id);
+        assert_eq!(retired.to_string(), name);
+        assert_ne!(retired, NetworkId::TESTNET, "{name} is still the current one");
+        assert_ne!(retired, NetworkId::DEVNET, "{name} is still the current one");
+        assert!(
+            ConsensusParams::for_network(name).is_none(),
+            "a retired network's rules were answered for: {name}"
+        );
+    }
 }
 
-/// Testnet-8 is named before it starts, as testnet-7 was in 0.10.0.
+/// Testnet-8 was named before it started, as testnet-7 was in 0.10.0, and
+/// now it has.
 ///
 /// Every testnet-7 node still running when the network starts over reads its
-/// peers' marker through its own build; named here, it says they moved to
-/// testnet-8 rather than printing `0x4341525b`.
+/// peers' marker through its own build; named in 0.11.2, it says they moved
+/// to testnet-8 rather than printing `0x4341525b`. This restart is the release
+/// where `for_network` catches up to the name.
 #[test]
 fn testnet_8_is_named_before_it_starts() {
     use cairn_ledger::note::NetworkId;
@@ -382,14 +392,14 @@ fn testnet_8_is_named_before_it_starts() {
     assert_eq!(next.name(), Some("testnet-8"));
     assert_eq!(next.to_string(), "testnet-8");
     assert_eq!(next.address_prefix(), "tcairn");
-    assert_ne!(
+    assert_eq!(
         NetworkId::TESTNET,
         next,
-        "testnet-7 is still the current one"
+        "testnet-8 is the network this restart opens"
     );
     assert!(
-        ConsensusParams::for_network("testnet-8").is_none(),
-        "a network was answered for before its first block exists"
+        ConsensusParams::for_network("testnet-8").is_some(),
+        "testnet-8 is the network this restart opens"
     );
 }
 
@@ -410,12 +420,12 @@ fn testnet_8_is_named_before_it_starts() {
 /// and has every block it mines refused. Each half looks correct on its own.
 ///
 /// The testnet arm cannot show this today, and that is worth knowing rather
-/// than assuming. `NetworkId::TESTNET` is an alias for `TESTNET_7`, so naming
-/// `TESTNET_7` there writes a value the spread rule set already carried:
+/// than assuming. `NetworkId::TESTNET` is an alias for `TESTNET_8`, so naming
+/// `TESTNET_8` there writes a value the spread rule set already carried:
 /// deleting the line is an equivalent mutation, and it is noted where it sits.
 /// The day that alias moves to the next testnet, this test is what says the
 /// line has to be there. Measured both ways: with the alias pointed at
-/// `TESTNET_6` and the line gone, this fails; with the line back, it passes.
+/// `TESTNET_7` and the line gone, this fails; with the line back, it passes.
 #[test]
 fn the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to() {
     for name in NAMED {

@@ -146,7 +146,7 @@ const fn drift_allowance(target_block_time: u64) -> u64 {
 /// test can afford. What matters is that it is not the floor: the retarget can
 /// fall by its bound six times from here before it reaches [`MIN_DIFFICULTY`],
 /// and it can rise as far as a test is willing to pay for. A published network opens at
-/// 2^23 or 2^27, where a test cannot afford a second block, and that is the
+/// 2^23 or 2^28, where a test cannot afford a second block, and that is the
 /// whole reason this number exists rather than one of those.
 pub const MINEABLE_DIFFICULTY: u64 = 4_096;
 
@@ -424,27 +424,33 @@ impl ConsensusParams {
     pub fn for_network(name: &str) -> Option<Self> {
         match name {
             // The network comes in with `Self::testnet()`, whose
-            // `NetworkId::TESTNET` is an alias for `TESTNET_7`. A line naming
-            // `TESTNET_7` here wrote the value that was already there, which
+            // `NetworkId::TESTNET` is an alias for `TESTNET_8`. A line naming
+            // `TESTNET_8` here wrote the value that was already there, which
             // is a mutant nothing can kill, and the mutation gate cannot be
             // told to leave a deleted field alone; so the line is not here.
             //
             // It has to come back the day the alias moves to the next testnet,
-            // when this arm must keep answering about testnet-7 while the
+            // when this arm must keep answering about testnet-8 while the
             // alias means something else. `network_rules.rs`
             // `::the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to`
             // reads the first block off whatever network the rules name, so
             // moving the alias without it fails there and says so.
             //
-            // testnet-6 answers nothing here, the way testnet-5 and every
+            // testnet-7 answers nothing here, the way testnet-6 and every
             // testnet before it already does: a retired network is still
             // named, in `NetworkId::name`, so a node still on it is told
             // plainly which network it is on, but asking `for_network` for it
             // does not bring its rules back.
-            "testnet" | "testnet-7" => Some(Self {
-                genesis: crate::genesis::pinned(NetworkId::TESTNET_7),
-                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_7),
-                genesis_difficulty: 1 << 27,
+            //
+            // The opening difficulty is about a minute's work for the one
+            // miner that ran testnet-7 to its end, at 5.5 million hashes a
+            // second. The schedule starts here, so it starts near the rate the
+            // network really has rather than spending its first hours walking
+            // there at a half life an hour.
+            "testnet" | "testnet-8" => Some(Self {
+                genesis: crate::genesis::pinned(NetworkId::TESTNET_8),
+                opens_at: crate::genesis::opens_at(NetworkId::TESTNET_8),
+                genesis_difficulty: 1 << 28,
                 place_price: PLACE_PRICE,
                 ..Self::testnet()
             }),
@@ -764,7 +770,7 @@ impl ConsensusParams {
     /// [`Self::testnet`] with the opening difficulty lifted off the floor, the
     /// two depths set together and the place price a public network charges,
     /// and `tests/network_rules.rs` compares it
-    /// field by field against `testnet-7`: a rule that moves on a public
+    /// field by field against `testnet-8`: a rule that moves on a public
     /// network and not here fails a test rather than leaving the fixtures
     /// rehearsing a shape no network has.
     ///
@@ -2075,15 +2081,15 @@ mod tests {
     /// arm is not a compile error: it silently takes the default, which
     /// carries the unnamed network's number, no pinned first block and an
     /// opening moment of nought. `cargo mutants` dropped each of them in turn
-    /// and the suite stayed green. A node started with `--network testnet-7`
+    /// and the suite stayed green. A node started with `--network testnet-8`
     /// would then follow another network's number, take whatever first block
     /// it was handed, and accept blocks dated before the network opened.
     #[test]
     fn a_named_network_carries_its_own_identity() {
         let unnamed = ConsensusParams::testnet();
         for (name, id) in [
-            ("testnet", NetworkId::TESTNET_7),
-            ("testnet-7", NetworkId::TESTNET_7),
+            ("testnet", NetworkId::TESTNET_8),
+            ("testnet-8", NetworkId::TESTNET_8),
             ("devnet", NetworkId::DEVNET),
         ] {
             let params = ConsensusParams::for_network(name).expect("a network this build ships");

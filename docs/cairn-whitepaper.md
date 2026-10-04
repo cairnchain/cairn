@@ -668,7 +668,7 @@ forger that dislikes its questions buys another tip, and the retarget would
 let it walk its run down to the difficulty floor, where a tip costs one
 hash. So a newcomer refuses a tip more than 32 times below the hardest
 header of its run. That puts a tip at no less than a thousandth of an
-average block on a chain that ran to schedule, measured at 2^17.9 hashes at
+average block on a chain that ran to schedule, measured at 2^18.9 hashes at
 the public test network's opening difficulty, and it costs an honest chain
 what the cap does: one
 that loses more than about twenty times its hash rate is read rather than

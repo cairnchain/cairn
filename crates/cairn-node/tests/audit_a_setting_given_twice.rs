@@ -7,8 +7,8 @@
 //! It was applied to a name the node does not know and not to a name it knows
 //! given twice, where the same thing happens by the same road. And the example
 //! in that sentence is the case it happens to: `--network devnet --network
-//! testnet-7` ran on devnet, said devnet in its summary, and said nothing at
-//! all about the testnet-7 it had also been told. Two chains, one of them
+//! testnet-8` ran on devnet, said devnet in its summary, and said nothing at
+//! all about the testnet-8 it had also been told. Two chains, one of them
 //! chosen by which argument came first.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -49,7 +49,7 @@ fn two_networks_on_one_command_line_are_refused_rather_than_settled_by_order() {
         "--network",
         "devnet",
         "--network",
-        "testnet-7",
+        "testnet-8",
         "--check",
     ]);
     let words = said(&output);
@@ -61,7 +61,7 @@ fn two_networks_on_one_command_line_are_refused_rather_than_settled_by_order() {
          {words}"
     );
     assert!(
-        words.contains("devnet") && words.contains("testnet-7"),
+        words.contains("devnet") && words.contains("testnet-8"),
         "the refusal names neither of the two values it is about: {words}"
     );
     let _ = std::fs::remove_dir_all(&directory);
@@ -73,7 +73,7 @@ fn two_networks_in_the_file_are_refused_as_well() {
     let directory = scratch("file");
     std::fs::write(
         directory.join("cairn.conf"),
-        "network = devnet\nnetwork = testnet-7\n",
+        "network = devnet\nnetwork = testnet-8\n",
     )
     .unwrap();
     let output = cairnd(&["--data", &directory.to_string_lossy(), "--check"]);

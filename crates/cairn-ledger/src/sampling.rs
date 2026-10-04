@@ -205,13 +205,13 @@ use crate::validation::ConsensusParams;
 /// hardest header of its run, and that is what gives a seed a price: at least
 /// the band the draw leaves unresolved over 2^18, a thousandth of an average
 /// block on a chain that ran to schedule. Measured on a thirty year chain, the
-/// cheapest tip a forger can present costs 2^17.9 hashes at testnet-7's
+/// cheapest tip a forger can present costs 2^18.9 hashes at testnet-8's
 /// opening difficulty and 2^13.9 at the devnet's. [`MOST_FALL`] says why it is not the
 /// chain's difficulty, and what the tie costs an honest chain.
 ///
 /// So the figure is stated against a budget. At 40% the inequality above
 /// leaves 2^-161.9 a tip, which holds under 2^-128 against 2^33 tips and not
-/// against 2^34; 2^33 tips cost 2^50.9 hashes on testnet-7 and 2^46.9 on the
+/// against 2^34; 2^33 tips cost 2^51.9 hashes on testnet-8 and 2^46.9 on the
 /// devnet at those difficulties. The staircase the draw really is is worth
 /// more per question than the inequality, so that budget is a floor and not
 /// the budget; at the measured 42.96% there is none at all, since that is
@@ -537,10 +537,12 @@ pub const BELOW_THE_PINNED: u64 = RECENT_HEADERS as u64 - 1;
 /// least 256 times its mean difficulty, so a fresh seed costs at least a
 /// thousandth of an average block. Measured on a thirty year chain in
 /// `tests/the_price_of_a_seed.rs`, the cheapest tip a forger can present is
-/// 2^17.9 hashes at testnet-7's opening difficulty and 2^13.9 at the devnet's,
-/// against 2^18.0 and 2^14.0 under the moving average the retarget used to be:
-/// the walk got faster and the price did not move, because it rests on this
-/// tie and on the ceiling on the run, not on the walk.
+/// 2^18.9 hashes at testnet-8's opening difficulty and 2^13.9 at the devnet's.
+/// Under the moving average the retarget used to be it was 2^18.0 at
+/// testnet-7's, a halving lower, and 2^14.0 at the devnet's: the walk got
+/// faster and the price did not move, because it rests on this tie and on the
+/// ceiling on the run, not on the walk, and it rose with testnet-8's opening
+/// difficulty because the band is counted in blocks at that difficulty.
 /// That is not the chain's difficulty, and no tie of this kind makes it so: a
 /// run whose tip fell this far is what an honest chain looks like after a
 /// loss.
@@ -549,7 +551,7 @@ pub const BELOW_THE_PINNED: u64 = RECENT_HEADERS as u64 - 1;
 /// where its difficulty is low. Held to the pinned header alone, it lays a
 /// cheap stretch where the deepest question lands, climbs out of it to carry
 /// the band, and walks back down to within the tie of the cheap header:
-/// measured the same way, that tip costs 2^11.2 hashes on testnet-7 and 2^8.1
+/// measured the same way, that tip costs 2^11.9 hashes on testnet-8 and 2^8.1
 /// on the devnet.
 ///
 /// What it costs an honest chain is a loss of hash rate it cannot be weighed
@@ -559,8 +561,8 @@ pub const BELOW_THE_PINNED: u64 = RECENT_HEADERS as u64 - 1;
 /// under the moving average this was set from. So this is twice the sixteen
 /// [`MOST_TAIL`] is written for, with room: no chain that lost sixteen times
 /// its hash rate was refused, sixty four of them on each network, and on
-/// testnet-7 none that lost twenty. One that lost twenty four or more is
-/// refused on testnet-7 from about eight hours after the loss, for up to 28
+/// testnet-8 none that lost twenty. One that lost twenty four or more is
+/// refused on testnet-8 from about eight hours after the loss, for up to 28
 /// hours at twenty four, about half as long as the ceiling on the run refuses
 /// it anyway, and under five and a half days at any loss beyond. A newcomer
 /// reads such a chain rather than weighing it, where a peer keeps it. A rule

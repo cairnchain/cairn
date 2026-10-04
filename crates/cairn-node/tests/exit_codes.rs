@@ -140,7 +140,7 @@ fn the_floor_under_what_a_node_keeps_is_printed_beside_the_figure() {
         "--data",
         &directory.to_string_lossy(),
         "--network",
-        "testnet-7",
+        "testnet-8",
         "--keep",
         "1MB",
         "--check",

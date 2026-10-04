@@ -10535,7 +10535,7 @@ mod disk_and_headers {
     /// that no longer starts where the ledger does.
     #[test]
     fn a_chain_that_holds_its_first_block_is_not_given_it_again() {
-        let params = ConsensusParams::for_network("testnet-7").expect("testnet-7 exists");
+        let params = ConsensusParams::for_network("testnet-8").expect("testnet-8 exists");
         let opened = genesis::opens_at(params.network);
         let directory = scratch("first-block-again");
         let (mut log, _) = BlockLog::open(&directory).unwrap();
@@ -15215,9 +15215,9 @@ mod clock_tests {
     /// waiting for its first peer.
     #[test]
     fn a_clock_behind_the_first_block_is_named_rather_than_dropped() {
-        let params = ConsensusParams::for_network("testnet-7").expect("testnet-7 exists");
+        let params = ConsensusParams::for_network("testnet-8").expect("testnet-8 exists");
         let opened = genesis::opens_at(params.network);
-        assert!(opened > 0, "testnet-7 pins a first block");
+        assert!(opened > 0, "testnet-8 pins a first block");
 
         let mut chain = ChainStore::new(params);
         let ahead = open_the_chain(&mut chain, None, params, opened - DRIFT - 60)
