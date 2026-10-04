@@ -1,4 +1,4 @@
-//! What a fresh seed costs a forger on testnet-7 and on the devnet, and what
+//! What a fresh seed costs a forger on testnet-8 and on the devnet, and what
 //! the rule that prices it costs an honest chain that loses hash rate.
 //!
 //! Three readings of the run are measured side by side: no tie between the
@@ -211,7 +211,7 @@ struct Network {
 }
 
 fn networks() -> Vec<Network> {
-    ["testnet-7", "devnet"]
+    ["testnet-8", "devnet"]
         .into_iter()
         .map(|name| Network {
             name,
@@ -413,8 +413,8 @@ fn tied_to_the_run(network: &Network, fall: u64, gaps: &[u128]) -> Price {
 /// question that lands in its invented work, so a tip at the floor cost it
 /// about forty hashes, and nothing compared the tip with the run below it.
 /// Held to the pinned header alone, the forger makes the pinned header cheap
-/// and pays about two thousand; held to the hardest header of the run, it has
-/// to carry the band flat and pays a quarter of a million on testnet-7. The
+/// and pays about four thousand; held to the hardest header of the run, it
+/// has to carry the band flat and pays about half a million on testnet-8. The
 /// figures are pinned because the specification, `SAMPLES` and SECURITY.md
 /// quote them.
 ///
@@ -431,6 +431,11 @@ fn tied_to_the_run(network: &Network, fall: u64, gaps: &[u128]) -> Price {
 /// between, and a faster walk only lets the forger come closer to it. The tie
 /// to the pinned header alone, which nobody applies, came out at 2^11.2 where
 /// it was 2^10.2, and nothing here rests on it.
+///
+/// And again at testnet-8's opening difficulty, 2^28 where testnet-7's was
+/// 2^27. The band is counted in blocks at the opening difficulty, so the price
+/// doubled with it, to 2^18.9, and the walk to the floor is still fifteen
+/// headers; the tie to the pinned header alone came out at 2^11.9.
 #[test]
 fn a_tip_held_to_the_hardest_header_of_its_run_costs_what_the_documents_state() {
     let mut measured = Vec::new();
@@ -488,7 +493,7 @@ fn a_tip_held_to_the_hardest_header_of_its_run_costs_what_the_documents_state() 
     }
     assert_eq!(
         measured,
-        vec![("testnet-7", 5.3, 11.2, 17.9), ("devnet", 5.3, 8.1, 13.9)],
+        vec![("testnet-8", 5.3, 11.9, 18.9), ("devnet", 5.3, 8.1, 13.9)],
         "the price of a seed moved, and the specification, SAMPLES and SECURITY.md quote it"
     );
 
@@ -632,7 +637,7 @@ fn honest_loss(network: &Network, loss: f64, fall: u64, seed: u64) -> Loss {
 }
 
 /// The tie refuses no honest chain that lost sixteen times its hash rate, nor
-/// on testnet-7 one that lost twenty, and what it costs one that lost more is
+/// on testnet-8 one that lost twenty, and what it costs one that lost more is
 /// a stretch of days in which it is read rather than weighed.
 ///
 /// The retarget follows a loss with noise of its own: on these chains, block
@@ -685,13 +690,13 @@ fn the_tie_refuses_no_honest_chain_that_lost_sixteen_times_its_hash_rate() {
                     network.name
                 );
             }
-            if loss == 20 && network.name == "testnet-7" {
+            if loss == 20 && network.name == "testnet-8" {
                 assert_eq!(
                     refused, 0,
-                    "testnet-7 refused a loss of twenty, which the documents say it does not"
+                    "testnet-8 refused a loss of twenty, which the documents say it does not"
                 );
             }
-            if loss == 24 && network.name == "testnet-7" {
+            if loss == 24 && network.name == "testnet-8" {
                 assert!(
                     hours(tie) < 36.0,
                     "a loss of twenty four was refused for more than the day and a half the \
@@ -700,7 +705,7 @@ fn the_tie_refuses_no_honest_chain_that_lost_sixteen_times_its_hash_rate() {
             }
             longest = longest.max(tie);
         }
-        if network.name == "testnet-7" {
+        if network.name == "testnet-8" {
             assert!(
                 longest < 6 * 24 * 3_600,
                 "a loss was refused for longer than the six days the documents say"

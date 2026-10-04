@@ -135,7 +135,7 @@ the_settings() {
     # refused, so a retired name here costs a line of output and nothing
     # else. It is not asked from the build at this point because the build
     # is not built yet.
-    resolve NETWORK "$(carried network)" testnet-7
+    resolve NETWORK "$(carried network)" testnet-8
     resolve PORT "${listen##*:}" 9945
     resolve HTTP "$(carried http)" 127.0.0.1:8080
     resolve SEED "$(carried seed)" ""

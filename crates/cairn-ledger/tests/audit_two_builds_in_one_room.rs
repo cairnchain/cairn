@@ -263,7 +263,7 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     let header = pinned_header();
     assert_eq!(
         hex::encode(&header.encode()),
-        "01005a5241437766554433221100\
+        "01005b5241437766554433221100\
          a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\
          b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2\
          c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3\
@@ -276,7 +276,7 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     );
     assert_eq!(
         header.id().to_string(),
-        "cb0e19a1f54ae138fc02d426e4fb3e45da98694c8c36013fe8177b2c4c5dd84d"
+        "6630db19acd1ad255ca6c07dab423f0d766ec386f28e2eb17216c171bf5965df"
     );
     assert_eq!(
         header.encode().len(),
@@ -344,7 +344,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
     );
     assert_eq!(
         state.history_root().to_string(),
-        "cd89989bf63556c9dba7de3bc60cc11c05304afc5890272fc8631012e1ce593c"
+        "15e4a894914908484e155dcae13a61b7d28e5501bf330696d7579564eb015c89"
     );
     assert_eq!(
         state.supply().as_pebbles(),
@@ -358,7 +358,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
     );
     assert_eq!(
         state.tip().unwrap().id.to_string(),
-        "a2a72094864ba91c39ca94ed132a5546163ad0df05134a5a550d974c94c478bb"
+        "b3fe1475bdc566594f53b788bb41d790a9333862d5234a61cc00853328be10cf"
     );
 }
 
@@ -379,7 +379,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
 /// or not whoever adds it remembers the constant assertion.
 #[test]
 fn every_network_this_build_ships_has_a_schedule_read_the_way_it_is_written() {
-    for name in ["testnet", "testnet-7", "devnet"] {
+    for name in ["testnet", "testnet-8", "devnet"] {
         let params = ConsensusParams::for_network(name).expect("a network this build ships");
         let schedule = params.activations;
         let opening = schedule.first().expect("a schedule is never empty");

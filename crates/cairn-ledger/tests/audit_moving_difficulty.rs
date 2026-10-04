@@ -11,7 +11,7 @@
 //! `MIN_DIFFICULTY`, which is the floor, and every fixture spaced its blocks
 //! ten times the target apart, which is the direction that wants lowering.
 //! There was nowhere to lower to, so the retarget answered with the floor
-//! forever. The published networks open at 2^23 and 2^27, where a test cannot
+//! forever. The published networks open at 2^23 and 2^28, where a test cannot
 //! afford a second block, so nothing else was reachable either.
 //!
 //! `ConsensusParams::mineable_network` is the answer, and this file is what

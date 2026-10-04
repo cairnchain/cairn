@@ -141,7 +141,7 @@ the_settings() {
     # retired name here costs a line of output and nothing else. It is not
     # asked from the build at this point because the build is not built
     # yet.
-    resolve NETWORK "$(carried network)" testnet-7
+    resolve NETWORK "$(carried network)" testnet-8
     resolve PORT "${listen##*:}" 9944
     resolve SEED "$(carried seed)" ""
     # An address to pay block rewards to, or a public key in the form an

@@ -18,48 +18,62 @@ use cairn_primitives::Hash32;
 use crate::block::Block;
 use crate::note::NetworkId;
 
-/// The first block of testnet-7, as bytes.
+/// The first block of testnet-8, as bytes.
 ///
 /// Mined once, in the open. Its coinbase pays nobody: a network should not
 /// start with someone already holding something. What it says is what the
-/// network started over for: a place in the hot set was free to a miner, a
-/// block did not commit to its signatures, and an address showed its key.
+/// network started over for: the difficulty follows the clock, so a few
+/// minutes of hired hash rate no longer stop the chain for a day and a half.
 ///
-/// Minted on 30 September 2026 at 20:40:58 UTC, the evening testnet-7
-/// opened, with `cargo run --release -p cairn-ledger --example mint_genesis
-/// -- testnet-7 "Cairn testnet-7. An address names a key without showing
-/// it."` on the code the wave merged with. Its timestamp is `opens_at`, and
-/// the retarget's schedule starts there, so it was minted within hours of the
-/// merge.
-const TESTNET_7: &str = "01005a524143000000000000000000000000000000000000000000000000000000000000000000000000000000009fd0810f2dfd125eac261c2d8a11af1644baacdb3ad952372bc442f2bf4637700b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e2da73bd6a00000000000000080000000000000008000000000000000000000000370d05010000000001000000000000000000000000003b000000436169726e20746573746e65742d372e20416e2061646472657373206e616d65732061206b657920776974686f75742073686f77696e672069742e00000000";
+/// Provisional. Minted on the code a restart lands with by `cargo run
+/// --release -p cairn-ledger --example remint`, which mints this block and
+/// the devnet's together and writes both into every place that pins them,
+/// on 4 October 2026 at 13:25:06 UTC. Its timestamp is `opens_at`, and the
+/// retarget's schedule starts there, so it is minted again the day the
+/// network opens: every target time a network opens after its first block is
+/// dated is a block asked less than the network's real rate, down to the
+/// floor.
+const TESTNET_8: &str = "01005b524143000000000000000000000000000000000000000000000000000000000000000000000000000000006f3cc73c214804e789694adf801aa8db60858b3067698961f1d554b05e1c360c0b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e2b253c26a0000000000000010000000000000001000000000000000000000000026d5490900000000010000000000000000000000000032000000436169726e20746573746e65742d382e2054686520646966666963756c747920666f6c6c6f77732074686520636c6f636b2e00000000";
+
+/// How long before it was minted the devnet's first block is dated.
+///
+/// `cairn-net/tests/pinned_network.rs` mines a thousand and ninety seven
+/// devnet blocks forward from that block, each dated when a steady machine at
+/// a hundred and twenty eighth of the opening rate would find it, and dates
+/// none of them past the wall clock. Under the schedule that chain spans
+/// 7 585 seconds whatever day it is mined, two hours and six minutes, so the
+/// first block has to stand at least that far behind the moment the test
+/// runs. Two and a half hours leaves the test about twenty minutes to grow,
+/// and asks a devnet opened the day the block is minted for about eighteen
+/// hundred blocks at the floor before it has caught its schedule up, where
+/// the twenty nine days this used to be asked half a million. The test holds
+/// its chain under this.
+///
+/// Written as one number rather than as hours and minutes multiplied out: a
+/// mutation of that arithmetic is caught only by the test in `cairn-net`,
+/// which a mutant of this crate is not run against.
+pub const DEVNET_DATED_EARLY: u64 = 9_000;
 
 /// The first block of the throwaway network.
 ///
-/// Says what it is, and pays nobody, like every first block here. Reminted
-/// alongside testnet-7 because devnet's marker moved too (`NetworkId::DEVNET`
-/// is no longer `NetworkId::DEVNET_1`), which changes every byte after it.
+/// Says what it is, and pays nobody, like every first block here. Minted
+/// alongside testnet-8's, by the same command and for the same reason, and
+/// because devnet's marker moved too (`NetworkId::DEVNET` is no longer
+/// `NetworkId::DEVNET_2`), which changes every byte after it.
 ///
-/// Minted with `cargo run --release -p cairn-ledger --example mint_genesis
-/// -- devnet "Cairn devnet. Throwaway by design."` on the code the wave
-/// merged with, and timestamped 29 days before it was mined, on purpose:
-/// `cairn-net/tests/pinned_network.rs` mines a long devnet chain forward from
-/// this exact block at the pace of a slow machine and holds every block of it
-/// behind the wall clock, which a first block dated the day it was minted
-/// leaves no room for.
-///
-/// That was cheap while the retarget was a moving average, which took one easy
-/// block for the gap. The retarget's schedule now starts at this timestamp, so
-/// a devnet opened the day this was mined stands twenty nine days behind it and
-/// is asked the floor for about half a million blocks before it catches up,
-/// measured in `tests/the_difficulty_follows_the_clock.rs`, and one opened
-/// later for longer. It has to be minted again close to the day the devnet is
-/// used, and dated a few hours rather than days before: the chain that test
-/// mines spans a little over two hours of the devnet's schedule.
-const DEVNET: &str = "01004552414300000000000000000000000000000000000000000000000000000000000000000000000000000000dfe46a6f2e26f175ffa4d4a6b2522ca93a3fa73c7a1ef971637289623c5d03270b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e222f0966a0000000000008000000000000000800000000000000000000000000002a8510000000000010000000000000000000000000022000000436169726e206465766e65742e205468726f77617761792062792064657369676e2e00000000";
+/// Dated [`DEVNET_DATED_EARLY`] before it was minted, on purpose, so that the
+/// test that mines forward from this exact block finds the wall clock ahead
+/// of its chain. The schedule starts at this timestamp, so a devnet opened
+/// later than that stands behind its schedule by the difference and is asked
+/// the floor until it has caught up, about seventeen thousand blocks for every
+/// day: `tests/the_difficulty_follows_the_clock.rs` measures a month. So it is
+/// minted again with every restart, and a devnet is best opened on the build
+/// that carries a fresh one.
+const DEVNET: &str = "01004652414300000000000000000000000000000000000000000000000000000000000000000000000000000000dfe46a6f2e26f175ffa4d4a6b2522ca93a3fa73c7a1ef971637289623c5d03270b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e28a30c26a000000000000800000000000000080000000000000000000000000007616420000000000010000000000000000000000000022000000436169726e206465766e65742e205468726f77617761792062792064657369676e2e00000000";
 
 fn encoded(network: NetworkId) -> Option<&'static str> {
     let text = match network {
-        NetworkId::TESTNET_7 => TESTNET_7,
+        NetworkId::TESTNET_8 => TESTNET_8,
         NetworkId::DEVNET => DEVNET,
         _ => return None,
     };
@@ -92,7 +106,7 @@ mod tests {
     use crate::pow::meets_target;
 
     fn networks() -> [NetworkId; 2] {
-        [NetworkId::TESTNET_7, NetworkId::DEVNET]
+        [NetworkId::TESTNET_8, NetworkId::DEVNET]
     }
 
     #[test]
@@ -123,15 +137,31 @@ mod tests {
 
     /// The two numbers everything else is pinned to, written out so that a
     /// block replaced without replacing what names it stops the build rather
-    /// than the network. The README and the site quote both.
+    /// than the network. The README quotes both for both networks, and
+    /// `cargo run --release -p cairn-ledger --example remint` rewrites them
+    /// here and there together.
     #[test]
     fn the_pinned_identifier_and_opening_are_what_is_published() {
-        let first = block(NetworkId::TESTNET_7).unwrap();
-        assert_eq!(
-            cairn_primitives::hex::encode(first.id().as_bytes()),
-            "0000000cd9f098b5467d2cfa0c70b3c2a874fde9d436e6fc92bc26002ddc15bb"
-        );
-        assert_eq!(opens_at(NetworkId::TESTNET_7), 1_790_800_858);
+        for (network, identifier, opened) in [
+            (
+                NetworkId::TESTNET_8,
+                "0000000270eb96cd530f6a3e8c0b3e3a6509b47f4d3393bb6a14d919bf565817",
+                1_791_120_306,
+            ),
+            (
+                NetworkId::DEVNET,
+                "000000e13c0c16303f63e4bfd5e8e503acfe8102a559679964d7685903b6d8d6",
+                1_791_111_306,
+            ),
+        ] {
+            let first = block(network).unwrap();
+            assert_eq!(
+                cairn_primitives::hex::encode(first.id().as_bytes()),
+                identifier,
+                "{network}"
+            );
+            assert_eq!(opens_at(network), opened, "{network}");
+        }
     }
 
     #[test]
@@ -156,7 +186,7 @@ mod tests {
 
     #[test]
     fn the_networks_do_not_share_a_beginning() {
-        assert_ne!(pinned(NetworkId::TESTNET_7), pinned(NetworkId::DEVNET));
+        assert_ne!(pinned(NetworkId::TESTNET_8), pinned(NetworkId::DEVNET));
         assert_eq!(
             pinned(NetworkId::MAINNET),
             None,
