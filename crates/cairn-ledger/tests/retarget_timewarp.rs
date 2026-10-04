@@ -1247,9 +1247,14 @@ fn a_header_at_the_drift_ceiling_lowers_the_next_block_by_a_ninth_and_nothing_af
 /// allow, block by block, off an honest chain on schedule at the floor's edge,
 /// which is the most slack any branch can start from: a branch forked off a
 /// chain at a real difficulty first has to fall a half life behind for every
-/// halving. Spacing need not be even, and the tightest branch spends its hour
-/// of slack at once and then runs a target a block: 57 841 seconds, 16 h 04
-/// m, against the 61 440 of a branch on schedule. Under the moving average
+/// halving. The last block of the branch is held to the median rule alone:
+/// its own demand was set by its parent, and the block after it is not part
+/// of the branch, so nothing asks it to keep the floor. Spacing need not be
+/// even, and the tightest branch spends its hour of slack at once, then runs a
+/// target a block, and dates its last block at the median: 57 781 seconds,
+/// 16 h 03 m, against the 61 440 of a branch on schedule. Held to keeping the
+/// floor for one block more, as this search once held it, the last block
+/// cost sixty seconds and the branch spanned 57 841. Under the moving average
 /// the same search found 30 069 seconds, 8 h 21 m.
 ///
 /// Pinned exactly, so that a change to the retarget moving the figure either
@@ -1268,10 +1273,16 @@ fn a_floor_branch_of_the_burial_depth_spans_the_figure_the_documents_publish() {
         };
         next_difficulty(&probe, origin, TARGET) == MIN_DIFFICULTY
     };
-    for _ in 0..REORG_WINDOW {
+    for index in 0..REORG_WINDOW {
         assert_eq!(window.next(TARGET), MIN_DIFFICULTY);
         let mut low = window.median().unwrap() + 1;
-        let mut high = window.last().timestamp + FALL;
+        // The last block answers to the median alone.
+        let last = index + 1 == REORG_WINDOW;
+        let mut high = if last {
+            low
+        } else {
+            window.last().timestamp + FALL
+        };
         while low < high {
             let middle = low + (high - low) / 2;
             if keeps_the_floor(height, middle) {
@@ -1280,7 +1291,7 @@ fn a_floor_branch_of_the_burial_depth_spans_the_figure_the_documents_publish() {
                 low = middle + 1;
             }
         }
-        assert!(keeps_the_floor(height, low));
+        assert!(last || keeps_the_floor(height, low));
         window.push(height, low, MIN_DIFFICULTY);
         highest = highest.max(low);
         height += 1;
@@ -1294,9 +1305,9 @@ fn a_floor_branch_of_the_burial_depth_spans_the_figure_the_documents_publish() {
         REORG_WINDOW * CHEAPEST_AT_THE_FLOOR
     );
     assert_eq!(
-        span, 57_841,
-        "the tightest floor branch found moved, and the specification, the whitepaper \
-         and `sampling.rs` quote it"
+        span, 57_781,
+        "the tightest floor branch found moved, and the specification and `sampling.rs` \
+         quote it"
     );
     assert!(span < REORG_WINDOW * CHEAPEST_AT_THE_FLOOR);
 }

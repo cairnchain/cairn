@@ -336,7 +336,7 @@ pub struct SampledStart {
     /// and every block dated closer than the target moves them toward it, so
     /// past the half life of slack the floor's edge gives they average the
     /// target or the retarget demands more of them: a thousand and twenty
-    /// four of them span at least 16 h 04 m, and a reader
+    /// four of them span at least 16 h 03 m, and a reader
     /// refuses a tip more than ten blocks ahead of its own
     /// clock. Ten blocks is [`ConsensusParams::max_timestamp_drift`], ten
     /// minutes on the public networks. This used to say a day, and then two
@@ -347,8 +347,9 @@ pub struct SampledStart {
     /// to average only half the target, because at the floor it answered
     /// `floor(target / gap)`: a thousand and twenty four of them spanned 8 h
     /// 21 m at the tightest. Under the schedule the tightest branch found
-    /// spends its hour of slack at once and runs a target a block after it,
-    /// 57 841 seconds, and evenly spaced it holds the floor at 57 seconds a
+    /// spends its hour of slack at once, runs a target a block after it and
+    /// dates its last block at the median, 57 781 seconds, and evenly spaced
+    /// it holds the floor at 57 seconds a
     /// block and not 56. Both are pinned in `tests/retarget_timewarp.rs`. The
     /// argument is the same and stronger: the run has to state far more time
     /// than the drift lets a reader take in advance, so the forger sits

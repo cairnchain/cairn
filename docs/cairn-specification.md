@@ -1455,7 +1455,7 @@ blocks implies a least and a most work only because no step moves the
 difficulty further than this.
 
 These are vectors from an independent reference written with unbounded
-integers; `crates/cairn-ledger/tests/asert_vectors.txt` holds 52 of them, and an
+integers; `crates/cairn-ledger/tests/asert_vectors.txt` holds 50 of them, and an
 implementation that reproduces that file has reproduced the arithmetic.
 
 <table>
@@ -1528,14 +1528,16 @@ genesis difficulty is the floor, has an hour of it. Spaced evenly from there,
 1 024 blocks hold the floor at 57 seconds a block and not at 56, and span
 58 368 seconds. The tightest branch of 1 024 blocks found, taking each
 timestamp as low as the median rule and an answer of 1 allow, spends the hour
-at once and then runs a target a block, and spans 57 841 seconds, 16 h 04 m.
+at once, then runs a target a block, and dates its last block at the median,
+since nothing after the branch asks that block to keep the floor: it spans
+57 781 seconds, 16 h 03 m.
 A branch forked off a chain at a real difficulty has further to fall: a half
 life of stated time for every halving below where it forked.
 
 Any argument that prices a run of blocks at the floor MUST price it by what
-such a run can span: a run of 1 024 at 57 841 seconds or less, which is the
-target for every block less one half life of slack. The figure is measured
-rather than derived, and an implementation that finds a tighter branch has
+such a run can span: a run of 1 024 at 57 781 seconds or less, which is the
+target for every block but the last less one half life of slack. The figure
+is measured rather than derived, and an implementation that finds a tighter branch has
 found a smaller number that arguments are then bound by. Under the moving
 average the same figure was 30 069 seconds.
 
@@ -1758,7 +1760,7 @@ What burial costs is chain time. At a sixty second block, 1 024 blocks on
 schedule is 61 440 seconds, 17 h 04 m. At the difficulty floor a branch can
 spend at most a half life of slack and then has to run a target a block, as the
 retarget section shows, and the tightest such branch of 1 024 blocks found
-spans 57 841 seconds, 16 h 04 m. **The second figure is the one any argument
+spans 57 781 seconds, 16 h 03 m. **The second figure is the one any argument
 about how long an attacker must sit is entitled to.** Under the moving average
 the retarget used to be it was 30 069 seconds, under half the first. The drift bound is what
 keeps that time real: a node refuses a block more than ten blocks ahead of its

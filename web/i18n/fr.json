@@ -175,8 +175,8 @@
     "note": {
       "difficulty": {
         "plain": "La difficulté, c'est le travail qu'il faut fournir pour ajouter un bloc. Elle bouge toute seule : quand des machines arrivent, elle monte, et les blocs continuent d'arriver à peu près au même rythme qu'avant. Personne ne la règle à la main.",
-        "curious": "La difficulté est le nombre de tentatives qu'un bloc coûte en moyenne. Elle est recalculée à chaque bloc sur une fenêtre glissante des blocs récents, donc elle suit les mineurs en continu au lieu d'attendre la fin d'une période fixe.",
-        "technical": "Nombre de hachages attendu pour un bloc, recalculé bloc par bloc sur une fenêtre glissante et borné contre un saut brutal dans un sens comme dans l'autre. Le chiffre au-dessus est lu exactement ; la courbe est tracée en flottant double, ce qui reste très en deçà de la résolution de deux cents unités de hauteur."
+        "curious": "La difficulté est le nombre de tentatives qu'un bloc coûte en moyenne. Elle est recalculée à chaque bloc d'après un calendrier fixé au premier bloc du réseau, donc elle suit les mineurs en continu au lieu d'attendre la fin d'une période fixe.",
+        "technical": "Nombre de hachages attendu pour un bloc, recalculé bloc par bloc d'après l'avance ou le retard du parent sur un calendrier fixé au premier bloc, et tenu à un facteur quatre de celui du parent dans un sens comme dans l'autre. Le chiffre au-dessus est lu exactement ; la courbe est tracée en flottant double, ce qui reste très en deçà de la résolution de deux cents unités de hauteur."
       },
       "spacing": {
         "plain": "Le temps qu'a mis chaque bloc après le précédent. Ces heures sont écrites par les mineurs eux-mêmes, elles ne sont pas mesurées ici, et un bloc doit seulement venir après le milieu des blocs récents. Une barre peut donc valoir zéro, ou passer en dessous.",

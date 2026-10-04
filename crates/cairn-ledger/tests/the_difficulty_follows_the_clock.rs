@@ -46,6 +46,9 @@ use cairn_ledger::pow::{
 /// The vectors, as the reference printed them.
 const VECTORS: &str = include_str!("asert_vectors.txt");
 
+/// The specification, which says how many there are.
+const SPECIFICATION: &str = include_str!("../../../docs/cairn-specification.md");
+
 /// The public networks' block time.
 const TARGET: u64 = 60;
 
@@ -105,8 +108,21 @@ fn every_vector_the_independent_reference_computed_is_answered_exactly() {
         checked.push(fields[0]);
     }
     // A table that failed to load would pass every line of it, so the count
-    // and the cases the specification's table quotes are asked by name.
-    assert!(checked.len() >= 50, "only {} vectors read", checked.len());
+    // and the cases the specification's table quotes are asked by name. The
+    // count is the one the specification states, read off its sentence: it
+    // said 52 of a file that holds 50, and a check of at least fifty agreed
+    // with both.
+    let stated = SPECIFICATION
+        .split_once("asert_vectors.txt` holds ")
+        .and_then(|(_, after)| after.split_once(" of them"))
+        .map(|(count, _)| count.parse::<usize>().unwrap())
+        .expect("the specification says how many vectors the file holds");
+    assert_eq!(
+        checked.len(),
+        stated,
+        "the file holds {} vectors and the specification says {stated}",
+        checked.len()
+    );
     for name in [
         "block-one",
         "tau-ahead",

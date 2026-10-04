@@ -175,8 +175,8 @@
     "note": {
       "difficulty": {
         "plain": "Difficulty is how much work it takes to add a block. It moves on its own: when more machines join, it rises, and blocks keep arriving at roughly the rate they did before. Nobody sets it by hand.",
-        "curious": "Difficulty is the expected number of attempts a block costs. It is recalculated for every block from a sliding window of recent ones, so it follows the miners continuously rather than waiting for a fixed epoch to end.",
-        "technical": "Expected hash count for a block, recomputed per block over a sliding window and clamped against a sudden move in either direction. The figure above is parsed exactly; the line is plotted as a double, which is far beneath the resolution of two hundred units of height."
+        "curious": "Difficulty is the expected number of attempts a block costs. It is recalculated for every block against a schedule fixed at the network's first block, so it follows the miners continuously rather than waiting for a fixed epoch to end.",
+        "technical": "Expected hash count for a block, recomputed per block from how far the parent stands ahead of or behind a schedule fixed at the first block, and held within a factor of four of the parent's in either direction. The figure above is parsed exactly; the line is plotted as a double, which is far beneath the resolution of two hundred units of height."
       },
       "spacing": {
         "plain": "How long each block took after the one before it. These times are written by the miners themselves, not measured here, and a block only has to come after the middle of the recent ones. So a bar can sit at zero, or below it.",
