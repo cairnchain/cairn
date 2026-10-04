@@ -1,0 +1,53 @@
+{
+  "network": {
+    "name": "testnet-7",
+    "id": "0x4341525a",
+    "genesis": "0000000cd9f098b5467d2cfa0c70b3c2a874fde9d436e6fc92bc26002ddc15bb",
+    "opensAt": 1790800858
+  },
+  "tip": {
+    "height": 1832,
+    "id": "00000008c8676d2e9e3672dd8c4d1115225467e82cc7b1ee9b69468e138b5215",
+    "timestamp": 1791064701,
+    "difficulty": "393899660",
+    "transfers": 0
+  },
+  "peers": 4,
+  "index": {
+    "from": 0,
+    "through": 1832,
+    "behind": 0,
+    "fromTheStart": true,
+    "blocks": 1833
+  },
+  "node": {
+    "outdated": null,
+    "stranded": null,
+    "probation": null,
+    "joining": "no",
+    "outOfReach": 0,
+    "unwritten": null,
+    "unread": null,
+    "clockBehind": null,
+    "unjudged": null,
+    "unweighable": null,
+    "filling": null,
+    "writtenThrough": 1832,
+    "mended": 0,
+    "unanswered": null,
+    "turnedAway": 0,
+    "unsavedAddresses": null
+  },
+  "supply": {
+    "issued": "9159999994000",
+    "destroyed": "6000",
+    "unclaimed": "5000000000",
+    "counted": "9159999994000",
+    "fees": "14230",
+    "paidToMiners": "9160000008230",
+    "nextReward": "5000000000",
+    "halvingInterval": 1051200,
+    "nextHalving": 1049367
+  },
+  "pool": 0
+}
