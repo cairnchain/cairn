@@ -1450,7 +1450,15 @@ asked over its parent's is `2^((T - g) / tau)`, `g` the parent's own stated
 gap, so the clamp binds only after a gap more than two half lives longer than
 the target, or one that runs two half lives backwards. Measured on chains with
 random block times whose hash rate fell fifty times, it bound on one block in
-eighteen thousand. It stays because the weighing reasons from it: a run of
+eighteen thousand. A burst that leaves is where it binds: past about 120 times
+the honest difficulty, the first honest block's gap is that long, so each
+block after it is held to a quarter of the last, and from a few hundred times
+on the clamp adds about a third of that first gap to the stall. Past a few
+thousand times the stall leaves the chain further behind its schedule than the
+floor's edge, and the blocks after it are asked the floor until the chain has
+caught up to that edge: measured on testnet-8's rules, the median over sixteen
+seeds, 874 blocks at the floor after a departure from 4 096 times and 7 642
+after 8 192. It stays because the weighing reasons from it: a run of
 blocks implies a least and a most work only because no step moves the
 difficulty further than this.
 
@@ -1500,7 +1508,7 @@ late, lowers the difficulty of the one block after it by `2^(-10/60)`, about
 eleven per cent, and nothing after that. The moving average this replaced
 damped one late block to a tenth of a move and kept the damping in its window
 for ninety blocks, which is what made a burst of hash rate cost the honest
-chain a day and a half: on 2 October 2026 eighty testnet-7 blocks mined in two
+chain 33 hours: on 2 October 2026 eighty testnet-7 blocks mined in two
 minutes raised the difficulty 768 times. Under this rule the same eighty blocks
 stand 4 656 seconds ahead of the schedule, and the next block is asked 2.45
 times what it was.
@@ -1511,12 +1519,20 @@ remains: a hash rate that halves has half of its answer after 35 blocks and 60
 minutes of chain time, and ninety per cent after 147 blocks and 3 h 18 m. A
 tenfold loss reaches ninety per cent after 55 blocks and 3 h 19 m.
 
-**What a burst leaves behind is about what it paid.** Reaching a difficulty
-`X` times the honest one takes a branch `log2(X)` half lives ahead of its
-schedule, which at the difficulties on the way is about `X * tau / ln 2`
-seconds of the honest hash rate, and it leaves about `X` target times for the
-next honest block. The stall a departing miner leaves is about `T ln 2 / tau`
-of the honest work it spent, one eighty seventh at a one hour half life.
+**What a burst leaves behind grows with the logarithm of what it paid.**
+Reaching a difficulty `X` times the honest one takes a branch `log2(X)` half
+lives ahead of its schedule, which at the difficulties on the way is about
+`X * tau / ln 2` seconds of the honest hash rate. It leaves about `X` target
+times for the next honest block, and the honest chain gives back the branch's
+lead, `log2(X)` half lives, in all; past about 120 times the clamp lengthens
+the stall, as its paragraph above says. Measured on chains with random block
+times, the clamp included, as the honest delay over the next hundred honest
+blocks against the hours of the honest rate the burst paid: the eighty blocks
+of 2 October,
+replayed as stamped, 1.0 hour for 1.9; a miner of 1 260 times the honest rate
+staying five minutes, 5.6 hours for 106; staying an hour, 11.3 hours for
+1 259. A small burst still costs the honest chain about half of what it paid,
+an hour at that size; each further hour of delay costs more than the last.
 
 **At the floor the rule is a place, not a spacing.** The answer is the floor
 while `r` is below 2, which is while the parent stands far enough behind its

@@ -32,25 +32,59 @@ pub const MEDIAN_TIME_WINDOW: usize = 11;
 /// Chosen by simulation against the moving average it replaced, in the
 /// testnet-8 wave's `tau.py`, `presence.py` and `clamp.py`. An hour answers a
 /// genuine loss of nine tenths of the hash rate in about the time the old rule
-/// did, 3.8 hours until the blocks are back near their target, and leaves a
-/// miner that mines a burst and leaves with a stall about the size of what it
-/// paid. Reaching a difficulty `X` times the honest one costs about `X` times
-/// the honest rate for `tau / ln 2`, and leaves about `X` target times for the
-/// next honest block: a damage to cost ratio of `T ln 2 / tau`, one in
-/// eighty seven, where the moving average gave about seven in ten. Two hours
-/// is better still against that and answers a real loss in 7.8 hours; half an
-/// hour is noisier, and the noise is what a miner switching in and out reads.
+/// did, 3.8 hours until the blocks are back near their target, and holds a
+/// miner that mines a burst and leaves to a stall that grows with the
+/// logarithm of what it paid rather than with what it paid. Reaching a
+/// difficulty `X` times the honest one takes a branch `log2(X)` half lives
+/// ahead of its schedule, about `X` times the honest rate for `tau / ln 2`;
+/// the next honest block waits about `X` target times, and the honest chain
+/// gives back the branch's lead, `log2(X)` half lives, in all. Measured on
+/// both rules on one basis, the honest delay over the next hundred honest
+/// blocks against the hours of the honest rate the burst paid
+/// (`outcomes.py`, the plan's simulator and seeds, the bound included):
+///
+/// ```text
+///                                   moving average     schedule
+/// 2 October burst, 80 blocks        45 h for 51 h      1.0 h for 1.9 h
+/// 1 260 times the rate for 5 min    71 h for 117 h     5.6 h for 106 h
+/// 1 260 times the rate for 1 h      298 h for 1 177 h  11.3 h for 1 259 h
+/// ```
+///
+/// For the same effort the stall is thirteen to twenty six times shorter, and
+/// each further hour of it costs more than the last; a burst as small as the
+/// 2 October one still costs the honest chain about half of what it paid,
+/// which at that size is an hour. The schedule's figures are held in
+/// `tests/the_difficulty_follows_the_clock.rs`. Two hours would halve the
+/// first honest block's wait after a burst of the same cost, but add about a
+/// half life to the honest chain's delay in all, 8.5 hours against 5.6 for
+/// the five minute burst, and answer a real loss in 7.8 hours; half an hour is
+/// noisier, and the noise is what a miner switching in and out reads.
 pub const HALF_LIFE_IN_BLOCKS: u64 = 60;
 
 /// Ceiling on how far one retarget may move the difficulty, in either
 /// direction.
 ///
-/// The schedule rarely comes near it. The difficulty a block asks for over its
-/// parent's is `2^((T - gap) / tau)`, where `gap` is the parent's own stated
-/// solve time, so the bound binds only after a gap more than two half lives
-/// longer than the target, or one that runs two half lives backwards. On an
-/// honest chain whose hash rate falls fifty times it bound on one block in
-/// eighteen thousand, and it changed no outcome any simulation measured.
+/// An honest chain rarely brings the schedule near it. The difficulty a block
+/// asks for over its parent's is `2^((T - gap) / tau)`, where `gap` is the
+/// parent's own stated solve time, so the bound binds only after a gap more
+/// than two half lives longer than the target, or one that runs two half lives
+/// backwards. On an honest chain whose hash rate falls fifty times it bound on
+/// one block in eighteen thousand.
+///
+/// A miner that mines a burst and leaves brings it there. Past about 120
+/// times the honest difficulty, the first honest block's wait is longer than
+/// that, so the block after it is held to a quarter of it and the next to a
+/// quarter of that, where the schedule alone would have asked less at once;
+/// from a few hundred times on that adds about a third of the first wait to
+/// the stall, `X / 3` target times. A miner of 1 260 times the honest rate
+/// staying an hour leaves the next hundred honest blocks 11.3 hours late
+/// with the bound and 9.6 without it. Past a few thousand times the stall
+/// leaves the chain further behind its schedule than the floor's edge, and
+/// the honest chain then mines hundreds or thousands of blocks at
+/// [`MIN_DIFFICULTY`], with almost no work behind them, while it catches the
+/// schedule up: a median of 874 after a departure from 4 096 times and 7 642
+/// after 8 192, which the bound brings on sooner and makes longer. Both are
+/// held in `tests/the_difficulty_follows_the_clock.rs`.
 ///
 /// Public because the weighing in [`crate::sampling`] reasons from it. Two
 /// headers a thousand blocks apart cannot state whatever work they like
@@ -207,11 +241,11 @@ pub fn median_time_past(recent: &[HeaderSummary]) -> Option<u64> {
 /// blocks left its window, ninety slow blocks later. On 2 October 2026 a
 /// stranger mined eighty testnet-7 blocks in two minutes, the average asked
 /// the next block for 768 times the difficulty before them, and the network
-/// nearly stopped for a day and a half. Here the same eighty blocks, stamped
-/// as they were, leave the chain 4 656 seconds further ahead of its schedule,
-/// which asks the next block for 2.45 times the difficulty, and the honest
-/// miner walks back onto the schedule on its own. What the rule answers depends on where the chain stands, not on
-/// the path it took there.
+/// nearly stopped for 33 hours. Here the same eighty blocks, stamped as they
+/// were, leave the chain 4 656 seconds further ahead of its schedule, which
+/// asks the next block for 2.45 times the difficulty, and the honest miner
+/// walks back onto the schedule on its own. What the rule answers depends on
+/// where the chain stands, not on the path it took there.
 ///
 /// A miner writing its own timestamps moves only the parent's term, and the
 /// median time past and the future limit hold that term as they always did: a

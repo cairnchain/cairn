@@ -537,7 +537,7 @@
         ],
         "curious": [
           "Proof of work rather than proof of stake, and the reason is the start rather than the steady state. Proof of stake needs an initial distribution before it can work, which means founders deciding who holds power on day one. Proof of work needs nobody to decide anything: the network opens, and the first block goes to whoever mines it.",
-          "Difficulty adjusts every block against a schedule fixed at the network's first block, doubling for every hour the chain runs ahead of it and halving for every hour behind, with a factor of four cap per retarget, so a large miner arriving or leaving does not strand the chain, and one that mines a burst and leaves owes the chain about what it paid."
+          "Difficulty adjusts every block against a schedule fixed at the network's first block, doubling for every hour the chain runs ahead of it and halving for every hour behind, with a factor of four cap per retarget, so a large miner arriving or leaving does not strand the chain, and one that mines a burst and leaves holds it up for a time that grows with the logarithm of what it paid: hours, where the moving average took days."
         ],
         "technical": [
           "ASERT (aserti3-2d) anchored at the first block, half life of 60 blocks, maximum 4x per retarget. Timestamps are validated against the median of the previous eleven blocks rather than against the parent, which removes the single-block manipulation that a later-than-parent rule permits.",

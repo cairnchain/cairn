@@ -40,14 +40,18 @@ difficulty's schedule starts at its timestamp). Its money is worth nothing, is
 meant to be worth nothing, and the network will be reset.
 
 It is the eighth because a few minutes of hired hash rate could nearly stop
-the chain for a day and a half. On 2 October 2026 a stranger mined eighty
-blocks in two minutes and left. The difficulty was a moving average over
-ninety blocks that rose fast and fell slowly; it had climbed about six hundred
-times, and the network's own miner needed a day and a half to work it back
-down. The difficulty now follows a schedule fixed at the first block, twice as
-hard for every hour a chain runs ahead of it and half as hard for every hour
-behind, so a burst that leaves costs the honest chain about an eighty seventh
-of what it paid. That changes the difficulty every block must carry.
+the chain for 33 hours. On 2 October 2026 a stranger mined eighty blocks in
+two minutes and left. The difficulty was a moving average over ninety blocks
+that rose fast and fell slowly; it asked the first honest block after the
+burst for 768 times the difficulty before it, and the network's own miner
+needed 33 hours to work it back down. The difficulty now follows a schedule
+fixed at the first block, twice as hard for every hour a chain runs ahead of
+it and half as hard for every hour behind, so a burst that leaves holds the
+honest chain up for a time that grows with the logarithm of what it paid:
+for the same hired hash rate, ten to thirty times less than the moving
+average did, five and a half hours after five minutes of the stranger's rate
+and eleven after an hour of it. That changes the difficulty every block must
+carry.
 
 `testnet-7` is retired and nothing on it carries over: it opened on
 30 September 2026, because a place in the hot set was free to a miner, a
@@ -62,7 +66,7 @@ will be mined in the open on the day it is announced.
 The protocol is complete and runs end to end: notes and transactions, the
 accumulator that replaces the state database, the two tiers, proof of work
 with a difficulty that answers a halving of hash rate in about three hours
-and that a burst of hired hash rate leaves owing about what it paid, the fork
+and that a burst of hired hash rate holds up for hours rather than days, the fork
 choice, atomic reorganisation, and syncing between nodes over TCP.
 
 A node keeps its chain on disk and replays it on start, and finds its peers by

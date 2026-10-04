@@ -135,26 +135,27 @@ impl NetworkId {
     /// these, and the network starts over.
     pub const TESTNET_7: Self = Self(0x4341_525A);
     /// The eighth, because a few minutes of hired hash rate could nearly stop
-    /// the chain for a day and a half.
+    /// the chain for 33 hours.
     ///
     /// The retarget was a moving average over the last ninety blocks, which
     /// rose fast and fell slowly. On 2 October 2026 a stranger mined eighty
-    /// blocks in two minutes and left; the difficulty had risen about six
-    /// hundred times on the way, and the honest miner, alone with it again,
-    /// needed about a day and a half to work it back down. The stall a burst
-    /// left was about seven tenths of an hour for every hour of the honest
-    /// network's work it paid for, so the cheapest way to stop the network
-    /// was to rent hash rate for a few minutes and leave.
+    /// blocks in two minutes and left; the first honest block after them was
+    /// asked 768 times the difficulty before them, and the honest miner,
+    /// alone with it again, needed 33 hours to work it back down. Five
+    /// minutes of a miner that size held the next hundred honest blocks up
+    /// 71 hours, and an hour of it 298, so the cheapest way to stop the
+    /// network was to rent hash rate for a few minutes and leave.
     ///
     /// The difficulty now follows a schedule fixed at the first block: what a
     /// block is asked depends on how far its parent stands ahead of or behind
     /// the time the schedule gives its height, twice as much for every hour
     /// ahead and half as much for every hour behind, and not on the path the
-    /// chain took to get there. A burst that leaves owes the honest chain
-    /// about what it paid, an eighty seventh of it at a one hour half life.
-    /// That changes the difficulty every block must carry, so every block
-    /// mined under the old rule is invalid under this one, and the network
-    /// starts over.
+    /// chain took to get there. A burst that leaves holds the honest chain up
+    /// for about as long as it ran ahead of the schedule, which grows with the
+    /// logarithm of what it paid: 5.6 hours after the same five minutes, 11.3
+    /// after the same hour. That changes the difficulty every block must
+    /// carry, so every block mined under the old rule is invalid under this
+    /// one, and the network starts over.
     pub const TESTNET_8: Self = Self(0x4341_525B);
     /// Kept as the name of whichever test network is current.
     pub const TESTNET: Self = Self::TESTNET_8;

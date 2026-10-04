@@ -831,10 +831,12 @@ fn a_long_chain_that_fell() -> (Vec<Block>, ConsensusParams) {
 fn a_newcomer_refused_by_the_tie_reads_the_chain_from_a_peer_that_keeps_it() {
     let (blocks, rules) = a_long_chain_that_fell();
     let top = (blocks.len() - 1) as u64;
-    assert!(top >= JOIN_RATHER_THAN_READ, "long enough that a newcomer asks to be shown it");
+    assert!(
+        top >= JOIN_RATHER_THAN_READ,
+        "long enough that a newcomer asks to be shown it"
+    );
 
-    let directory =
-        std::env::temp_dir().join(format!("cairn-fallen-read-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("cairn-fallen-read-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     let (keeper, _) = Node::open_archiving(rules, loopback(), &directory).unwrap();
     for block in &blocks {
@@ -870,5 +872,8 @@ fn a_newcomer_refused_by_the_tie_reads_the_chain_from_a_peer_that_keeps_it() {
         cairn_net::Joined::Done,
         "the newcomer was handed the ledger, so the tie refused nothing"
     );
-    assert!(same, "the newcomer read a chain other than the one the peer kept");
+    assert!(
+        same,
+        "the newcomer read a chain other than the one the peer kept"
+    );
 }
