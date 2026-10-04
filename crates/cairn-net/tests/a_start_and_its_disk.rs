@@ -809,6 +809,37 @@ fn a_record_of_another_network_further_up_the_log_is_cut_and_the_start_goes_on()
     );
 }
 
+/// The last record naming another network is a record that changed too, and
+/// is cut like one: the start goes on from the blocks before it.
+///
+/// The record before it names only its parent, so nothing on the disk speaks
+/// against the last record, and the store takes it at its word. That makes it
+/// the one record past the first that reaches the question of whose
+/// directory this is, and only the first record decides that. Nothing held
+/// it, so a start that stopped as on another network's directory over one
+/// changed last record passed.
+#[test]
+fn a_last_record_of_another_network_is_cut_and_the_start_goes_on() {
+    let directory = scratch("changed-last");
+    let mut blocks = chain(&params(), 8);
+    let mut changed = blocks[7].clone();
+    changed.header.network = NetworkId::new(0x00ab_cdef);
+    blocks[7] = mine_block(changed, ATTEMPTS).unwrap();
+    write_log(&directory, &blocks);
+
+    let (node, restored) = Node::open(params(), loopback(), &directory)
+        .unwrap_or_else(|error| panic!("a last record that changed stopped the start: {error}"));
+    node.shutdown();
+    drop(node);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        (restored.blocks, restored.refused),
+        (7, 1),
+        "the start did not go on from the seven blocks before the changed last record"
+    );
+}
+
 /// A `ledger.dat` that is there and will not be read stops the start, and
 /// is not taken for a node that never wrote one.
 ///

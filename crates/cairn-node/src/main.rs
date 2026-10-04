@@ -440,6 +440,16 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) -> Endin
                     node.total_work(),
                 )
             );
+            // A network that has not opened yet by this machine's clock: no
+            // chain, no height and nothing to follow, which is every node
+            // installed ahead of an announced opening, and which without this
+            // line read like a node that had lost its network. First, because
+            // before the opening it is the whole of why nothing moves.
+            if let Some(opening) = node.opening() {
+                for line in wrapped(&not_open_yet(&opening)) {
+                    say!("           {line}");
+                }
+            }
             say_what_the_numbers_do_not(node, &directory);
         }
         thread::sleep(TICK);
@@ -472,13 +482,6 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     // two different afternoons.
     if let Some(unread) = node.unread() {
         say(&will_not_read_back(&unread, directory));
-    }
-    // A network that has not opened yet by this machine's clock: no chain,
-    // no height and nothing to follow, which is every node installed ahead
-    // of an announced opening, and which without this line read like a node
-    // that had lost its network.
-    if let Some(opening) = node.opening() {
-        say(&not_open_yet(&opening));
     }
     // And a machine whose clock is behind the network's, which refuses honest
     // blocks and, before this line existed, was the one state in here that
