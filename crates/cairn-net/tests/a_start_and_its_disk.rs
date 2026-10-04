@@ -248,6 +248,10 @@ fn a_log_of_another_network_stops_the_start_and_keeps_every_block() {
         said.contains(&params().network.to_string()),
         "the refusal does not name the network the directory belongs to: {said}"
     );
+    assert!(
+        said.contains("start this node for it") && !said.contains("retired"),
+        "a network this build runs is not offered as the one to start for: {said}"
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -465,6 +469,10 @@ fn a_ledger_of_another_network_is_answered_with_the_network() {
     assert!(
         said.contains(&params().network.to_string()),
         "and it is not told which network the directory belongs to: {said}"
+    );
+    assert!(
+        said.contains("start this node for it") && !said.contains("retired"),
+        "a network this build runs is not offered as the one to start for: {said}"
     );
     assert_eq!(records_in(&directory), held, "and the blocks are all there");
     let _ = std::fs::remove_dir_all(&directory);

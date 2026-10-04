@@ -5846,8 +5846,13 @@ mod tests {
             "a wallet waiting for an opening is told its clock is slow: {said}"
         );
         for (in_seconds, wait) in [
+            (2 * 86_400, "in about 2 days"),
+            (36 * 3_600, "in about 36 hours"),
             (5 * 3_600, "in about 5 hours"),
+            (2 * 3_600, "in about 2 hours"),
+            (90 * 60, "in about 90 minutes"),
             (10 * 60, "in about 10 minutes"),
+            (2 * 60, "in about 2 minutes"),
             (90, "in a minute or two"),
         ] {
             let said = not_open_yet(&Opening {

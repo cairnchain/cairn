@@ -8939,8 +8939,11 @@ fn about_the_reader(
         )),
         // The network is checked before the date, so this is a block of the
         // network this node runs, dated before the first block this build
-        // pins: the network before it was minted again.
-        BlockError::BeforeTheNetworkOpened { opens_at, found } if first => {
+        // pins: the network before it was minted again. Only the first record
+        // replayed can be refused this way or the next, so neither asks: every
+        // block after one the rules took is dated past the median of those
+        // before it, and only height nought is compared with the pinned block.
+        BlockError::BeforeTheNetworkOpened { opens_at, found } => {
             Some(NodeError::EarlierFirstBlock {
                 file: BLOCK_LOG,
                 network: network.to_string(),
@@ -8950,13 +8953,11 @@ fn about_the_reader(
                 ),
             })
         }
-        BlockError::WrongGenesis { expected, found } if first => {
-            Some(NodeError::AnotherFirstBlock {
-                file: BLOCK_LOG,
-                network: network.to_string(),
-                because: format!("its first block is {found}, and this build's is {expected}"),
-            })
-        }
+        BlockError::WrongGenesis { expected, found } => Some(NodeError::AnotherFirstBlock {
+            file: BLOCK_LOG,
+            network: network.to_string(),
+            because: format!("its first block is {found}, and this build's is {expected}"),
+        }),
         _ => None,
     }
 }
