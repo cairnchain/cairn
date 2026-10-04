@@ -753,3 +753,127 @@ fn showings_of_a_chain_whose_miners_left_are_said_to_be_about_the_chain() {
         "the showings were refused in words that name the numbers of one showing"
     );
 }
+
+/// A chain longer than the length past which a newcomer asks to be handed a
+/// ledger, which held its schedule and then fell to the floor as fast as the
+/// bound allows, with the rules it was mined under, and the showing an
+/// archivist of it gives: refused by the tie, and for nothing else.
+fn a_long_chain_that_fell() -> (Vec<Block>, ConsensusParams) {
+    let start = unix_now() - 3 * 24 * 3_600;
+    let target = params().target_block_time;
+    let rules = ConsensusParams {
+        opens_at: start + target,
+        genesis_difficulty: 1 << 12,
+        ..params()
+    };
+    let mut forge = Forge {
+        params: rules,
+        state: LedgerState::new(),
+        clock: start,
+    };
+    let mut blocks: Vec<Block> = Vec::new();
+    // `mine_many` states six hundred seconds a block; this states `gap`.
+    let mut spaced = |forge: &mut Forge, gap: u64| {
+        forge.clock = forge.clock + gap - 600;
+        blocks.push(forge.mine_many(1).remove(0));
+    };
+    for _ in 0..JOIN_RATHER_THAN_READ + 8 {
+        spaced(&mut forge, target);
+    }
+    let collapse = 2 * cairn_ledger::pow::HALF_LIFE_IN_BLOCKS * target + target + 1;
+    while cairn_ledger::validation::expected_difficulty(&forge.state, &rules)
+        > cairn_ledger::pow::MIN_DIFFICULTY
+    {
+        spaced(&mut forge, collapse);
+    }
+    spaced(&mut forge, collapse);
+
+    let headers: Vec<BlockHeader> = blocks.iter().map(|block| block.header).collect();
+    let tip = *headers.last().unwrap();
+    let mut archive = Archive::new();
+    for header in &headers {
+        archive.add(header_leaf(&header.id()));
+    }
+    let start = open_start(
+        &tip,
+        forge.state.headers_before_tip(),
+        SAMPLES,
+        &rules,
+        |height| headers.get(usize::try_from(height).ok()?).copied(),
+        |height| archive.prove_in(height, tip.height),
+    )
+    .expect("a chain this short can be shown");
+    assert!(
+        matches!(
+            check_start(&start, unix_now(), &rules),
+            Err(StartError::TipFellTooFar { .. })
+        ),
+        "the premise: a showing of this chain fails the tie and nothing else"
+    );
+    (blocks, rules)
+}
+
+/// **A newcomer refused by the tie reads the chain from a peer that keeps it,
+/// on its own.**
+///
+/// After a burst of hash rate past the tie and its departure, or a loss of
+/// most of the hash rate, every honest archivist shows a chain the tie
+/// refuses: for hours on an old chain, and for days on a young one. The
+/// documents say the newcomer reads the chain meanwhile, from a peer that
+/// kept its blocks. Each half of that had a test of its own, the chooser
+/// reading the heaviest claim once every claim has failed and the weighing
+/// holding the refusal against nobody, and nothing asked it of a real node: a
+/// showing refused, then the chain arriving block by block, with nobody
+/// telling the node what to do. The peer here keeps blocks to the default
+/// budget, as every node does unless told otherwise, and on a young chain
+/// that is all of them.
+#[test]
+fn a_newcomer_refused_by_the_tie_reads_the_chain_from_a_peer_that_keeps_it() {
+    let (blocks, rules) = a_long_chain_that_fell();
+    let top = (blocks.len() - 1) as u64;
+    assert!(
+        top >= JOIN_RATHER_THAN_READ,
+        "long enough that a newcomer asks to be shown it"
+    );
+
+    let directory = std::env::temp_dir().join(format!("cairn-fallen-read-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let (keeper, _) = Node::open_archiving(rules, loopback(), &directory).unwrap();
+    for block in &blocks {
+        keeper.submit_block(block.clone()).unwrap();
+    }
+    assert_eq!(keeper.height(), Some(top));
+
+    let newcomer = Node::bind(rules, loopback()).unwrap();
+    newcomer.connect(keeper.address()).unwrap();
+    // The chooser waits half a minute before it asks a peer whose claim it
+    // could not take a second time, and then reads; two minutes is several
+    // times that and the reading.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline && newcomer.height() != Some(top) {
+        thread::sleep(Duration::from_millis(100));
+    }
+    let reached = newcomer.height();
+    let joined = newcomer.joining();
+    let same = reached == Some(top)
+        && newcomer.with_chain(|chain| chain.state().state_root())
+            == keeper.with_chain(|chain| chain.state().state_root());
+    newcomer.shutdown();
+    keeper.shutdown();
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        reached,
+        Some(top),
+        "a newcomer refused by the tie never reached the chain a peer kept"
+    );
+    assert_ne!(
+        joined,
+        cairn_net::Joined::Done,
+        "the newcomer was handed the ledger, so the tie refused nothing"
+    );
+    assert!(
+        same,
+        "the newcomer read a chain other than the one the peer kept"
+    );
+}

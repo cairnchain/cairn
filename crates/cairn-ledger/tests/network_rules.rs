@@ -388,9 +388,11 @@ fn testnet_7_and_the_second_devnet_are_named_and_retired() {
 /// now it has.
 ///
 /// Every testnet-7 node still running when the network starts over reads its
-/// peers' marker through its own build; named in 0.11.2, it says they moved
-/// to testnet-8 rather than printing `0x4341525b`. This restart is the release
-/// where `for_network` catches up to the name.
+/// peers' marker through its own build. The name reached `main` after 0.11.1,
+/// in #273, and no release had carried it by 4 October 2026: a node on a
+/// release that names it says its peers moved to testnet-8, and one on 0.11.1
+/// or before prints `0x4341525b`. This restart is the release where
+/// `for_network` catches up to the name.
 #[test]
 fn testnet_8_is_named_before_it_starts() {
     use cairn_ledger::note::NetworkId;

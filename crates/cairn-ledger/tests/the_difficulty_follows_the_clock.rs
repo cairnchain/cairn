@@ -18,13 +18,13 @@
 //! mined eighty testnet-7 blocks in two minutes with about 1 260 times the
 //! honest hash rate, the moving average asked the first honest block after
 //! them for 768 times the difficulty before, eleven hours at the honest rate,
-//! and the chain was back near normal at block 1385, a day and a half later.
-//! The same eighty
-//! headers are replayed here, then the same burst at the median floor, a miner
-//! of that size staying five minutes, and an honest loss of nine tenths of the
-//! hash rate, each with a seeded generator and the figure the wave's plan
-//! published held with room. Every figure is chain time from the fixture's own
-//! solve times, not how long the test ran.
+//! and the chain was back near normal at block 1385, 33 hours after the
+//! burst's last block. The same eighty headers are replayed here, then the
+//! same burst at the median floor, a miner of that size staying five minutes
+//! and an hour, an honest loss of nine tenths of the hash rate, and
+//! departures large enough that the bound binds, each with a seeded generator
+//! and the figure the documents publish held with room. Every figure is chain
+//! time from the fixture's own solve times, not how long the test ran.
 
 #![allow(
     clippy::unwrap_used,
@@ -45,6 +45,31 @@ use cairn_ledger::pow::{
 
 /// The vectors, as the reference printed them.
 const VECTORS: &str = include_str!("asert_vectors.txt");
+
+/// The specification, which says how many there are.
+const SPECIFICATION: &str = include_str!("../../../docs/cairn-specification.md");
+
+/// Every other place that says what a burst that leaves costs the honest
+/// chain, by name.
+const ELSEWHERE: [(&str, &str); 8] = [
+    ("README.md", include_str!("../../../README.md")),
+    (
+        "the whitepaper",
+        include_str!("../../../docs/cairn-whitepaper.md"),
+    ),
+    (
+        "the threat model",
+        include_str!("../../../docs/cairn-threat-model.md"),
+    ),
+    (
+        "the open questions",
+        include_str!("../../../docs/cairn-open-questions.md"),
+    ),
+    ("note.rs", include_str!("../src/note.rs")),
+    ("pow.rs", include_str!("../src/pow.rs")),
+    ("the site", include_str!("../../../web/i18n/en.json")),
+    ("le site", include_str!("../../../web/i18n/fr.json")),
+];
 
 /// The public networks' block time.
 const TARGET: u64 = 60;
@@ -105,8 +130,21 @@ fn every_vector_the_independent_reference_computed_is_answered_exactly() {
         checked.push(fields[0]);
     }
     // A table that failed to load would pass every line of it, so the count
-    // and the cases the specification's table quotes are asked by name.
-    assert!(checked.len() >= 50, "only {} vectors read", checked.len());
+    // and the cases the specification's table quotes are asked by name. The
+    // count is the one the specification states, read off its sentence: it
+    // said 52 of a file that holds 50, and a check of at least fifty agreed
+    // with both.
+    let stated = SPECIFICATION
+        .split_once("asert_vectors.txt` holds ")
+        .and_then(|(_, after)| after.split_once(" of them"))
+        .map(|(count, _)| count.parse::<usize>().unwrap())
+        .expect("the specification says how many vectors the file holds");
+    assert_eq!(
+        checked.len(),
+        stated,
+        "the file holds {} vectors and the specification says {stated}",
+        checked.len()
+    );
     for name in [
         "block-one",
         "tau-ahead",
@@ -225,9 +263,11 @@ const HONEST: f64 = 5_464_575.0;
 /// The schedule is placed so that block 1195 stands exactly on it at the
 /// difficulty it really carried, which is the honest chain in balance. The
 /// moving average asked 223 570 119 402 of block 1276, 768 times block 1195's
-/// and about eleven hours at the honest rate. This asks what eighty blocks
-/// stated four thousand six hundred and fifty six seconds ahead of the
-/// schedule are worth: two and a half times, about two and a half minutes.
+/// and about eleven hours at the honest rate, and block 1385 was the first
+/// after the burst asked less than twice what block 1195 carried, 33 hours
+/// after the burst's last block. This asks what eighty blocks stated four
+/// thousand six hundred and fifty six seconds ahead of the schedule are worth:
+/// two and a half times, about two and a half minutes.
 #[test]
 fn the_burst_of_two_october_raises_the_next_block_two_and_a_half_times_not_seven_hundred() {
     let before = HeaderSummary {
@@ -235,6 +275,24 @@ fn the_burst_of_two_october_raises_the_next_block_two_and_a_half_times_not_seven
         timestamp: 1_790_918_209,
         difficulty: 291_178_580,
     };
+    // What the moving average did, as the explorer served the real chain:
+    // the figures the documents quote for it.
+    let first_honest_asked: u64 = 223_570_119_402;
+    let back_near_normal = HeaderSummary {
+        height: 1_385,
+        timestamp: 1_791_037_349,
+        difficulty: 581_235_837,
+    };
+    assert_eq!(
+        (first_honest_asked + before.difficulty / 2) / before.difficulty,
+        768
+    );
+    assert!(back_near_normal.difficulty < 2 * before.difficulty);
+    let burst_ended = before.timestamp + INTRUDER[79];
+    assert_eq!(
+        (back_near_normal.timestamp - burst_ended + 1_800) / 3_600,
+        33
+    );
     let origin = Origin {
         timestamp: before.timestamp - TARGET * before.height,
         difficulty: before.difficulty,
@@ -368,7 +426,10 @@ fn median(mut values: Vec<f64>) -> f64 {
 ///
 /// Measured at eight seeds: the hundred blocks come 1.0 hours late either
 /// way, and the first of them is asked 2.45 times the difficulty before the
-/// burst as stamped and 2.70 at the floor. The two delays agree because the
+/// burst as stamped and 2.70 at the floor. The eighty blocks paid 2.1 and 2.3
+/// hours of the honest rate, so the honest chain lost about half of what they
+/// cost: the schedule does not make a burst this small cheap for the honest
+/// chain, it keeps it small, an hour. The two delays agree because the
 /// rule reads only the parent: the floor makes the burst's own blocks and
 /// the first honest block dearer, and once that block is in, dated by a real
 /// clock, the chain stands exactly where it would have. The plan published
@@ -380,12 +441,15 @@ fn the_burst_as_stamped_and_at_the_floor_delays_the_next_hundred_blocks_by_hours
     for stamp in [Stamp::At(0), Stamp::Floor] {
         let mut delays = Vec::new();
         let mut firsts = Vec::new();
+        let mut costs = Vec::new();
         for seed in 0..8 {
             let mut chain = Chain::warmed(seed);
             let before = chain.asked();
             let start = chain.now as u64;
+            let mut paid = 0u128;
             for offset in INTRUDER {
                 let difficulty = chain.asked();
+                paid += u128::from(difficulty);
                 let stamped = match stamp {
                     Stamp::At(_) => Stamp::At(start + offset),
                     other => other,
@@ -395,9 +459,20 @@ fn the_burst_as_stamped_and_at_the_floor_delays_the_next_hundred_blocks_by_hours
             chain.now = (start + INTRUDER[79]) as f64;
             firsts.push(chain.asked() as f64 / before as f64);
             delays.push(chain.honest_hundred().0);
+            costs.push(paid as f64 / HONEST / 3_600.0);
         }
         let delay = median(delays);
         let first = median(firsts);
+        let paid = median(costs);
+        println!("eighty blocks: {delay:.2} h late for {paid:.2} honest hours paid");
+        // A burst this small is not made cheap by the schedule: the honest
+        // chain still loses about half of what it paid, which at this size
+        // is an hour.
+        assert!(
+            (0.3..0.8).contains(&(delay / paid)),
+            "the honest chain lost {:.2} of what the eighty blocks paid",
+            delay / paid
+        );
         assert!(
             delay < 2.5,
             "the next hundred blocks were {delay:.2} h late"
@@ -409,30 +484,269 @@ fn the_burst_as_stamped_and_at_the_floor_delays_the_next_hundred_blocks_by_hours
     }
 }
 
+/// A miner of 1 261 times the honest rate, the intruder's size, mining every
+/// block for `seconds` of wall time and leaving: the hours the honest miner's
+/// next hundred blocks come late beyond their targets, and the hours of the
+/// honest rate the miner's own blocks cost.
+fn presence(seed: u64, seconds: f64, stamp: Stamp) -> (f64, f64) {
+    let mut chain = Chain::warmed(seed);
+    let leaves = chain.now + seconds;
+    let mut paid = 0u128;
+    while chain.now < leaves {
+        paid += u128::from(chain.asked());
+        chain.mine(1_261.0 * HONEST, stamp);
+    }
+    (chain.honest_hundred().0, paid as f64 / HONEST / 3_600.0)
+}
+
 /// A miner of the intruder's size staying five minutes, which is the plan's
-/// own scenario: its stall is hours where the moving average's was days, and
-/// what it leaves is the size of what it mined.
+/// own scenario: its stall is hours where the moving average's was days.
 ///
 /// The plan: 5.6 hours as stamped and 5.5 at the floor over the next hundred
 /// honest blocks, at six seeds, against 71 and 230 for the moving average.
 /// Measured here at eight seeds: 5.75 and 5.51. Held to eight, which no
-/// moving average result comes near.
+/// moving average result comes near. The miner paid about 106 hours of the
+/// honest rate for it, so the honest chain lost about a twentieth of what the
+/// burst cost, where the moving average lost three fifths on the same basis.
 #[test]
 fn a_miner_of_twelve_hundred_times_the_rate_staying_five_minutes_costs_hours() {
     for stamp in [Stamp::Honest, Stamp::Floor] {
-        let mut delays = Vec::new();
-        for seed in 0..8 {
-            let mut chain = Chain::warmed(seed);
-            let leaves = chain.now + 300.0;
-            while chain.now < leaves {
-                chain.mine(1_261.0 * HONEST, stamp);
-            }
-            delays.push(chain.honest_hundred().0);
-        }
+        let (delays, paid): (Vec<f64>, Vec<f64>) =
+            (0..8).map(|seed| presence(seed, 300.0, stamp)).unzip();
         let delay = median(delays);
+        let paid = median(paid);
+        println!("five minutes: {delay:.2} h late for {paid:.1} honest hours paid");
         assert!(
             delay < 8.0,
             "the next hundred blocks were {delay:.2} h late"
+        );
+        assert!(
+            delay / paid < 0.07,
+            "the honest chain lost {:.3} of what the burst paid",
+            delay / paid
+        );
+    }
+}
+
+/// A miner of the intruder's size staying an hour, under the rule as it
+/// ships, the bound included.
+///
+/// The plan published 9.6 hours as stamped and 8.5 at the floor over the next
+/// hundred honest blocks, measured on the rule without the bound, which it
+/// said changed nothing. Here it binds. The miner leaves the chain asking six
+/// to nine hundred times the honest difficulty, so the first honest block
+/// waits that many target times, more than two half lives and a target, and
+/// the schedule then asks a fall far past four: the bound holds each block
+/// after it to a quarter of the last, and the stall grows by about a third of
+/// that first wait. The plan's simulator and seeds re-run with the bound give
+/// 11.3 and 10.7 hours. That first wait is drawn from an exponential whose
+/// mean is ten or fifteen hours, so eight seeds are not enough to hold a
+/// median: measured here at sixty four, 11.23 and 13.45 hours, for about
+/// 1 260 hours of the honest rate paid, a hundredth of it.
+#[test]
+fn a_miner_of_twelve_hundred_times_the_rate_staying_an_hour_costs_half_a_day() {
+    for stamp in [Stamp::Honest, Stamp::Floor] {
+        let (delays, paid): (Vec<f64>, Vec<f64>) =
+            (0..64).map(|seed| presence(seed, 3_600.0, stamp)).unzip();
+        let delay = median(delays);
+        let paid = median(paid);
+        println!("an hour: {delay:.2} h late for {paid:.1} honest hours paid");
+        assert!(
+            (9.6..15.0).contains(&delay),
+            "the next hundred blocks were {delay:.2} h late"
+        );
+        assert!(
+            delay / paid < 0.015,
+            "the honest chain lost {:.4} of what the burst paid",
+            delay / paid
+        );
+    }
+}
+
+/// The seeded dice `the_price_of_a_seed.rs` rolls, so that a departure here
+/// and a burst there draw the same solve times from the same seed.
+struct Dice(u64);
+
+impl Dice {
+    fn uniform(&mut self) -> f64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut mixed = self.0;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        mixed ^= mixed >> 31;
+        ((mixed >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    }
+
+    fn solve(&mut self, difficulty: u64, rate: f64) -> f64 {
+        (-self.uniform().ln() * difficulty as f64 / rate).round()
+    }
+}
+
+/// What a departure from `times` the opening difficulty leaves an honest
+/// chain on testnet-8's rules.
+struct Departure {
+    /// Seconds the first honest block waits, and from the departure until the
+    /// chain asks at most twice the opening difficulty again.
+    first_wait: f64,
+    stall: f64,
+    /// Honest blocks asked the floor afterwards.
+    at_the_floor: u64,
+}
+
+/// A chain on schedule at testnet-8's opening difficulty, mined by an honest
+/// miner whose rate makes that difficulty take exactly the target; a miner of
+/// 1 260 times that rate dates every block at the median floor until the
+/// chain asks `times` the opening difficulty, then leaves. With `seed`, each
+/// block's time is drawn from the dice; without, each block takes exactly the
+/// mean time its difficulty asks. Honest blocks are stamped by the clock, or
+/// the median plus one if that is later, and wait when that would be past the
+/// drift. The same chain as `departure.py` in the wave's audit directory.
+fn departure(times: u64, seed: Option<u64>) -> Departure {
+    let params = cairn_ledger::validation::ConsensusParams::for_network("testnet-8").unwrap();
+    let target = params.target_block_time;
+    let opening = params.genesis_difficulty;
+    let drift = params.max_timestamp_drift as f64;
+    let rate = opening as f64 / target as f64;
+    let mut dice = seed.map(Dice);
+    let mut solve = |difficulty: u64, rate: f64| match dice.as_mut() {
+        Some(dice) => dice.solve(difficulty, rate),
+        None => difficulty as f64 / rate,
+    };
+    let start = 1u64 << 40;
+    let origin = Origin {
+        timestamp: start,
+        difficulty: opening,
+    };
+    let mut recent: Vec<HeaderSummary> = (0..MEDIAN_TIME_WINDOW as u64)
+        .map(|height| HeaderSummary {
+            height,
+            timestamp: start + height * target,
+            difficulty: opening,
+        })
+        .collect();
+    let mut clock = recent.last().unwrap().timestamp as f64;
+    let mut left: Option<f64> = None;
+    let mut first_wait = None;
+    let mut stall = None;
+    let mut at_the_floor = 0;
+    let mut honest = 0u64;
+    for index in 0..2_000_000u64 {
+        let parent = *recent.last().unwrap();
+        let asked = next_difficulty(&parent, origin, target);
+        let median = median_time_past(&recent).unwrap();
+        let timestamp = if left.is_none() && index >= 200 && asked < times * opening {
+            clock += solve(asked, 1_260.0 * rate);
+            median + 1
+        } else {
+            if left.is_none() && index >= 200 {
+                left = Some(clock);
+            }
+            clock += solve(asked, rate);
+            let timestamp = (clock as u64).max(median + 1);
+            if timestamp as f64 > clock + drift {
+                clock = timestamp as f64 - drift;
+            }
+            if let Some(left) = left {
+                honest += 1;
+                first_wait.get_or_insert(clock - left);
+                if asked == MIN_DIFFICULTY {
+                    at_the_floor += 1;
+                }
+                if stall.is_none() && asked <= 2 * opening {
+                    stall = Some(clock - left);
+                }
+                if stall.is_some_and(|stall| honest > 100 && clock - left > stall + 86_400.0) {
+                    break;
+                }
+            }
+            timestamp
+        };
+        recent.push(HeaderSummary {
+            height: parent.height + 1,
+            timestamp,
+            difficulty: asked,
+        });
+        if recent.len() > MEDIAN_TIME_WINDOW {
+            recent.remove(0);
+        }
+    }
+    Departure {
+        first_wait: first_wait.unwrap(),
+        stall: stall.unwrap(),
+        at_the_floor,
+    }
+}
+
+/// The bound adds about a third of the first honest block's wait to the
+/// stall a large departure leaves.
+///
+/// The first honest block after a miner leaves a chain asking `X` times the
+/// honest difficulty waits about `X` target times. Past about 120 times that
+/// is more than two half lives and a target, so the schedule then asks a fall
+/// of more than four and the bound holds the next block to a quarter of the
+/// last, and the next, `X / 4 + X / 16 + ...` target times more, about `X / 3`.
+/// Without the bound the same chain is asked the schedule's answer at once.
+/// Measured with every block taking its mean time: a stall of 22.8 hours at
+/// 1 024 times, 45.6 at 2 048 and 92.0 at 4 096, against 17.1, 34.2 and 69.0
+/// for the rule without the bound in `departure.py`, which is `X / 3` target
+/// times more within one per cent.
+#[test]
+fn the_bound_adds_a_third_of_the_first_wait_to_a_large_departure() {
+    let target = 60.0;
+    for times in [1_024u64, 2_048, 4_096] {
+        let left = departure(times, None);
+        let x = times as f64;
+        println!(
+            "{times} times, mean times: first honest block waits {:.1} h, stall {:.1} h, \
+             {} blocks at the floor",
+            left.first_wait / 3_600.0,
+            left.stall / 3_600.0,
+            left.at_the_floor
+        );
+        assert!(
+            (left.first_wait / (x * target) - 1.0).abs() < 0.02,
+            "the first honest block waited {:.0} target times after {times} times",
+            left.first_wait / target
+        );
+        assert!(
+            left.stall >= 0.98 * 4.0 / 3.0 * x * target,
+            "{times} times stalled the chain {:.0} target times, not the four thirds of \
+             {times} the bound makes it",
+            left.stall / target
+        );
+    }
+}
+
+/// A departure from a few thousand times leaves the chain further behind its
+/// schedule than the floor's edge, and the honest chain then runs hundreds or
+/// thousands of blocks at difficulty 1 while it catches the schedule up.
+///
+/// The floor is the answer while the parent stands `log2(D) - 1` half lives
+/// or more behind its schedule, 27 hours on testnet-8. A stall longer than
+/// the branch's lead plus that puts the chain there, and the bound, by
+/// lengthening the stall, puts it there sooner and further. The run is the
+/// schedule's debt being repaid: blocks with almost no work behind them,
+/// mined in minutes. Measured at sixteen seeds, the median: no block at the
+/// floor after a departure from 2 048 times, 874 after 4 096 times, which the
+/// 2 October intruder's rate reaches in under five hours, and 7 642 after
+/// 8 192 times; without the bound, `departure.py` finds none at 4 096 and
+/// 5 704 at 8 192.
+#[test]
+fn a_departure_from_thousands_of_times_ends_in_a_run_at_the_floor() {
+    for (times, least, most) in [
+        (2_048u64, 0.0, 100.0),
+        (4_096, 500.0, 1_500.0),
+        (8_192, 6_000.0, 9_000.0),
+    ] {
+        let mut runs: Vec<f64> = (0..16)
+            .map(|seed| departure(times, Some(seed)).at_the_floor as f64)
+            .collect();
+        runs.sort_by(f64::total_cmp);
+        let run = f64::midpoint(runs[7], runs[8]);
+        println!("{times} times: a median of {run:.0} honest blocks at the floor");
+        assert!(
+            (least..most).contains(&run),
+            "{times} times left {run:.0} blocks at the floor, outside {least} to {most}"
         );
     }
 }
@@ -537,4 +851,82 @@ fn a_network_opened_long_after_its_first_block_is_nearly_free_until_it_catches_u
         caught_up > 450_000,
         "the late opening was caught up after {caught_up} blocks"
     );
+}
+
+/// The documents say what was measured about a burst that leaves.
+///
+/// Seven places said a burst costs the honest chain an eighty seventh of what
+/// it paid, against seven tenths for the moving average. The eighty seventh
+/// was the first honest block's wait over the burst's cost, and the seven
+/// tenths the moving average's delay over a hundred blocks: two quantities,
+/// and on the second one the schedule's figure for the 2 October burst is
+/// about a half. The figures now come from one measurement of both rules, and
+/// every document quotes the same ones. Read with the line breaks and the
+/// comment markers taken out, since where a paragraph wraps is not part of
+/// what it says.
+#[test]
+fn the_documents_quote_the_measured_cost_of_a_burst() {
+    let flat = |text: &str| {
+        text.split_whitespace()
+            .filter(|word| !matches!(*word, "///" | "//!" | "//"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let everywhere: Vec<(&str, String)> = ELSEWHERE
+        .iter()
+        .map(|(name, text)| (*name, flat(text)))
+        .chain([("the specification", flat(SPECIFICATION))])
+        .collect();
+    for (name, text) in &everywhere {
+        for retired in [
+            "eighty seventh",
+            "eighty seven",
+            "quatre-vingt-septième",
+            "seven tenths",
+            "seven in ten",
+            "sept dixièmes",
+            "about what it paid",
+            "six hundred times",
+            "day and a half to work",
+            "for a day and a half",
+            "pendant un jour et demi",
+        ] {
+            assert!(!text.contains(retired), "{name} still says \"{retired}\"");
+        }
+    }
+    let quoted = |name: &str, phrase: &str| {
+        let (_, text) = everywhere.iter().find(|(named, _)| *named == name).unwrap();
+        assert!(text.contains(phrase), "{name} no longer says \"{phrase}\"");
+    };
+    quoted("the whitepaper", "1.0 h for 1.9 h");
+    quoted("the whitepaper", "5.6 h for 106 h");
+    quoted("the whitepaper", "11.3 h for 1 259 h");
+    quoted("the whitepaper", "71 h for 117 h");
+    quoted("the whitepaper", "298 h for 1 177 h");
+    quoted("the specification", "1.0 hour for 1.9");
+    quoted("the specification", "5.6 hours for 106");
+    quoted("the specification", "11.3 hours for 1 259");
+    quoted("pow.rs", "11.3 h for 1 259 h");
+    quoted(
+        "pow.rs",
+        "11.3 hours late with the bound and 9.6 without it",
+    );
+    quoted("the threat model", "5.6 hours late after five minutes");
+    quoted("the threat model", "11.3 after an hour");
+    quoted("the open questions", "5,6 heures en retard");
+    quoted("the open questions", "11,3 après une heure");
+    quoted(
+        "note.rs",
+        "5.6 hours after the same five minutes, 11.3 after the same hour",
+    );
+    for name in [
+        "README.md",
+        "note.rs",
+        "pow.rs",
+        "the whitepaper",
+        "the specification",
+    ] {
+        quoted(name, "768 times");
+        quoted(name, "33 hours");
+    }
 }

@@ -175,8 +175,8 @@
     "note": {
       "difficulty": {
         "plain": "Difficulty is how much work it takes to add a block. It moves on its own: when more machines join, it rises, and blocks keep arriving at roughly the rate they did before. Nobody sets it by hand.",
-        "curious": "Difficulty is the expected number of attempts a block costs. It is recalculated for every block from a sliding window of recent ones, so it follows the miners continuously rather than waiting for a fixed epoch to end.",
-        "technical": "Expected hash count for a block, recomputed per block over a sliding window and clamped against a sudden move in either direction. The figure above is parsed exactly; the line is plotted as a double, which is far beneath the resolution of two hundred units of height."
+        "curious": "Difficulty is the expected number of attempts a block costs. It is recalculated for every block against a schedule fixed at the network's first block, so it follows the miners continuously rather than waiting for a fixed epoch to end.",
+        "technical": "Expected hash count for a block, recomputed per block from how far the parent stands ahead of or behind a schedule fixed at the first block, and held within a factor of four of the parent's in either direction. The figure above is parsed exactly; the line is plotted as a double, which is far beneath the resolution of two hundred units of height."
       },
       "spacing": {
         "plain": "How long each block took after the one before it. These times are written by the miners themselves, not measured here, and a block only has to come after the middle of the recent ones. So a bar can sit at zero, or below it.",
@@ -537,7 +537,7 @@
         ],
         "curious": [
           "Proof of work rather than proof of stake, and the reason is the start rather than the steady state. Proof of stake needs an initial distribution before it can work, which means founders deciding who holds power on day one. Proof of work needs nobody to decide anything: the network opens, and the first block goes to whoever mines it.",
-          "Difficulty adjusts every block against a schedule fixed at the network's first block, doubling for every hour the chain runs ahead of it and halving for every hour behind, with a factor of four cap per retarget, so a large miner arriving or leaving does not strand the chain, and one that mines a burst and leaves owes the chain about what it paid."
+          "Difficulty adjusts every block against a schedule fixed at the network's first block, doubling for every hour the chain runs ahead of it and halving for every hour behind, with a factor of four cap per retarget, so a large miner arriving or leaving does not strand the chain, and one that mines a burst and leaves holds it up for a time that grows with the logarithm of what it paid: hours, where the moving average took days."
         ],
         "technical": [
           "ASERT (aserti3-2d) anchored at the first block, half life of 60 blocks, maximum 4x per retarget. Timestamps are validated against the median of the previous eleven blocks rather than against the parent, which removes the single-block manipulation that a later-than-parent rule permits.",

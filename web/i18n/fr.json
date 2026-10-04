@@ -175,8 +175,8 @@
     "note": {
       "difficulty": {
         "plain": "La difficulté, c'est le travail qu'il faut fournir pour ajouter un bloc. Elle bouge toute seule : quand des machines arrivent, elle monte, et les blocs continuent d'arriver à peu près au même rythme qu'avant. Personne ne la règle à la main.",
-        "curious": "La difficulté est le nombre de tentatives qu'un bloc coûte en moyenne. Elle est recalculée à chaque bloc sur une fenêtre glissante des blocs récents, donc elle suit les mineurs en continu au lieu d'attendre la fin d'une période fixe.",
-        "technical": "Nombre de hachages attendu pour un bloc, recalculé bloc par bloc sur une fenêtre glissante et borné contre un saut brutal dans un sens comme dans l'autre. Le chiffre au-dessus est lu exactement ; la courbe est tracée en flottant double, ce qui reste très en deçà de la résolution de deux cents unités de hauteur."
+        "curious": "La difficulté est le nombre de tentatives qu'un bloc coûte en moyenne. Elle est recalculée à chaque bloc d'après un calendrier fixé au premier bloc du réseau, donc elle suit les mineurs en continu au lieu d'attendre la fin d'une période fixe.",
+        "technical": "Nombre de hachages attendu pour un bloc, recalculé bloc par bloc d'après l'avance ou le retard du parent sur un calendrier fixé au premier bloc, et tenu à un facteur quatre de celui du parent dans un sens comme dans l'autre. Le chiffre au-dessus est lu exactement ; la courbe est tracée en flottant double, ce qui reste très en deçà de la résolution de deux cents unités de hauteur."
       },
       "spacing": {
         "plain": "Le temps qu'a mis chaque bloc après le précédent. Ces heures sont écrites par les mineurs eux-mêmes, elles ne sont pas mesurées ici, et un bloc doit seulement venir après le milieu des blocs récents. Une barre peut donc valoir zéro, ou passer en dessous.",
@@ -537,7 +537,7 @@
         ],
         "curious": [
           "Preuve de travail plutôt que preuve d'enjeu, et la raison tient au départ plus qu'au régime de croisière. La preuve d'enjeu exige une distribution initiale pour fonctionner, ce qui veut dire que des fondateurs décident qui détient le pouvoir au premier jour. La preuve de travail n'exige que personne ne décide quoi que ce soit : le réseau ouvre, et le premier bloc va à qui le mine.",
-          "La difficulté s'ajuste à chaque bloc d'après un calendrier fixé au premier bloc du réseau : elle double pour chaque heure d'avance de la chaîne sur ce calendrier et se divise par deux pour chaque heure de retard, avec un facteur quatre au maximum par recalcul, de sorte que l'arrivée ou le départ d'un gros mineur ne bloque pas la chaîne, et qu'un mineur qui mine une rafale puis s'en va ne laisse derrière lui qu'à peu près ce qu'il a payé."
+          "La difficulté s'ajuste à chaque bloc d'après un calendrier fixé au premier bloc du réseau : elle double pour chaque heure d'avance de la chaîne sur ce calendrier et se divise par deux pour chaque heure de retard, avec un facteur quatre au maximum par recalcul, de sorte que l'arrivée ou le départ d'un gros mineur ne bloque pas la chaîne, et qu'un mineur qui mine une rafale puis s'en va ne la retient qu'un temps qui grandit comme le logarithme de ce qu'il a payé : des heures, là où la moyenne mobile prenait des jours."
         ],
         "technical": [
           "ASERT (aserti3-2d) ancré au premier bloc, demi-vie de 60 blocs, facteur 4 au maximum par recalcul. Les horodatages sont validés contre la médiane des onze blocs précédents plutôt que contre le parent, ce qui supprime la manipulation sur un bloc que permet une règle du type postérieur au parent.",

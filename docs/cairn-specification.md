@@ -1450,12 +1450,20 @@ asked over its parent's is `2^((T - g) / tau)`, `g` the parent's own stated
 gap, so the clamp binds only after a gap more than two half lives longer than
 the target, or one that runs two half lives backwards. Measured on chains with
 random block times whose hash rate fell fifty times, it bound on one block in
-eighteen thousand. It stays because the weighing reasons from it: a run of
+eighteen thousand. A burst that leaves is where it binds: past about 120 times
+the honest difficulty, the first honest block's gap is that long, so each
+block after it is held to a quarter of the last, and from a few hundred times
+on the clamp adds about a third of that first gap to the stall. Past a few
+thousand times the stall leaves the chain further behind its schedule than the
+floor's edge, and the blocks after it are asked the floor until the chain has
+caught up to that edge: measured on testnet-8's rules, the median over sixteen
+seeds, 874 blocks at the floor after a departure from 4 096 times and 7 642
+after 8 192. It stays because the weighing reasons from it: a run of
 blocks implies a least and a most work only because no step moves the
 difficulty further than this.
 
 These are vectors from an independent reference written with unbounded
-integers; `crates/cairn-ledger/tests/asert_vectors.txt` holds 52 of them, and an
+integers; `crates/cairn-ledger/tests/asert_vectors.txt` holds 50 of them, and an
 implementation that reproduces that file has reproduced the arithmetic.
 
 <table>
@@ -1500,7 +1508,7 @@ late, lowers the difficulty of the one block after it by `2^(-10/60)`, about
 eleven per cent, and nothing after that. The moving average this replaced
 damped one late block to a tenth of a move and kept the damping in its window
 for ninety blocks, which is what made a burst of hash rate cost the honest
-chain a day and a half: on 2 October 2026 eighty testnet-7 blocks mined in two
+chain 33 hours: on 2 October 2026 eighty testnet-7 blocks mined in two
 minutes raised the difficulty 768 times. Under this rule the same eighty blocks
 stand 4 656 seconds ahead of the schedule, and the next block is asked 2.45
 times what it was.
@@ -1511,12 +1519,20 @@ remains: a hash rate that halves has half of its answer after 35 blocks and 60
 minutes of chain time, and ninety per cent after 147 blocks and 3 h 18 m. A
 tenfold loss reaches ninety per cent after 55 blocks and 3 h 19 m.
 
-**What a burst leaves behind is about what it paid.** Reaching a difficulty
-`X` times the honest one takes a branch `log2(X)` half lives ahead of its
-schedule, which at the difficulties on the way is about `X * tau / ln 2`
-seconds of the honest hash rate, and it leaves about `X` target times for the
-next honest block. The stall a departing miner leaves is about `T ln 2 / tau`
-of the honest work it spent, one eighty seventh at a one hour half life.
+**What a burst leaves behind grows with the logarithm of what it paid.**
+Reaching a difficulty `X` times the honest one takes a branch `log2(X)` half
+lives ahead of its schedule, which at the difficulties on the way is about
+`X * tau / ln 2` seconds of the honest hash rate. It leaves about `X` target
+times for the next honest block, and the honest chain gives back the branch's
+lead, `log2(X)` half lives, in all; past about 120 times the clamp lengthens
+the stall, as its paragraph above says. Measured on chains with random block
+times, the clamp included, as the honest delay over the next hundred honest
+blocks against the hours of the honest rate the burst paid: the eighty blocks
+of 2 October,
+replayed as stamped, 1.0 hour for 1.9; a miner of 1 260 times the honest rate
+staying five minutes, 5.6 hours for 106; staying an hour, 11.3 hours for
+1 259. A small burst still costs the honest chain about half of what it paid,
+an hour at that size; each further hour of delay costs more than the last.
 
 **At the floor the rule is a place, not a spacing.** The answer is the floor
 while `r` is below 2, which is while the parent stands far enough behind its
@@ -1528,14 +1544,16 @@ genesis difficulty is the floor, has an hour of it. Spaced evenly from there,
 1 024 blocks hold the floor at 57 seconds a block and not at 56, and span
 58 368 seconds. The tightest branch of 1 024 blocks found, taking each
 timestamp as low as the median rule and an answer of 1 allow, spends the hour
-at once and then runs a target a block, and spans 57 841 seconds, 16 h 04 m.
+at once, then runs a target a block, and dates its last block at the median,
+since nothing after the branch asks that block to keep the floor: it spans
+57 781 seconds, 16 h 03 m.
 A branch forked off a chain at a real difficulty has further to fall: a half
 life of stated time for every halving below where it forked.
 
 Any argument that prices a run of blocks at the floor MUST price it by what
-such a run can span: a run of 1 024 at 57 841 seconds or less, which is the
-target for every block less one half life of slack. The figure is measured
-rather than derived, and an implementation that finds a tighter branch has
+such a run can span: a run of 1 024 at 57 781 seconds or less, which is the
+target for every block but the last less one half life of slack. The figure
+is measured rather than derived, and an implementation that finds a tighter branch has
 found a smaller number that arguments are then bound by. Under the moving
 average the same figure was 30 069 seconds.
 
@@ -1758,7 +1776,7 @@ What burial costs is chain time. At a sixty second block, 1 024 blocks on
 schedule is 61 440 seconds, 17 h 04 m. At the difficulty floor a branch can
 spend at most a half life of slack and then has to run a target a block, as the
 retarget section shows, and the tightest such branch of 1 024 blocks found
-spans 57 841 seconds, 16 h 04 m. **The second figure is the one any argument
+spans 57 781 seconds, 16 h 03 m. **The second figure is the one any argument
 about how long an attacker must sit is entitled to.** Under the moving average
 the retarget used to be it was 30 069 seconds, under half the first. The drift bound is what
 keeps that time real: a node refuses a block more than ten blocks ahead of its
@@ -2396,14 +2414,22 @@ under five and a half days at any loss beyond; a newcomer reads such a chain
 instead, where a peer keeps it.
 
 A burst of hash rate that lifts the difficulty past the tie and leaves does the
-same to a newcomer, until the deepest question lands above the burst. Reaching
-thirty two times the honest difficulty takes a branch five half lives ahead of
-its schedule, about 2 750 blocks of the honest work, 46 hours of it at a sixty
-second block. Measured after bursts of 33, 64 and 128 times: a thirty year chain
-refuses newcomers for up to about 680 target times after the burst, 11 hours on
-testnet-8, and a young chain of two thousand blocks for 720 to 2 000, 12 to 32
-hours, while the burst cost four to five times that in honest work. Under the
-moving average three blocks of four times each reached the same tie.
+same to a newcomer, until the deepest question lands past the burst and past
+the few honest blocks after it that still carry most of its difficulty.
+Reaching thirty two times the honest difficulty takes a branch five half lives
+ahead of its schedule, about 2 750 blocks of the honest work, 46 hours of it at
+a sixty second block. Measured after bursts of 33, 64 and 128 times: a thirty
+year chain refuses newcomers for up to about 920 target times after the burst,
+15 hours on testnet-8, and a young chain of 300 to 2 000 blocks for up to about
+2 100, 35 hours. After a burst of 1 024 times, about 88 000 blocks of the
+honest work, the thirty year chain refuses them for up to about 1 930 target
+times and the young chain for 6 000 to 7 500, 100 to 124 hours: a young chain's
+band is most of its work, so the deepest question passes the burst only once
+the honest chain has added a share of the burst's own work after it. The burst
+costs from about twice to forty five times the time it locks newcomers out, in
+honest work. Under the moving average three blocks of four times each reached
+the same tie. A newcomer refused this way reads the chain instead, from a peer
+that kept its blocks.
 
 Past half the world's work nothing here helps, and nothing anywhere else does
 either: a forger at half has nothing left to invent and can mine the chain.

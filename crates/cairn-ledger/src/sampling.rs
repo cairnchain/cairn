@@ -336,7 +336,7 @@ pub struct SampledStart {
     /// and every block dated closer than the target moves them toward it, so
     /// past the half life of slack the floor's edge gives they average the
     /// target or the retarget demands more of them: a thousand and twenty
-    /// four of them span at least 16 h 04 m, and a reader
+    /// four of them span at least 16 h 03 m, and a reader
     /// refuses a tip more than ten blocks ahead of its own
     /// clock. Ten blocks is [`ConsensusParams::max_timestamp_drift`], ten
     /// minutes on the public networks. This used to say a day, and then two
@@ -347,8 +347,9 @@ pub struct SampledStart {
     /// to average only half the target, because at the floor it answered
     /// `floor(target / gap)`: a thousand and twenty four of them spanned 8 h
     /// 21 m at the tightest. Under the schedule the tightest branch found
-    /// spends its hour of slack at once and runs a target a block after it,
-    /// 57 841 seconds, and evenly spaced it holds the floor at 57 seconds a
+    /// spends its hour of slack at once, runs a target a block after it and
+    /// dates its last block at the median, 57 781 seconds, and evenly spaced
+    /// it holds the floor at 57 seconds a
     /// block and not 56. Both are pinned in `tests/retarget_timewarp.rs`. The
     /// argument is the same and stronger: the run has to state far more time
     /// than the drift lets a reader take in advance, so the forger sits
@@ -572,10 +573,16 @@ pub const BELOW_THE_PINNED: u64 = RECENT_HEADERS as u64 - 1;
 /// the same to an honest chain for a while, and it is dear to cause: thirty
 /// two times takes a branch five half lives ahead of its schedule, about two
 /// thousand seven hundred and fifty blocks of the honest work, where the
-/// moving average reached it in three blocks. Measured in the same file, a
-/// thirty year chain refuses newcomers for up to about 680 target times after
-/// such a burst and a young one of two thousand blocks for 720 to 2 000, a
-/// quarter or less of what the burst cost in honest time.
+/// moving average reached it in three blocks. Measured in the same file,
+/// judged until the deepest question is past the burst: after bursts of 33 to
+/// 128 times a thirty year chain refuses newcomers for up to about 920 target
+/// times and a young one of 300 to 2 000 blocks for up to about 2 100; after a
+/// burst of 1 024 times, about eighty eight thousand blocks of the honest
+/// work and seventy minutes at the 2 October intruder's rate, for up to about
+/// 1 930 and 6 000 to 7 500. That is from about two per cent to under half
+/// of what the burst cost in honest time, the larger share for the smaller
+/// burst on the younger chain. A newcomer reads the chain meanwhile, from a peer
+/// that kept its blocks.
 pub const MOST_FALL: u64 = 32;
 
 /// The least work `blocks` blocks can carry, starting from a block of this

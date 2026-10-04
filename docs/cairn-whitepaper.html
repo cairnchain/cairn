@@ -457,15 +457,75 @@
       minutes and left. The moving average rose by its whole bound a block while
       the burst lasted and fell back only as the burst's blocks left its window,
       ninety slow blocks later: the next block was asked 768 times what the one
-      before the burst carried, and the network nearly stopped for a day and a
-      half. The schedule reads the same eighty blocks as a chain 4 656 seconds
-      ahead of itself and asks the next block for 2.45 times the difficulty, and
-      the honest miner walks back onto the schedule on its own. What a departing
-      miner leaves behind is about what it paid: reaching a difficulty <code>X</code> times
-      the honest one takes about <code>X</code> times the honest rate for <code>tau / ln 2</code>, and
-      leaves about <code>X</code> target times for the next honest block, a damage to cost
-      ratio of <code>T ln 2 / tau</code>, one in eighty seven, where the moving average gave
-      about seven in ten.
+      before the burst carried, and the network nearly stopped for 33 hours. The
+      schedule reads the same eighty blocks as a chain 4 656 seconds ahead of
+      itself and asks the next block for 2.45 times the difficulty, and the
+      honest miner walks back onto the schedule on its own.
+    </p>
+
+    <p>
+      What a departing miner leaves behind grows with the logarithm of what it
+      paid rather than with what it paid. Reaching a difficulty <code>X</code> times the
+      honest one takes a branch <code>log2(X)</code> half lives ahead of its schedule, about
+      <code>X</code> times the honest rate for <code>tau / ln 2</code>; the next honest block waits
+      about <code>X</code> target times, and the honest chain gives back the branch's lead,
+      <code>log2(X)</code> half lives, in all. Both rules, measured on one basis:
+    </p>
+
+    <div class="scroll">
+      <table>
+        <caption>The honest miner's next hundred blocks after a burst that leaves: how late they come, against the hours of the honest rate the burst paid</caption>
+        <thead>
+          <tr>
+            <th>Burst</th>
+            <th class="n">Moving average</th>
+            <th class="n">Delay over cost</th>
+            <th class="n">Schedule</th>
+            <th class="n">Delay over cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>The 2 October burst, eighty blocks as stamped</td>
+            <td class="n">45 h for 51 h</td>
+            <td class="n">0.89</td>
+            <td class="n">1.0 h for 1.9 h</td>
+            <td class="n">0.52</td>
+          </tr>
+          <tr>
+            <td>1 260 times the honest rate for five minutes</td>
+            <td class="n">71 h for 117 h</td>
+            <td class="n">0.61</td>
+            <td class="n">5.6 h for 106 h</td>
+            <td class="n">0.053</td>
+          </tr>
+          <tr>
+            <td>1 260 times the honest rate for an hour</td>
+            <td class="n">298 h for 1 177 h</td>
+            <td class="n">0.25</td>
+            <td class="n">11.3 h for 1 259 h</td>
+            <td class="n">0.009</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="fig-note">
+      The plan's simulator, re-run with both rules exactly as the code computes
+      them, the schedule's bound of four included: random block times, the
+      honest miner's clock on its blocks, the median of six seeds. The 2 October
+      rows start from the real chain's last ninety blocks before the burst. The
+      real chain's next hundred blocks came 31 hours late, the first of them
+      luckier than the median; the schedule's figures are held by the tests in
+      <code>tests/the_difficulty_follows_the_clock.rs</code>.
+    </p>
+
+    <p>
+      For the same effort the honest chain is held up thirteen to twenty six
+      times less than under the moving average, and each further hour of delay
+      costs more than the last. A burst as small as the 2 October one still
+      costs the honest chain about half of what it paid: the schedule keeps it
+      small, an hour, rather than cheap.
     </p>
 
     <p>
@@ -848,9 +908,15 @@
       that loses more than about twenty times its hash rate is read rather than
       weighed, on the test network from about eight hours after the loss and for
       under five and a half days beyond what the cap already refuses. A burst
-      that lifts the difficulty more than 32 times and leaves does the same for
-      up to a day and a half on a young chain, and costs whoever causes it about
-      two days of the honest rate for every thirty two times.
+      that lifts the difficulty more than 32 times and leaves does the same: after
+      bursts to 128 times, for up to fifteen hours on an old chain and thirty five
+      on a young one, and after a burst to 1 024 times, for 100 to 124 hours on a
+      chain a few days old. It costs whoever causes it about two days of the
+      honest rate for every thirty two times: sixty days of it for the larger
+      burst, which the 2 October intruder's rate pays in seventy minutes. A
+      newcomer refused this way holds it against nobody and reads the chain block
+      by block from a peer that kept it, which on a young chain every node does
+      unless told otherwise.
     </p>
 
     <p>
