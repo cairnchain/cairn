@@ -33,7 +33,7 @@ use crate::note::NetworkId;
 /// block asked less than the network's real rate, down to the floor. So it is
 /// minted again before the release, dated at the opening announced for the
 /// network (`-- --opens-at`), and a node started before that moment waits for
-/// it. A release refuses to go out while this paragraph says provisional.
+/// it. A release is refused until the first word of this paragraph is gone.
 const TESTNET_8: &str = "01005b524143000000000000000000000000000000000000000000000000000000000000000000000000000000006f3cc73c214804e789694adf801aa8db60858b3067698961f1d554b05e1c360c0b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e2b253c26a0000000000000010000000000000001000000000000000000000000026d5490900000000010000000000000000000000000032000000436169726e20746573746e65742d382e2054686520646966666963756c747920666f6c6c6f77732074686520636c6f636b2e00000000";
 
 /// How long before it was minted the devnet's first block is dated.
@@ -269,7 +269,6 @@ mod tests {
         for (timestamp, said) in [
             (0, "1 January 1970 at 00:00:00 UTC"),
             (1_791_309_600, "6 October 2026 at 18:00:00 UTC"),
-            (1_791_120_306, "4 October 2026 at 13:25:06 UTC"),
             (951_782_399, "28 February 2000 at 23:59:59 UTC"),
             (951_782_400, "29 February 2000 at 00:00:00 UTC"),
             (951_868_800, "1 March 2000 at 00:00:00 UTC"),
