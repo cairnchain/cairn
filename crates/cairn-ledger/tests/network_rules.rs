@@ -368,6 +368,31 @@ fn the_next_test_network_is_named_before_it_starts() {
     );
 }
 
+/// Testnet-8 is named before it starts, as testnet-7 was in 0.10.0.
+///
+/// Every testnet-7 node still running when the network starts over reads its
+/// peers' marker through its own build; named here, it says they moved to
+/// testnet-8 rather than printing `0x4341525b`.
+#[test]
+fn testnet_8_is_named_before_it_starts() {
+    use cairn_ledger::note::NetworkId;
+
+    let next = NetworkId::new(0x4341_525B);
+    assert_eq!(next, NetworkId::TESTNET_8);
+    assert_eq!(next.name(), Some("testnet-8"));
+    assert_eq!(next.to_string(), "testnet-8");
+    assert_eq!(next.address_prefix(), "tcairn");
+    assert_ne!(
+        NetworkId::TESTNET,
+        next,
+        "testnet-7 is still the current one"
+    );
+    assert!(
+        ConsensusParams::for_network("testnet-8").is_none(),
+        "a network was answered for before its first block exists"
+    );
+}
+
 /// The network a rule set names is the network its first block belongs to.
 ///
 /// `for_network` writes the network three times in each arm: once as the
