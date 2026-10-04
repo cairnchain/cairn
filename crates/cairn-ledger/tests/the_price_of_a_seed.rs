@@ -725,35 +725,81 @@ struct Spike {
     /// refuses, and the seconds of that stretch the tie refused.
     until: u64,
     refused: u64,
+    /// How many blocks past the burst's last one the pinned header stood
+    /// when the tie last refused a tip, and whether judging went on until
+    /// the deepest question was [`PAST_THE_BURST`] blocks past it.
+    pinned_at_the_last_refusal: usize,
+    judged_to_the_end: bool,
 }
+
+/// How old the honest chain is when the burst comes.
+#[derive(Clone, Copy)]
+enum Age {
+    /// The thirty year chain every published figure is for, whose band is
+    /// 481 blocks' work.
+    ThirtyYears,
+    /// A chain of this many blocks with nothing behind it, the shape of a
+    /// network hours or days after it opened, whose band is most of
+    /// everything.
+    Young(usize),
+}
+
+impl Age {
+    fn name(self) -> String {
+        match self {
+            Self::ThirtyYears => "thirty years".to_string(),
+            Self::Young(blocks) => format!("{blocks} blocks"),
+        }
+    }
+}
+
+/// How far past the burst's last block the deepest question has to be
+/// before judging stops, in blocks.
+///
+/// Judging used to stop as soon as the deepest question reached the burst's
+/// last block. At that moment that block is the pinned header, and the tie
+/// counts the pinned header in the run, and the honest blocks just after it
+/// still carry most of the burst's difficulty, falling by the bound a block:
+/// newcomers were still refused when the count stopped, and every figure it
+/// gave was short. The tie lets go once the pinned header is past those few
+/// blocks, so this margin is many times what it needs, and the test checks
+/// that the last refusal came well inside it.
+const PAST_THE_BURST: usize = 3_000;
 
 /// An honest chain on schedule, a miner of 1 260 times its rate dating every
 /// block at the median floor until the retarget asks `spike` times the
 /// opening difficulty, and the honest miner alone again, block by block until
-/// the deepest question lands above the burst.
+/// the deepest question lands [`PAST_THE_BURST`] blocks past the burst.
 ///
-/// `young` is a chain of two thousand blocks with nothing behind it, the
-/// shape of a network a day or two after it opened, whose band is a quarter
-/// of everything; otherwise the thirty year chain every published figure is
-/// for, whose band is 481 blocks' work.
-fn honest_spike(network: &Network, spike: u64, young: bool, seed: u64) -> Spike {
-    let steady: usize = if young { 2_000 } else { 1_500 };
+/// A young chain's halvings are counted as a reader counts them, off the
+/// tip's age by the clock or its height, whichever is less: a burst runs the
+/// height ahead of the clock, so after one the clock decides.
+fn honest_spike(network: &Network, spike: u64, age: Age, seed: u64) -> Spike {
+    let steady: usize = match age {
+        Age::ThirtyYears => 1_500,
+        Age::Young(blocks) => blocks,
+    };
     let target = network.params.target_block_time;
     let difficulty = network.params.genesis_difficulty;
     let rate = difficulty as f64 / target as f64;
-    let (history, levels, _) = chain(network);
+    let (history, old_levels, _) = chain(network);
     let mut dice = Dice(seed);
     let start = Walk::on_schedule_at(difficulty, target);
     let origin = start.origin;
     let mut window: Vec<HeaderSummary> = start.window;
     let mut headers: Vec<(u64, u64, u128)> = Vec::new();
-    let mut total = if young { 0 } else { history };
+    let mut total = match age {
+        Age::ThirtyYears => history,
+        Age::Young(_) => 0,
+    };
     let mut hardest: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
     let mut report = Spike {
         blocks: 0,
         paid: 0.0,
         until: 0,
         refused: 0,
+        pinned_at_the_last_refusal: 0,
+        judged_to_the_end: false,
     };
     let mut clock = window.last().unwrap().timestamp;
     let mut burst_ended: Option<(u64, usize)> = None;
@@ -801,16 +847,19 @@ fn honest_spike(network: &Network, spike: u64, young: bool, seed: u64) -> Spike 
         let Some((ended, first_honest)) = burst_ended else {
             continue;
         };
-        let levels = if young {
-            levels_for(index as u64)
-        } else {
-            levels
+        let levels = match age {
+            Age::ThirtyYears => old_levels,
+            Age::Young(_) => {
+                let by_the_clock = (timestamp - origin.timestamp) / target;
+                levels_for(by_the_clock.min(last.height + 1))
+            }
         };
         let questions = SAMPLES as u128 / u128::from(levels);
         let band = before >> levels;
         let deepest = before - band - band / questions;
         let pinned = headers.partition_point(|header| header.2 <= deepest);
-        if pinned >= first_honest {
+        if pinned >= first_honest + PAST_THE_BURST {
+            report.judged_to_the_end = true;
             break;
         }
         while hardest.front().is_some_and(|at| *at < pinned) {
@@ -819,6 +868,7 @@ fn honest_spike(network: &Network, spike: u64, young: bool, seed: u64) -> Spike 
         let top = headers[*hardest.front().unwrap()].1;
         if asked * MOST_FALL < top {
             report.until = timestamp - ended;
+            report.pinned_at_the_last_refusal = pinned.saturating_sub(first_honest);
             refused_since = Some(timestamp);
         }
     }
@@ -826,45 +876,75 @@ fn honest_spike(network: &Network, spike: u64, young: bool, seed: u64) -> Spike 
 }
 
 /// A burst that lifts an honest chain past the tie locks newcomers out of
-/// weighing it for hours on a long chain and about a day on a young one, and
-/// costs whoever causes it about two days of the honest rate.
+/// weighing it for hours on a long chain and for days on a young one, and
+/// costs whoever causes it days of the honest rate or more.
 ///
 /// The tie refuses a tip more than [`MOST_FALL`] times below the hardest
 /// header from the pinned one up, so once a burst has raised the difficulty
 /// further than that, the honest chain that falls back is refused to every
-/// newcomer until the deepest question lands above the burst. Under the moving
-/// average that took three blocks of four times each, minutes of a rented
-/// machine. Here the retarget asks thirty two times only of a chain five half
-/// lives ahead of its schedule, three hundred blocks, and the burst pays for
-/// every one of them: about `32 tau / (T ln 2)` blocks of the honest rate,
-/// forty five hours. Measured at sixteen seeds on each network: past
-/// thirty two times, a thirty year chain refuses newcomers for up to 10.6
-/// hours after the burst, a young one for up to 31 hours; the newcomer reads
-/// the chain from a peer that keeps it meanwhile.
+/// newcomer until the deepest question lands past the burst and the few
+/// honest blocks after it that still carry most of its difficulty. Under the
+/// moving average that took three blocks of four times each, minutes of a
+/// rented machine. Here the retarget asks thirty two times only of a chain
+/// five half lives ahead of its schedule, three hundred blocks, and the burst
+/// pays for every one of them: about `32 tau / (T ln 2)` blocks of the honest
+/// rate, forty five hours.
+///
+/// Measured at sixteen seeds on each network, judged until the deepest
+/// question is [`PAST_THE_BURST`] blocks past the burst: after bursts of 33 to
+/// 128 times, a thirty year chain refuses newcomers for up to about 920 target
+/// times, fifteen hours on testnet-8, and a chain of 300 to 2 000 blocks for up
+/// to about 2 100, thirty five hours. A burst of 1 024 times, which costs
+/// 88 000 blocks of the honest work and which the 2 October intruder's rate
+/// buys in seventy minutes, locks newcomers out for up to about 1 930 target
+/// times on the thirty year chain and 6 000 to 7 500, 100 to 124 hours, on a
+/// chain of 300 to 2 000 blocks: testnet-8's first days. The young chain's
+/// band is most of its work, so the deepest question passes a burst only once
+/// the honest chain has added a share of the burst's own work after it. The
+/// newcomer reads the chain from a peer that keeps it meanwhile.
 #[test]
 fn a_burst_past_the_tie_locks_newcomers_out_for_hours_and_costs_days() {
+    let ages = [
+        Age::ThirtyYears,
+        Age::Young(2_000),
+        Age::Young(1_000),
+        Age::Young(300),
+    ];
     for network in networks() {
-        for young in [false, true] {
-            for spike in [33u64, 64, 128] {
+        let target = network.params.target_block_time;
+        for age in ages {
+            // The longest lockout after the bursts the documents first
+            // measured, 33 to 128 times, and after one of 1 024 times.
+            let mut measured_before = 0u64;
+            let mut thousand = 0u64;
+            for spike in [33u64, 64, 128, 1_024] {
                 let mut until = 0u64;
                 let mut paid = f64::INFINITY;
                 let mut blocks = u64::MAX;
+                let mut margin = 0usize;
                 for seed in 0..16 {
-                    let report = honest_spike(&network, spike, young, seed);
+                    let report = honest_spike(&network, spike, age, seed);
+                    assert!(
+                        report.judged_to_the_end,
+                        "{} {}: judging stopped before the deepest question passed the burst",
+                        network.name,
+                        age.name()
+                    );
                     until = until.max(report.until);
                     paid = paid.min(report.paid);
                     blocks = blocks.min(report.blocks);
+                    margin = margin.max(report.pinned_at_the_last_refusal);
                     assert!(report.refused <= report.until);
                 }
-                let target = network.params.target_block_time;
                 let hours = until as f64 / 3_600.0;
                 let out = until / target;
                 println!(
                     "  {} {}: a burst of {blocks} blocks to {spike} times costs {paid:.0} \
                      honest blocks, {:.0} h, and locks newcomers out for up to {hours:.1} h, \
-                     {out} targets",
+                     {out} targets; the last refusal had the pinned header {margin} blocks past \
+                     the burst",
                     network.name,
-                    if young { "young" } else { "thirty years" },
+                    age.name(),
                     paid * target as f64 / 3_600.0,
                 );
                 // What reaching the spike is worth: a half life of blocks for
@@ -873,13 +953,38 @@ fn a_burst_past_the_tie_locks_newcomers_out_for_hours_and_costs_days() {
                     paid > 80.0 * (spike - 1) as f64,
                     "a burst to {spike} times cost only {paid:.0} honest blocks"
                 );
-                let most = if young { 2_400 } else { 900 };
+                // The margin judging runs to is many times what the tie needs.
                 assert!(
-                    out < most,
-                    "{} {}: newcomers were locked out for {out} targets after a burst to {spike} \
-                     times",
+                    margin < PAST_THE_BURST / 10,
+                    "{} {}: the tie still refused with the pinned header {margin} blocks past \
+                     the burst, too near the {PAST_THE_BURST} judging stops at",
                     network.name,
-                    if young { "young" } else { "thirty years" },
+                    age.name()
+                );
+                if spike == 1_024 {
+                    thousand = out;
+                } else {
+                    measured_before = measured_before.max(out);
+                }
+            }
+            // The documents' figures, held from both sides. Judged only until
+            // the deepest question reached the burst's last block, the thirty
+            // year chain gave 676 targets at most and the two thousand block
+            // chain 1 932, which is what the documents said before.
+            let (before, after) = match age {
+                Age::ThirtyYears => ((850, 1_000), (1_800, 2_100)),
+                Age::Young(_) => ((1_950, 2_300), (5_500, 8_000)),
+            };
+            for (out, (least, most), bursts) in [
+                (measured_before, before, "33 to 128 times"),
+                (thousand, after, "1 024 times"),
+            ] {
+                assert!(
+                    (least..most).contains(&out),
+                    "{} {}: newcomers were locked out for up to {out} targets after bursts \
+                     of {bursts}, outside the {least} to {most} the documents rest on",
+                    network.name,
+                    age.name(),
                 );
             }
         }

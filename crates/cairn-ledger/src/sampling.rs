@@ -573,10 +573,16 @@ pub const BELOW_THE_PINNED: u64 = RECENT_HEADERS as u64 - 1;
 /// the same to an honest chain for a while, and it is dear to cause: thirty
 /// two times takes a branch five half lives ahead of its schedule, about two
 /// thousand seven hundred and fifty blocks of the honest work, where the
-/// moving average reached it in three blocks. Measured in the same file, a
-/// thirty year chain refuses newcomers for up to about 680 target times after
-/// such a burst and a young one of two thousand blocks for 720 to 2 000, a
-/// quarter or less of what the burst cost in honest time.
+/// moving average reached it in three blocks. Measured in the same file,
+/// judged until the deepest question is past the burst: after bursts of 33 to
+/// 128 times a thirty year chain refuses newcomers for up to about 920 target
+/// times and a young one of 300 to 2 000 blocks for up to about 2 100; after a
+/// burst of 1 024 times, about eighty eight thousand blocks of the honest
+/// work and seventy minutes at the 2 October intruder's rate, for up to about
+/// 1 930 and 6 000 to 7 500. That is from about two per cent to under half
+/// of what the burst cost in honest time, the larger share for the smaller
+/// burst on the younger chain. A newcomer reads the chain meanwhile, from a peer
+/// that kept its blocks.
 pub const MOST_FALL: u64 = 32;
 
 /// The least work `blocks` blocks can carry, starting from a block of this

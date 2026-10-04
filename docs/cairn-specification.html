@@ -2976,14 +2976,22 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
 
     <p>
       A burst of hash rate that lifts the difficulty past the tie and leaves does the
-      same to a newcomer, until the deepest question lands above the burst. Reaching
-      thirty two times the honest difficulty takes a branch five half lives ahead of
-      its schedule, about 2 750 blocks of the honest work, 46 hours of it at a sixty
-      second block. Measured after bursts of 33, 64 and 128 times: a thirty year chain
-      refuses newcomers for up to about 680 target times after the burst, 11 hours on
-      testnet-8, and a young chain of two thousand blocks for 720 to 2 000, 12 to 32
-      hours, while the burst cost four to five times that in honest work. Under the
-      moving average three blocks of four times each reached the same tie.
+      same to a newcomer, until the deepest question lands past the burst and past
+      the few honest blocks after it that still carry most of its difficulty.
+      Reaching thirty two times the honest difficulty takes a branch five half lives
+      ahead of its schedule, about 2 750 blocks of the honest work, 46 hours of it at
+      a sixty second block. Measured after bursts of 33, 64 and 128 times: a thirty
+      year chain refuses newcomers for up to about 920 target times after the burst,
+      15 hours on testnet-8, and a young chain of 300 to 2 000 blocks for up to about
+      2 100, 35 hours. After a burst of 1 024 times, about 88 000 blocks of the
+      honest work, the thirty year chain refuses them for up to about 1 930 target
+      times and the young chain for 6 000 to 7 500, 100 to 124 hours: a young chain's
+      band is most of its work, so the deepest question passes the burst only once
+      the honest chain has added a share of the burst's own work after it. The burst
+      costs from about twice to forty five times the time it locks newcomers out, in
+      honest work. Under the moving average three blocks of four times each reached
+      the same tie. A newcomer refused this way reads the chain instead, from a peer
+      that kept its blocks.
     </p>
 
     <p>

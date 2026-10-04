@@ -674,9 +674,15 @@ what the cap does: one
 that loses more than about twenty times its hash rate is read rather than
 weighed, on the test network from about eight hours after the loss and for
 under five and a half days beyond what the cap already refuses. A burst
-that lifts the difficulty more than 32 times and leaves does the same for
-up to a day and a half on a young chain, and costs whoever causes it about
-two days of the honest rate for every thirty two times.
+that lifts the difficulty more than 32 times and leaves does the same: after
+bursts to 128 times, for up to fifteen hours on an old chain and thirty five
+on a young one, and after a burst to 1 024 times, for 100 to 124 hours on a
+chain a few days old. It costs whoever causes it about two days of the
+honest rate for every thirty two times: sixty days of it for the larger
+burst, which the 2 October intruder's rate pays in seventy minutes. A
+newcomer refused this way holds it against nobody and reads the chain block
+by block from a peer that kept it, which on a young chain every node does
+unless told otherwise.
 
 The count follows from the assumption the chain already makes. A forger
 cannot mine what it did not mine, so a chain heavier than the honest one,
