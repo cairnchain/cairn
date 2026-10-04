@@ -1,0 +1,13 @@
+{
+  "network": {
+    "name": "testnet-7",
+    "id": "0x4341525a",
+    "genesis": "0000000cd9f098b5467d2cfa0c70b3c2a874fde9d436e6fc92bc26002ddc15bb",
+    "opensAt": 1790800858
+  },
+  "targetBlockTime": 60,
+  "initialReward": "5000000000",
+  "tailReward": "1000000",
+  "halvingInterval": 1051200,
+  "maxTimestampDrift": 600
+}
