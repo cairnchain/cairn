@@ -259,7 +259,7 @@ fn traces_of(old: &Block, new: &Block) -> Vec<Trace> {
         },
         Trace::word("a timestamp", &old_time.to_string(), &new_time.to_string()),
         Trace::word(
-            "a timestamp",
+            "a timestamp in Rust",
             &underscored(old_time),
             &underscored(new_time),
         ),

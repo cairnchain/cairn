@@ -962,6 +962,36 @@ fn the_papers_price_an_archivist_at_what_an_archive_holds() {
     }
 }
 
+/// The README's table of networks gives each first block and opening this
+/// build pins.
+///
+/// A first block is minted again at a network's opening, and the README is
+/// where somebody about to join reads which block that was. Nothing compared
+/// the two, so a block replaced without its row would have sent a reader to
+/// check a chain against an identifier no node starts from.
+/// `cargo run --release -p cairn-ledger --example remint` rewrites both, and
+/// this holds that it did.
+#[test]
+fn the_readme_names_the_first_blocks_this_build_pins() {
+    for name in ["testnet", "devnet"] {
+        let params = cairn_ledger::validation::ConsensusParams::for_network(name).unwrap();
+        let identifier = params
+            .genesis
+            .expect("a published network pins its first block");
+        let row = format!(
+            "| `{}` | `{}...` | {} | {} s |",
+            params.network_name(),
+            &identifier.to_string()[..12],
+            params.opens_at,
+            params.target_block_time
+        );
+        assert!(
+            README.contains(&row),
+            "the README's table does not have the row this build pins: {row}"
+        );
+    }
+}
+
 /// The README quotes the number of headers a newcomer actually opens.
 ///
 /// It said 512 in the paragraph that describes joining and 4 096 in the one

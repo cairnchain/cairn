@@ -64,8 +64,8 @@ tip more than 32 times below the hardest header of its run, which puts a floor
 under a tip at the band the draw leaves unresolved over 2^18, whatever the
 retarget: measured, 2^18.9 hashes on testnet-8 and 2^13.9 on the devnet at
 their opening difficulties of 2^28 and 2^23 (2^18.0 at testnet-7's 2^27 under
-the old retarget), where tying the tip to the pinned header alone would have
-left 2^11.9 and 2^8.1. The
+the old retarget), where tying the tip to the pinned header alone
+would have left 2^11.9 and 2^8.1. The
 40% figure is quoted against a budget: 2^-161.9 a tip, which holds under
 2^-128 against 2^33 tips and not 2^34, and nothing at all at the measured
 42.96%. The specification's section on what the bound is worth says so and

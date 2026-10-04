@@ -48,7 +48,11 @@ const TESTNET_8: &str = "01005b5241430000000000000000000000000000000000000000000
 /// hundred blocks at the floor before it has caught its schedule up, where
 /// the twenty nine days this used to be asked half a million. The test holds
 /// its chain under this.
-pub const DEVNET_DATED_EARLY: u64 = 2 * 3_600 + 30 * 60;
+///
+/// Written as one number rather than as hours and minutes multiplied out: a
+/// mutation of that arithmetic is caught only by the test in `cairn-net`,
+/// which a mutant of this crate is not run against.
+pub const DEVNET_DATED_EARLY: u64 = 9_000;
 
 /// The first block of the throwaway network.
 ///
