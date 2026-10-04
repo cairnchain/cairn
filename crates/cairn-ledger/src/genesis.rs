@@ -23,7 +23,7 @@ use crate::note::NetworkId;
 /// Mined once, in the open. Its coinbase pays nobody: a network should not
 /// start with someone already holding something. What it says is what the
 /// network started over for: the difficulty follows the clock, so a few
-/// minutes of hired hash rate no longer stop the chain for a day and a half.
+/// minutes of hired hash rate no longer stop the chain for 33 hours.
 ///
 /// Provisional. Minted by `cargo run --release -p cairn-ledger --example
 /// remint`, which mints this block and the devnet's together and writes both
