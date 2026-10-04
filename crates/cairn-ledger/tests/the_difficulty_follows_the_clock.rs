@@ -471,3 +471,69 @@ fn a_loss_of_nine_tenths_of_the_hash_rate_settles_in_hours() {
         "settled after {hours:.2} h, faster than a half life allows"
     );
 }
+
+/// A network opened long after its first block is dated stands behind its
+/// schedule from the start, and is asked the least the bound allows, down to
+/// the floor, until it has caught up.
+///
+/// The schedule starts at the first block. The devnet's pinned first block is
+/// dated twenty nine days before it was mined, so that a test could mine a long
+/// chain forward from it behind the wall clock; a devnet node opened the day
+/// it was mined is twenty nine days behind. Measured on the devnet's own rules
+/// and first block, with blocks dated as fast as the median allows from that
+/// day on: the floor at the thirteenth block, and the floor every block after
+/// it for about half a million blocks, until the chain has caught the schedule
+/// up. Under the moving average a late opening cost one easy block. So a
+/// published network's first block is minted at its opening, which the
+/// specification requires, and the devnet's has to be minted again close to
+/// the day it is used.
+#[test]
+fn a_network_opened_long_after_its_first_block_is_nearly_free_until_it_catches_up() {
+    let params = cairn_ledger::validation::ConsensusParams::for_network("devnet").unwrap();
+    let first = cairn_ledger::genesis::block(params.network).unwrap();
+    let origin = params.origin();
+    let target = params.target_block_time;
+    let opened = first.header.timestamp + 29 * 24 * 3_600;
+
+    let mut recent = vec![first.header.summary()];
+    let mut to_the_floor = None;
+    let mut caught_up = None;
+    let mut wall = opened;
+    for height in 1..2_000_000u64 {
+        let parent = *recent.last().unwrap();
+        let asked = next_difficulty(&parent, origin, target);
+        if to_the_floor.is_none() && asked == MIN_DIFFICULTY {
+            to_the_floor = Some(height);
+        }
+        if to_the_floor.is_some() && asked > MIN_DIFFICULTY {
+            caught_up = Some(height);
+            break;
+        }
+        // As fast as the rules let a miner date its blocks: the median plus
+        // one, and never before the wall clock of the day it opened, which
+        // moves a second for every six blocks.
+        if height % 6 == 0 {
+            wall += 1;
+        }
+        let floor = median_time_past(&recent).unwrap() + 1;
+        recent.push(HeaderSummary {
+            height,
+            timestamp: floor.max(wall),
+            difficulty: asked,
+        });
+        if recent.len() > MEDIAN_TIME_WINDOW {
+            recent.remove(0);
+        }
+    }
+    let to_the_floor = to_the_floor.expect("the floor was never reached");
+    let caught_up = caught_up.expect("the schedule was never caught up");
+    println!(
+        "devnet opened 29 days late: the floor at block {to_the_floor}, and left at block \
+         {caught_up}"
+    );
+    assert!(to_the_floor <= 14, "the floor came at {to_the_floor}");
+    assert!(
+        caught_up > 450_000,
+        "the late opening was caught up after {caught_up} blocks"
+    );
+}

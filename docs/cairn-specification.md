@@ -1433,6 +1433,18 @@ the first does. A network that pins nothing may date its first block after its
 opening, and its schedule still starts at the opening, so such a chain begins
 behind its schedule.
 
+**A late opening.** The schedule starts at the first block whenever the network
+actually opens. A network whose first block is dated `L` seconds before its
+second is mined stands `L` seconds behind its schedule from that block on: each
+block after it is asked a quarter of the last until the floor, and the floor
+until the chain has caught the schedule up, which is about `L / T` blocks
+dated as fast as the median allows. Every one of those blocks is nearly free.
+Measured on the devnet's rules and first block opened twenty nine days late:
+the floor at the thirteenth block and the floor until block 517 036. **A
+published network's first block MUST therefore be minted at its opening.** The
+moving average this replaced charged a late opening one easy block and
+forgot it.
+
 **What the clamp is for.** The schedule rarely comes near it. What a block is
 asked over its parent's is `2^((T - g) / tau)`, `g` the parent's own stated
 gap, so the clamp binds only after a gap more than two half lives longer than

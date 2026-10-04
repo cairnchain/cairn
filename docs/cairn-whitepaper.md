@@ -382,6 +382,13 @@ next difficulty by about eleven per cent and the next honest timestamp takes
 all of it back. Simulated against every share up to a half, the fastest a
 liar can make the chain run is the target.
 
+The schedule starts at the first block, which makes that block's date a rule
+for good. A network opened long after its first block is dated stands behind
+its schedule from the start, and every block until it has caught up is asked
+the floor: nearly free, and about half a million of them for a devnet opened
+four weeks late. So a public network's first block is minted the day it
+opens.
+
 Timestamps are validated against the median of the previous 11 blocks
 rather than against the parent. A miner writes its own timestamp but holds
 one vote in a median, which removes the single-block manipulation that a
