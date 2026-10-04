@@ -41,10 +41,12 @@ from typing import Callable, NamedTuple, Optional
 DEFAULT_TARGET_SECONDS = 60
 # Twenty target block times with no block is a stopped network, not a long gap.
 STALE_TIP_IN_TARGETS = 20
-# Blocks the difficulty is judged over: about an hour at 60 s, inside the retarget's own window.
+# Blocks the difficulty is judged over: one half life of the schedule, an hour at 60 s.
 DIFFICULTY_LOOKBACK = 60
-# The retarget is damped (1.2x was testnet-7's widest 60 block swing), so 8x is hash rate moving.
-DIFFICULTY_SWING = 8
+# Steady mining rises 1.34x at most here (log2 spread 0.11; testnet-7 1.3x); 3x hash rate arriving passes 1.5x.
+DIFFICULTY_RISE = 1.5
+# Steady mining falls 1.40x at most here; a burst leaving, or two thirds of the hash rate, passes 2x.
+DIFFICULTY_FALL = 2
 # Blocks in the run that is judged for speed.
 FAST_RUN_BLOCKS = 20
 # That many blocks inside this many target times is four times schedule or better (5 min at 60 s).
@@ -102,7 +104,8 @@ NODE_JOINING_WELL = ("no", "done")
 # Lifetime counter of visitors refused: it never returns to 0, so growth is what matters.
 NODE_GROWTH = ("turnedAway",)
 # Fields that are readings and not faults: never alarms, and never reported as unknown.
-NODE_READINGS = ("writtenThrough",)
+# `opening` is set only before the network opens, when there is no chain to fault.
+NODE_READINGS = ("writtenThrough", "opening")
 
 # ---------------------------------------------------------------------------
 # The seven alarms.
@@ -144,8 +147,9 @@ TITLES = {
 MEANING = {
     STALE: "No block has been added for much longer than the schedule allows. "
     "Either nothing is mining, or the explorer's node has stopped following the chain.",
-    SWING: "The difficulty moved by a factor the retarget is built not to allow in this "
-    "many blocks. A large share of the hash rate has arrived or left.",
+    SWING: "The difficulty moved further in an hour of blocks than steady mining moves it. "
+    "A large share of the hash rate has arrived or left, or a burst of it has come and gone. "
+    "On the day a network opens it can also be the opening difficulty finding the real rate.",
     FAST: "A run of blocks arrived much faster than the schedule. That is a miner with "
     "far more power than the difficulty expects, and it is the opening move of a freeze: "
     "the difficulty overshoots and the chain stalls after it.",
@@ -359,29 +363,58 @@ def check_stale_tip(tip_timestamp, opens_at, now: int, target: int, peers=None) 
     )
 
 
-def check_difficulty(blocks, lookback: int = DIFFICULTY_LOOKBACK, swing: int = DIFFICULTY_SWING):
+def check_difficulty(
+    blocks,
+    lookback: int = DIFFICULTY_LOOKBACK,
+    rise: float = DIFFICULTY_RISE,
+    fall: float = DIFFICULTY_FALL,
+):
+    """The largest rise and the largest fall in the window, each from a block to a later one.
+
+    Judged apart because the schedule moves the two differently: it cannot rise past
+    about 2.24x in sixty validly dated blocks however much hash rate arrives, which is
+    why a single 8x threshold on the widest swing could only ever fire on a fall.
+    """
     recent = blocks[-lookback:]
     if len(recent) < 2:
         return Verdict(SWING, OK, "fewer than two blocks, nothing to compare")
-    low = min(recent, key=lambda block: block.difficulty)
-    high = max(recent, key=lambda block: block.difficulty)
-    ratio = high.difficulty / max(low.difficulty, 1)
+    lowest = highest = recent[0]
+    rose = (1.0, recent[0], recent[0])
+    fell = (1.0, recent[0], recent[0])
+    for block in recent[1:]:
+        up = block.difficulty / max(lowest.difficulty, 1)
+        if up > rose[0]:
+            rose = (up, lowest, block)
+        down = highest.difficulty / max(block.difficulty, 1)
+        if down > fell[0]:
+            fell = (down, highest, block)
+        if block.difficulty < lowest.difficulty:
+            lowest = block
+        if block.difficulty > highest.difficulty:
+            highest = block
     span = f"the last {len(recent)} blocks, heights {recent[0].height} to {recent[-1].height}"
-    if ratio <= swing:
+    if rose[0] <= rise and fell[0] <= fall:
         return Verdict(
-            SWING, OK, f"widest swing {ratio:.2f}x over {span} (alarm past {swing}x)"
+            SWING,
+            OK,
+            f"widest rise {rose[0]:.2f}x and fall {fell[0]:.2f}x over {span} "
+            f"(alarm past {rise}x up or {fall}x down)",
         )
-    direction = "rose" if high.height > low.height else "fell"
+    # The one further past its own threshold is the one reported.
+    if rose[0] / rise >= fell[0] / fall:
+        direction, (ratio, start, end), limit = "rose", rose, rise
+    else:
+        direction, (ratio, start, end), limit = "fell", fell, fall
     return Verdict(
         SWING,
         ALARM,
-        f"difficulty {direction} {ratio:.1f}x over {span} (alarm past {swing}x)",
-        level=doublings(ratio, swing),
+        f"difficulty {direction} {ratio:.2f}x over {span} (alarm past {limit}x)",
+        level=doublings(ratio, limit),
         facts=(
-            f"lowest {low.difficulty} at height {low.height}",
-            f"highest {high.difficulty} at height {high.height}",
-            f"so it {direction} by a factor of {ratio:.1f} within {span}",
-            f"alarm threshold: more than {swing}x",
+            f"{start.difficulty} at height {start.height}",
+            f"{end.difficulty} at height {end.height}",
+            f"so it {direction} by a factor of {ratio:.2f} within {span}",
+            f"alarm thresholds: a rise of more than {rise}x, a fall of more than {fall}x",
         ),
     )
 

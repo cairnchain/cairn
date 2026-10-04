@@ -1441,7 +1441,10 @@ until the chain has caught the schedule up, which is about `L / T` blocks
 dated as fast as the median allows. Every one of those blocks is nearly free.
 Measured on the devnet's rules and first block opened twenty nine days late:
 the floor at the thirteenth block and the floor until block 517 036. **A
-published network's first block MUST therefore be minted at its opening.** The
+published network's first block MUST therefore be dated at its announced
+opening and published before it**: a node holding a first block dated ahead of
+its clock waits for it, and a block dated at minting would open late by however
+long the release and the installs take. The
 moving average this replaced charged a late opening one easy block and
 forgot it.
 

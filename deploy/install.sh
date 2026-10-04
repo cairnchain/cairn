@@ -200,6 +200,16 @@ name_of() {
     (cd / && "$1" --check --network "$2" 2>/dev/null) | awk '/^network/ {print $2; exit}'
 }
 
+# The first block a build starts a network from, as `--check` prints it.
+#
+# A network is minted again under the same name when a restart's provisional
+# first block is replaced by the one dated at the opening, and the name alone
+# then says nothing changed. A node of one minting started on a directory of
+# the other stops, and before it did, cut the whole block log.
+first_block_of() {
+    (cd / && "$1" --check --network "$2" 2>/dev/null) | awk '/^starts from/ {print $3; exit}'
+}
+
 # A test network gets retired when a rule has to change, and its name stays
 # written in the unit file of every machine that was running it. Carrying a
 # setting forward is right until the build stops accepting it, and then it is
@@ -259,7 +269,8 @@ check_the_line() {
 }
 
 # Moves the chain a network this machine is leaving out of the way of the one
-# it is joining, and keeps it.
+# it is joining, and keeps it: in the directory named with `.` and the second
+# argument, said as the third and the fourth.
 #
 # A reset changes the network and nothing else, and a node started on the old
 # one's directory either set every block aside on its first start, because
@@ -280,7 +291,7 @@ set_aside() {
     systemctl stop cairnd 2>/dev/null || true
     if ! mv "$1" "$kept"; then
         systemctl start cairnd 2>/dev/null || true
-        echo "data     $1 holds $2's chain and this machine is moving to $3, and it" >&2
+        echo "data     $1 holds $3 and this machine is moving to $4, and it" >&2
         echo "         could not be moved aside to $kept. Nothing else is changed;" >&2
         echo "         move or empty it yourself and run this again." >&2
         exit 1
@@ -289,7 +300,7 @@ set_aside() {
     if [ -f "$kept/cairn.conf" ]; then
         cp -p "$kept/cairn.conf" "$1/cairn.conf"
     fi
-    echo "data     $2's chain is kept in $kept: a node on $3 starts from nothing"
+    echo "data     $3 is kept in $kept: a node on $4 starts from nothing"
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -351,11 +362,13 @@ the_settings
 # names whichever test network is current, so the same word in the unit can
 # be the network the chain is on today and another one after the update.
 WAS=""
+WAS_FROM=""
 named=$(carried network)
 named=${named%% *}
 if [ -n "$named" ]; then
     if [ -x "$BIN" ]; then
         WAS=$(name_of "$BIN" "$named")
+        WAS_FROM=$(first_block_of "$BIN" "$named")
     fi
     WAS=${WAS:-$named}
 fi
@@ -540,6 +553,7 @@ say "Service"
 # leaves this machine exactly as it was.
 settle_the_network "$BUILT"
 NOW=$(name_of "$BUILT" "$NETWORK")
+NOW_FROM=$(first_block_of "$BUILT" "$NETWORK")
 ARGS=$(the_line)
 check_the_line "$BUILT"
 # A public key in the old form of an address is still accepted and converted,
@@ -571,7 +585,14 @@ if ! id cairn >/dev/null 2>&1; then
     useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin cairn
 fi
 if [ -n "$WAS" ] && [ "$WAS" != "$NOW" ]; then
-    set_aside "$DATADIR" "$WAS" "$NOW"
+    set_aside "$DATADIR" "$WAS" "$WAS's chain" "$NOW"
+elif [ -n "$WAS" ] && [ -n "$WAS_FROM" ] && [ -n "$NOW_FROM" ] && [ "$WAS_FROM" != "$NOW_FROM" ]; then
+    # The same network minted again: nothing on the old minting's chain
+    # carries over, and the new build would refuse the directory.
+    was_short=$(printf '%s' "$WAS_FROM" | cut -c1-12)
+    now_short=$(printf '%s' "$NOW_FROM" | cut -c1-12)
+    set_aside "$DATADIR" "$WAS-$was_short" "$WAS's chain from first block $was_short..." \
+        "$NOW minted again from $now_short..."
 fi
 mkdir -p "$DATADIR"
 chown cairn:cairn "$DATADIR"

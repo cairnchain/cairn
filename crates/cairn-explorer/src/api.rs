@@ -17,7 +17,8 @@ use cairn_ledger::transaction::{Transfer, Witness};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::joining::Joined;
 use cairn_net::node::{
-    Behind, Filling, Probation, Stranded, Unanswered, Unjudged, Unread, Unweighable, Unwritten,
+    Behind, Filling, Opening, Probation, Stranded, Unanswered, Unjudged, Unread, Unweighable,
+    Unwritten,
 };
 use cairn_net::Node;
 use cairn_primitives::codec::Encode;
@@ -547,6 +548,14 @@ struct Health {
     /// first among the causes, because it produces the symptoms of the others,
     /// and it was the one state of its node this page did not carry.
     clock_behind: Option<Behind>,
+    /// When the network opens, while that is still ahead of this machine's
+    /// clock and there is no chain to serve.
+    ///
+    /// A network is released ahead of the opening its first block is dated
+    /// at, so a site installed for it early has nothing to show, and it said
+    /// its machine's clock was behind, with certainty, which sent whoever ran
+    /// it to fix a clock that was right.
+    opening: Option<Opening>,
     /// Whether the blocks arriving say this build is too old for its chain.
     unjudged: Option<Unjudged>,
     /// Whether nobody can show this node what work stands behind the chain.
@@ -614,6 +623,7 @@ impl Health {
             unwritten: node.unwritten(),
             unread: node.unread(),
             clock_behind: node.clock_behind(),
+            opening: node.opening(),
             unjudged: node.unjudged(),
             unweighable: node.unweighable(),
             mended: node.mended_nodes(),
@@ -1103,9 +1113,9 @@ fn index_cost(json: &mut Writer, size: Size) {
 /// What the node says about this machine's clock, from the blocks it refused.
 ///
 /// The gap is `seconds` less `drift`, and both are given so a reader does the
-/// subtraction the way `cairnd` does it. `ownFirstBlock` is what tells a hint
-/// from a certainty: blocks from peers carry dates strangers wrote, and the
-/// network's first block is in this program.
+/// subtraction the way `cairnd` does it. It used to carry `ownFirstBlock`, for
+/// a refusal of the network's first block read as a certainty about the
+/// clock; that refusal is a network not yet open, and `opening` says so.
 fn clock_field(json: &mut Writer, behind: Option<&Behind>) {
     let Some(behind) = behind else {
         json.field_null("clockBehind");
@@ -1117,7 +1127,22 @@ fn clock_field(json: &mut Writer, behind: Option<&Behind>) {
     json.field_u64("drift", behind.drift);
     json.field_u64("blocks", behind.blocks);
     json.field_u64("peers", u64::try_from(behind.peers).unwrap_or(u64::MAX));
-    json.field_bool("ownFirstBlock", behind.own_first_block);
+    json.end_object();
+}
+
+/// When the network opens, while it has not by this machine's clock: `at` is
+/// the moment its first block is dated, `inSeconds` how far this machine's
+/// clock puts it, and `drift` how long before it the node opens the chain.
+fn opening_field(json: &mut Writer, opening: Option<&Opening>) {
+    let Some(opening) = opening else {
+        json.field_null("opening");
+        return;
+    };
+    json.key("opening");
+    json.begin_object();
+    json.field_u64("at", opening.at);
+    json.field_u64("inSeconds", opening.in_seconds);
+    json.field_u64("drift", opening.drift);
     json.end_object();
 }
 
@@ -1255,6 +1280,7 @@ fn node_object(json: &mut Writer, context: &Context<'_>) {
     }
 
     clock_field(json, node.clock_behind.as_ref());
+    opening_field(json, node.opening.as_ref());
 
     match &node.unjudged {
         Some(unjudged) => {
@@ -2541,6 +2567,7 @@ mod tests {
             unwritten: None,
             unread: None,
             clock_behind: None,
+            opening: None,
             unjudged: None,
             unweighable: None,
             filling: None,
@@ -2551,6 +2578,37 @@ mod tests {
             turned_away: 0,
             unsaved_addresses: None,
         }
+    }
+
+    /// A site installed ahead of its network's opening says when the network
+    /// opens, in the status the page and the watcher read, and says nothing
+    /// of the kind once it is open.
+    ///
+    /// AUDIT, repaired (testnet-8, 01-F1). Its node refused the network's first
+    /// block for being dated ahead of the clock, and the status called that a
+    /// clock behind the network's, with certainty.
+    #[test]
+    fn a_site_before_its_networks_opening_says_when_it_opens() {
+        let mut json = super::Writer::new();
+        json.begin_object();
+        super::opening_field(
+            &mut json,
+            Some(&super::Opening {
+                at: 1_791_309_600,
+                in_seconds: 3_600,
+                drift: 600,
+            }),
+        );
+        json.end_object();
+        assert_eq!(
+            json.finish(),
+            "{\"opening\":{\"at\":1791309600,\"inSeconds\":3600,\"drift\":600}}"
+        );
+        let mut json = super::Writer::new();
+        json.begin_object();
+        super::opening_field(&mut json, None);
+        json.end_object();
+        assert_eq!(json.finish(), "{\"opening\":null}");
     }
 
     /// Only the reading whose answer is sent encodes anything to count its

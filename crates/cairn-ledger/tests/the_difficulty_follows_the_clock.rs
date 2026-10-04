@@ -51,8 +51,9 @@ const SPECIFICATION: &str = include_str!("../../../docs/cairn-specification.md")
 
 /// Every other place that says what a burst that leaves costs the honest
 /// chain, by name.
-const ELSEWHERE: [(&str, &str); 8] = [
+const ELSEWHERE: [(&str, &str); 9] = [
     ("README.md", include_str!("../../../README.md")),
+    ("genesis.rs", include_str!("../src/genesis.rs")),
     (
         "the whitepaper",
         include_str!("../../../docs/cairn-whitepaper.md"),

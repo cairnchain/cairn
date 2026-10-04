@@ -23,16 +23,17 @@ use crate::note::NetworkId;
 /// Mined once, in the open. Its coinbase pays nobody: a network should not
 /// start with someone already holding something. What it says is what the
 /// network started over for: the difficulty follows the clock, so a few
-/// minutes of hired hash rate no longer stop the chain for a day and a half.
+/// minutes of hired hash rate no longer stop the chain for 33 hours.
 ///
-/// Provisional. Minted on the code a restart lands with by `cargo run
-/// --release -p cairn-ledger --example remint`, which mints this block and
-/// the devnet's together and writes both into every place that pins them,
-/// on 4 October 2026 at 13:25:06 UTC. Its timestamp is `opens_at`, and the
-/// retarget's schedule starts there, so it is minted again the day the
-/// network opens: every target time a network opens after its first block is
-/// dated is a block asked less than the network's real rate, down to the
-/// floor.
+/// Provisional. Minted by `cargo run --release -p cairn-ledger --example
+/// remint`, which mints this block and the devnet's together and writes both
+/// into every place that pins them, and dated 4 October 2026 at 13:25:06 UTC.
+/// Its timestamp is `opens_at`, and the retarget's schedule starts there:
+/// every target time a network opens after its first block is dated is a
+/// block asked less than the network's real rate, down to the floor. So it is
+/// minted again before the release, dated at the opening announced for the
+/// network (`-- --opens-at`), and a node started before that moment waits for
+/// it. A release is refused until the first word of this paragraph is gone.
 const TESTNET_8: &str = "01005b524143000000000000000000000000000000000000000000000000000000000000000000000000000000006f3cc73c214804e789694adf801aa8db60858b3067698961f1d554b05e1c360c0b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e2b253c26a0000000000000010000000000000001000000000000000000000000026d5490900000000010000000000000000000000000032000000436169726e20746573746e65742d382e2054686520646966666963756c747920666f6c6c6f77732074686520636c6f636b2e00000000";
 
 /// How long before it was minted the devnet's first block is dated.
@@ -97,6 +98,72 @@ pub fn pinned(network: NetworkId) -> Option<Hash32> {
 /// The moment `network` opened, before which no block may be dated.
 pub fn opens_at(network: NetworkId) -> u64 {
     block(network).map_or(0, |block| block.header.timestamp)
+}
+
+/// A moment the way this repository writes one for a person:
+/// `6 October 2026 at 18:00:00 UTC`.
+///
+/// Here rather than in each program that says when a network opens, so that
+/// the `remint` example, which writes these dates into the comments beside a
+/// first block, and the node and the wallet, which tell a person waiting for
+/// an opening when it is, say the same moment the same way.
+pub fn when(timestamp: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let days = timestamp / 86_400;
+    let seconds = timestamp % 86_400;
+    // Days since 1970 to a civil date, after Howard Hinnant's
+    // `civil_from_days`, for dates after the epoch. Nothing here comes near
+    // overflowing for any timestamp, and saturating says so without a panic.
+    let shifted = days.saturating_add(719_468);
+    let era = shifted / 146_097;
+    let day_of_era = shifted % 146_097;
+    let year_of_era = day_of_era
+        .saturating_sub(day_of_era / 1_460)
+        .saturating_add(day_of_era / 36_524)
+        .saturating_sub(day_of_era / 146_096)
+        / 365;
+    let day_of_year = day_of_era.saturating_sub(
+        year_of_era
+            .saturating_mul(365)
+            .saturating_add(year_of_era / 4)
+            .saturating_sub(year_of_era / 100),
+    );
+    let month_index = day_of_year.saturating_mul(5).saturating_add(2) / 153;
+    let day = day_of_year
+        .saturating_sub(month_index.saturating_mul(153).saturating_add(2) / 5)
+        .saturating_add(1);
+    let month = if month_index < 10 {
+        month_index.saturating_add(3)
+    } else {
+        month_index.saturating_sub(9)
+    };
+    let year = year_of_era
+        .saturating_add(era.saturating_mul(400))
+        .saturating_add(u64::from(month <= 2));
+    let name = usize::try_from(month.saturating_sub(1))
+        .ok()
+        .and_then(|index| MONTHS.get(index))
+        .copied()
+        .unwrap_or_default();
+    format!(
+        "{day} {name} {year} at {:02}:{:02}:{:02} UTC",
+        seconds / 3_600,
+        seconds % 3_600 / 60,
+        seconds % 60
+    )
 }
 
 #[cfg(test)]
@@ -192,6 +259,38 @@ mod tests {
             None,
             "mainnet has not been made"
         );
+    }
+
+    /// The dates `remint` writes beside a first block and the node says to a
+    /// person waiting for an opening, at the edges of a month, a year, a leap
+    /// day and a century.
+    #[test]
+    fn a_moment_is_written_as_a_date_in_utc() {
+        for (timestamp, said) in [
+            (0, "1 January 1970 at 00:00:00 UTC"),
+            (1_791_309_600, "6 October 2026 at 18:00:00 UTC"),
+            (951_782_399, "28 February 2000 at 23:59:59 UTC"),
+            (951_782_400, "29 February 2000 at 00:00:00 UTC"),
+            (951_868_800, "1 March 2000 at 00:00:00 UTC"),
+            (1_709_208_000, "29 February 2024 at 12:00:00 UTC"),
+            (4_107_542_399, "28 February 2100 at 23:59:59 UTC"),
+            (4_107_542_400, "1 March 2100 at 00:00:00 UTC"),
+            (1_767_225_599, "31 December 2025 at 23:59:59 UTC"),
+            (1_767_225_600, "1 January 2026 at 00:00:00 UTC"),
+            (1_769_904_000, "1 February 2026 at 00:00:00 UTC"),
+            (1_785_542_400, "1 August 2026 at 00:00:00 UTC"),
+            (1_798_675_200, "31 December 2026 at 00:00:00 UTC"),
+            (1_782_864_000, "1 July 2026 at 00:00:00 UTC"),
+            (1_780_272_000, "1 June 2026 at 00:00:00 UTC"),
+            (1_777_593_600, "1 May 2026 at 00:00:00 UTC"),
+            (1_775_001_600, "1 April 2026 at 00:00:00 UTC"),
+            (1_772_323_200, "1 March 2026 at 00:00:00 UTC"),
+            (1_788_220_800, "1 September 2026 at 00:00:00 UTC"),
+            (1_793_491_200, "1 November 2026 at 00:00:00 UTC"),
+            (1_796_083_200, "1 December 2026 at 00:00:00 UTC"),
+        ] {
+            assert_eq!(when(timestamp), said, "{timestamp}");
+        }
     }
 
     #[test]

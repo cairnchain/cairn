@@ -733,9 +733,9 @@
     },
     "disk": { "empty": "no block at all", "holds": "blocks up to {height}" },
     "clockBehind": {
-      "certain": "The clock of the computer behind this page is about {gap} behind the network's: it refused the first block of its own network as dated in the future. It cannot follow the chain until its clock is right, so nothing here is current. Whoever runs this site has to set the time on that machine.",
       "likely": "The clock of the computer behind this page looks about {gap} behind the network's: it refused {blocks} blocks from {peers} peers as dated in the future. A node on a slow clock refuses every honest block, so the height here may have stopped. Whoever runs this site should check the time on that machine."
     },
+    "opening": "This network opens on {at}, {when}. The computer behind this page runs the program that opens it, and is waiting for that moment: until then there is no chain, so there is nothing here to show yet. If that moment has already passed, it is the clock of that computer that is behind, and whoever runs this site should check the time on it.",
     "unread": "The disk under the node behind this page will not give back block {height}. Nothing has been deleted, but this site cannot show that block, and everything it says about who owns what stops at it until the disk reads it again. If it goes on, that disk is failing.",
     "unjudged": "The program behind this page looks too old for the chain it is on: it has met {blocks} blocks built under rules it does not have, from {peers} peers, the newest written for version {version} where it knows version {known}. Anyone can write a version number into a block, so this is a reason to look rather than a verdict. If the height here has also stopped moving, whoever runs this site has to install a newer version.",
     "unweighable": "Nobody the node behind this page has asked could show it which chain carries the most work: {showings} showings from {peers} peers would not weigh. It is reading the chain block by block instead, which takes hours, and until it is done this page shows a chain shorter than the real one.",

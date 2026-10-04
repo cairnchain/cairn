@@ -530,8 +530,11 @@ impl ConsensusParams {
     /// A network that pins nothing, which is what tests run, may date its first
     /// block after its opening; its schedule still starts at the opening, so
     /// that chain begins behind it and its second block is asked for a little
-    /// less than its first. Every published network dates its first block at
-    /// its opening, which `tests/network_rules.rs` holds.
+    /// less than its first. Every published network opens when its first
+    /// block is dated, which `tests/network_rules.rs` holds, and the `remint`
+    /// example dates that block at the opening announced for the network,
+    /// ahead of the release that carries it, so that the chain starts on its
+    /// schedule rather than behind it by however long the release took.
     pub const fn origin(&self) -> Origin {
         Origin {
             timestamp: self.opens_at,

@@ -243,6 +243,26 @@ jobs:
           echo "release=false" >> "$GITHUB_OUTPUT"
           echo "v$version is released and the programs have changed since, so a version is written once the checks pass"
 
+      # A release carries the first blocks it pins to everyone who downloads
+      # it, and a test network's first block is minted twice: a provisional
+      # one while the restart is written, and the one dated at the announced
+      # opening, minted with `remint` before the release (deploy/README.md,
+      # "Opening a network"). A release on the provisional block hands out a
+      # network that will never open: whoever runs it mines alone under the
+      # network's name, and then meets a directory the real build refuses.
+      # `remint` lists the lines that still say provisional for a person to
+      # settle, in these two files, and nothing is released until they are.
+      # Here, in the job every release passes through, so no path skips it.
+      - name: Refuse a first block still marked provisional
+        if: steps.look.outputs.release == 'true'
+        shell: bash
+        run: |
+          if grep -n -i provisional crates/cairn-ledger/src/genesis.rs README.md; then
+            echo "a first block is still marked provisional (above), so nothing is released:" >&2
+            echo "mint it for the announced opening with remint and settle those lines" >&2
+            exit 1
+          fi
+
   # The checks, before anything is built for people to download.
   #
   # Nothing enforced this. check.yml and this file both start from the same

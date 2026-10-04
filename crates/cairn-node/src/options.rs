@@ -15,6 +15,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use cairn_crypto::PublicKey;
+use cairn_ledger::genesis;
 use cairn_ledger::note::{Address, NetworkId};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::{seeds, KEEP_BLOCK_BYTES};
@@ -618,7 +619,10 @@ pub(crate) fn describe(options: &Options) -> String {
     );
     if let Some(genesis) = options.params.genesis {
         let _ = writeln!(text, "starts from  {genesis}");
-        let _ = writeln!(text, "opened at    {}", options.params.opens_at);
+        // The date beside the number: a network is installed ahead of its
+        // opening, and this is where an operator reads when that is.
+        let opens = options.params.opens_at;
+        let _ = writeln!(text, "opens at     {opens}, {}", genesis::when(opens));
     }
     let _ = writeln!(text, "data         {}", options.data.display());
     let _ = writeln!(text, "listen       {}", options.listen);
@@ -1043,6 +1047,16 @@ mod tests {
             summary.contains("runs until it is stopped"),
             "and a node with no deadline says so, rather than leaving a reader to \
              notice a missing line: {summary}"
+        );
+        // A network is installed ahead of its opening, and the settings say
+        // when that is as a date, not only as a count of seconds.
+        let opens = quiet.params.opens_at;
+        assert!(
+            summary.contains(&format!(
+                "opens at     {opens}, {}",
+                cairn_ledger::genesis::when(opens)
+            )),
+            "the settings do not say when the network opens: {summary}"
         );
     }
 
