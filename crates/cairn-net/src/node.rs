@@ -1258,10 +1258,14 @@ pub struct Unweighable {
 /// node does either.
 ///
 /// Evidence and not a verdict, for the same reason as [`Unjudged`]: a
-/// timestamp is a number a stranger writes in a field. The exception is
-/// [`Self::own_first_block`], which is the network's first block as compiled
-/// into this binary, refused by this machine. Nobody else wrote that one, so
-/// one of those settles it on its own.
+/// timestamp is a number a stranger writes in a field.
+///
+/// This node's own first block, dated past what its clock allows, is not
+/// counted here. It used to be, as the one refusal nobody else could have
+/// written, when every network shipped with its first block already in the
+/// past. A network is now released ahead of the opening its first block is
+/// dated at, so that refusal is a node waiting for the opening far more often
+/// than a slow clock, and [`Node::opening`] says so instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Behind {
     /// Seconds the furthest refused block stood ahead of this clock. What the
@@ -1273,9 +1277,19 @@ pub struct Behind {
     pub blocks: u64,
     /// Connections they arrived on.
     pub peers: usize,
-    /// Set when what was refused was this build's own first block, which no
-    /// peer sent and nobody but this machine can have got wrong.
-    pub own_first_block: bool,
+}
+
+/// A network that has not opened yet by this machine's clock, and when it
+/// does: see [`Node::opening`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Opening {
+    /// The moment the network's first block is dated, which is its opening.
+    pub at: u64,
+    /// Seconds from this machine's clock to that moment.
+    pub in_seconds: u64,
+    /// How long before it this node takes the first block: the drift the
+    /// rules allow any block ahead of the reader's clock.
+    pub drift: u64,
 }
 
 type PeerId = u64;
@@ -2865,9 +2879,6 @@ struct OutOfStep {
     peers: HashSet<Sender>,
     /// When the last of them arrived.
     last: u64,
-    /// Set when this node refused the first block of its own network, which is
-    /// compiled into this binary and which no peer sent it.
-    own_first_block: bool,
 }
 
 /// Counts one block refused for standing ahead of this machine's clock.
@@ -2879,11 +2890,7 @@ fn count_out_of_step(met: &mut OutOfStep, from: Option<Sender>, ahead: u64, now:
     // An empty count is not asked first: starting it again changes nothing.
     let lapsed = now < met.last || now.saturating_sub(met.last) > BEHIND_MEMORY;
     if lapsed {
-        let own_first_block = met.own_first_block;
-        *met = OutOfStep {
-            own_first_block,
-            ..OutOfStep::default()
-        };
+        *met = OutOfStep::default();
     }
     met.ahead = met.ahead.max(ahead);
     met.blocks = met.blocks.saturating_add(1);
@@ -2897,29 +2904,11 @@ fn count_out_of_step(met: &mut OutOfStep, from: Option<Sender>, ahead: u64, now:
 
 /// Whether what this node has refused adds up to a clock that is behind.
 ///
-/// Two ways to meet it, and they are not the same evidence. A run of blocks
-/// from several peers is the ordinary one, and it is circumstantial in the way
+/// A run of blocks from several peers, and circumstantial in the way
 /// [`too_old_for_the_chain`] is: a timestamp is a number, and whoever holds
 /// two addresses can write two of them.
-///
-/// Refusing this build's own first block is not circumstantial at all. That
-/// block is in the binary, its date is older than every chain on the network,
-/// and the only way to be past it is for this machine's clock to be behind the
-/// day the network opened. One is enough, and it is worth saying on its own
-/// because the node cannot start at all: it has no chain, so every peer's tip
-/// fails the same check and there is nothing to show for it but a height that
-/// never appears.
-///
-/// That half is spent the moment the node has a chain, which is what
-/// `still_without_a_chain` carries. The first block is laid down once, at
-/// start, and a clock put right while the node runs lets it take the chain
-/// from a peer instead; left ungated the line would follow such a node for the
-/// rest of its life, telling its owner to fix something already fixed.
-fn clock_is_behind(met: &OutOfStep, drift: u64, still_without_a_chain: bool) -> Option<Behind> {
-    let own_first_block = met.own_first_block && still_without_a_chain;
-    let enough =
-        own_first_block || (met.blocks >= BEHIND_BLOCKS && met.peers.len() >= BEHIND_PEERS);
-    if !enough {
+fn clock_is_behind(met: &OutOfStep, drift: u64) -> Option<Behind> {
+    if met.blocks < BEHIND_BLOCKS || met.peers.len() < BEHIND_PEERS {
         return None;
     }
     Some(Behind {
@@ -2927,7 +2916,27 @@ fn clock_is_behind(met: &OutOfStep, drift: u64, still_without_a_chain: bool) -> 
         drift,
         blocks: met.blocks,
         peers: met.peers.len(),
-        own_first_block,
+    })
+}
+
+/// When this node's network opens, while that is still too far ahead of
+/// `now` for its first block to be taken.
+///
+/// Only for a network that pins its first block, and only while this node has
+/// no chain: the block is laid down from the binary, and until the clock is
+/// within the drift of the moment it is dated, the rules refuse it like any
+/// block from the future. A network is released and installed ahead of that
+/// moment, so this is a node waiting for its network to open, or a machine
+/// whose clock is behind one that already has, and nothing on the node can
+/// tell the two apart: what it can say is when the opening is.
+fn not_yet_open(params: &ConsensusParams, holds_a_chain: bool, now: u64) -> Option<Opening> {
+    let drift = params.max_timestamp_drift;
+    let waiting =
+        params.genesis.is_some() && !holds_a_chain && params.opens_at > now.saturating_add(drift);
+    waiting.then(|| Opening {
+        at: params.opens_at,
+        in_seconds: params.opens_at.saturating_sub(now),
+        drift,
     })
 }
 
@@ -3714,19 +3723,25 @@ impl Shared {
         count_out_of_step(&mut met, from, ahead, now);
     }
 
-    /// Writes down that this node refused the first block of its own network.
+    /// Lays down the network's first block, for a node that started before
+    /// its network opened, once this machine's clock lets the rules take it.
     ///
-    /// Nobody sent it: it is in the binary. The only way to be past its date
-    /// is for this machine's clock to be behind the day the network opened,
-    /// and the node then has no chain, fails every peer's tip the same way,
-    /// and cannot start. It used to do all of that without a word.
-    fn own_first_block_refused(&self, ahead: u64, now: u64) {
-        let mut met = self
-            .out_of_step
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        met.own_first_block = true;
-        count_out_of_step(&mut met, None, ahead, now);
+    /// `open_the_chain` runs at start, and only there. A node started ahead
+    /// of the opening its first block is dated at found that block too far
+    /// ahead of its clock, kept no chain, and stayed that way until somebody
+    /// restarted it after the opening. Upkeep asks again every round while
+    /// the chain is empty, so a node installed ahead of an announced opening
+    /// opens the chain by itself, the moment the rules let it, and writes the
+    /// block down as it would any block it applied.
+    fn open_when_due(&self, now: u64) {
+        let mut chain = self.chain();
+        if !chain.is_empty() {
+            return;
+        }
+        open_the_chain(&mut chain, None, self.params, now);
+        if !chain.is_empty() {
+            self.persist(&Accepted::Extended, &mut chain);
+        }
     }
 
     /// Counts one showing of a chain's work that would not weigh, and who sent
@@ -4374,7 +4389,7 @@ impl Shared {
 /// `ChainStore::holds_nothing_of_its_own`), and one that is has it taken back
 /// off its disk by [`Shared::forget_the_first_block`]. Every door into the
 /// handover used to ask whether the chain was empty, which after this it
-/// never is on a named network.
+/// never is on a named network that has opened.
 ///
 /// It goes into the log as well as into memory. The log is the followed branch
 /// in order of height with nothing left out, and a first block held only in
@@ -4383,44 +4398,36 @@ impl Shared {
 /// block it had and start over. A node mining a real network lost its chain
 /// every time it was restarted, and every test here ran on a network with no
 /// first block to pin, so nothing said so.
-/// Says how far ahead of `now` the first block stood, when that is why it was
-/// refused.
 ///
-/// The refusal used to be dropped whole. It is the one that costs a node its
-/// whole start: with no chain it fails every peer's tip the same way, so it
-/// keeps no peer, reaches no height, and prints the line a node waiting for
-/// its first peer prints. Nothing anywhere said the word clock.
+/// The block is refused while it is dated further ahead of `now` than the
+/// drift lets any block stand, which is every moment before its network
+/// opens: a network is released and installed ahead of the opening its first
+/// block is dated at. That refusal leaves the chain empty, upkeep asks again
+/// ([`Shared::open_when_due`]), and [`Node::opening`] says when it will be
+/// taken. Every other way of refusing the block in this binary is a defect in
+/// the binary, and nothing here would mend it.
 fn open_the_chain(
     chain: &mut ChainStore,
     log: Option<&mut BlockLog>,
     params: ConsensusParams,
     now: u64,
-) -> Option<u64> {
+) {
     // Only for a network that pins its first block. An unnamed one, which is
     // what tests use, starts from whatever it is given.
     if params.genesis.is_none() || !chain.is_empty() {
-        return None;
+        return;
     }
-    let block = genesis::block(params.network)?;
-    if let Err(error) = chain.add_block(block.clone(), now) {
-        // Every other way of refusing the block in this binary is a defect in
-        // the binary and no clock would mend it. This one is a machine dated
-        // before the day the network opened, which the person running it can
-        // fix in a minute once somebody says so.
-        return match error {
-            ChainError::InvalidBlock {
-                source: BlockError::TimestampTooFarAhead { timestamp, .. },
-                ..
-            } => Some(timestamp.saturating_sub(now)),
-            _ => None,
-        };
+    let Some(block) = genesis::block(params.network) else {
+        return;
+    };
+    if chain.add_block(block.clone(), now).is_err() {
+        return;
     }
     if let Some(log) = log {
         if log.is_empty() {
             let _ = log.append(&block);
         }
     }
-    None
 }
 
 /// A number this node calls itself by, for one run.
@@ -4766,10 +4773,9 @@ impl Node {
         // block turns the first record replayed into a duplicate, which is not
         // an extension, which ends the replay and sets aside everything this
         // node had.
-        // Nothing to record it on yet: this runs before the node exists. The
-        // same refusal is met again inside `Node::start`, which has somewhere
-        // to write it down.
-        let _ = open_the_chain(&mut chain, Some(&mut log), params, now);
+        // A network that has not opened yet by this clock refuses it, and
+        // upkeep asks again once the node exists.
+        open_the_chain(&mut chain, Some(&mut log), params, now);
 
         // Headers are kept whatever happens to the blocks. A node updated from
         // a version that had no header log has an empty one and a chain, so it
@@ -4943,15 +4949,13 @@ impl Node {
             // is what `Node::bind` does and what tests use.
             let mut chain = shared.chain();
             let now = unix_now();
-            let (has_log, ahead) = {
+            let has_log = {
                 let mut log = shared.log.lock().unwrap_or_else(PoisonError::into_inner);
                 let blocks = log.as_mut().map(|store| &mut store.blocks);
                 let present = blocks.is_some();
-                (present, open_the_chain(&mut chain, blocks, params, now))
+                open_the_chain(&mut chain, blocks, params, now);
+                present
             };
-            if let Some(ahead) = ahead {
-                shared.own_first_block_refused(ahead, now);
-            }
             // A chain with a log behind it may let go of the bodies it has
             // written; one without has nowhere to read them back from, so it
             // keeps every one it might still need.
@@ -5493,9 +5497,7 @@ impl Node {
 
     /// Whether the blocks this node is refusing say its own clock is behind.
     ///
-    /// `None` until a run of them has arrived from more than one peer, or
-    /// until this node has refused the first block of its own network, which
-    /// is in the binary and settles it on its own.
+    /// `None` until a run of them has arrived from more than one peer.
     ///
     /// Not a verdict and never acted on: a timestamp is a number a stranger
     /// writes in a field, and a node that stopped on one would be handing a
@@ -5503,19 +5505,28 @@ impl Node {
     /// machine's clock, and it is the only place in this node that mentions
     /// one.
     pub fn clock_behind(&self) -> Option<Behind> {
-        // The chain first and let go of before the count is taken, which is
-        // the order everything here takes them in.
-        let still_without_a_chain = self.shared.chain().is_empty();
         let met = self
             .shared
             .out_of_step
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        clock_is_behind(
-            &met,
-            self.shared.params.max_timestamp_drift,
-            still_without_a_chain,
-        )
+        clock_is_behind(&met, self.shared.params.max_timestamp_drift)
+    }
+
+    /// When this node's network opens, while this machine's clock is still
+    /// too far before that moment for the network's first block to be taken.
+    ///
+    /// A network is released and installed ahead of the opening its first
+    /// block is dated at, and a node started then has no chain and nothing to
+    /// follow: no peer can have a block the rules take either. It is not a
+    /// fault, and upkeep lays the first block down by itself when the clock is
+    /// within the drift of the opening. What a person needs is the time, and
+    /// the one thing worth checking is that it is not already past: a machine
+    /// whose clock is behind a network that has opened reads exactly the
+    /// same from here.
+    pub fn opening(&self) -> Option<Opening> {
+        let holds_a_chain = !self.shared.chain().is_empty();
+        not_yet_open(&self.shared.params, holds_a_chain, unix_now())
     }
 
     /// What this node is still missing before it can show a newcomer the
@@ -8242,6 +8253,7 @@ fn maintenance_loop(shared: &Arc<Shared>) {
             shared.book().forgive_all();
         }
         last_round = now;
+        shared.open_when_due(now);
         // Asking again matters: a peer that joined after this node introduced
         // itself is only ever learned about by asking a second time.
         shared.broadcast(None, &Message::GetPeers);
@@ -10541,13 +10553,13 @@ mod disk_and_headers {
         let (mut log, _) = BlockLog::open(&directory).unwrap();
 
         let mut chain = ChainStore::new(params);
-        assert!(open_the_chain(&mut chain, None, params, opened + 60).is_none());
+        open_the_chain(&mut chain, None, params, opened + 60);
         assert!(
             !chain.is_empty(),
             "the fixture has to hold the first block, or the question below is empty"
         );
 
-        assert!(open_the_chain(&mut chain, Some(&mut log), params, opened + 60).is_none());
+        open_the_chain(&mut chain, Some(&mut log), params, opened + 60);
         let written = log.len();
         drop(log);
         let _ = std::fs::remove_dir_all(&directory);
@@ -10556,6 +10568,95 @@ mod disk_and_headers {
             "a chain that already held its first block had it written again into a log \
              that did not"
         );
+    }
+
+    /// A node with no chain on a network that pins its first block lays it
+    /// down in upkeep once the clock allows, written down like any block it
+    /// applied.
+    ///
+    /// AUDIT, repaired (testnet-8, 01-F1). The first block was laid down at
+    /// start and nowhere else, so a node started before its network opened
+    /// kept no chain until somebody restarted it after the opening.
+    #[test]
+    fn upkeep_lays_down_the_first_block_once_the_opening_comes() {
+        let params = ConsensusParams::for_network("devnet").expect("devnet exists");
+        let opened = genesis::opens_at(params.network);
+        let drift = params.max_timestamp_drift;
+        let directory = scratch("opens-in-upkeep");
+        let (node, _) = Node::open(params, loopback(), &directory).unwrap();
+        node.shutdown();
+        // As a node started before the opening is: nothing laid down.
+        *node.shared.chain() = ChainStore::new(params);
+        if let Some(store) = node.shared.log.lock().unwrap().as_mut() {
+            store.blocks.clear().unwrap();
+            store.headers.clear().unwrap();
+        }
+
+        node.shared.open_when_due(opened - drift - 1);
+        let early = node.shared.chain().is_empty();
+        node.shared.open_when_due(opened - drift);
+        let held = node.shared.chain().height();
+        let written = node
+            .shared
+            .log
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|store| (store.blocks.len(), store.headers.reaches()));
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(early, "the first block was taken before the drift allows");
+        assert_eq!(held, Some(0), "upkeep never laid the first block down");
+        assert_eq!(
+            written,
+            Some((1, 1)),
+            "the first block upkeep laid down was not written to the disk"
+        );
+    }
+
+    /// A node whose network opens after this machine's clock says when, and
+    /// how far off that is by its clock.
+    #[test]
+    fn a_node_whose_network_opens_later_says_when() {
+        let devnet = ConsensusParams::for_network("devnet").expect("devnet exists");
+        let later = unix_now() + 86_400;
+        let params = ConsensusParams {
+            opens_at: later,
+            ..devnet
+        };
+        let node = Node::bind(params, loopback()).unwrap();
+        let said = node.opening();
+        let height = node.height();
+        node.shutdown();
+        assert_eq!(height, None, "a network that has not opened has no chain");
+        let said = said.expect("a node waiting for its network to open says nothing of it");
+        assert_eq!(said.at, later);
+        assert_eq!(said.drift, params.max_timestamp_drift);
+        assert!(
+            (86_000..=86_400).contains(&said.in_seconds),
+            "the wait is by this machine's clock: {}",
+            said.in_seconds
+        );
+    }
+
+    /// A running node with no chain is given its first block by the round of
+    /// upkeep, without a restart, and says no opening is awaited once open.
+    #[test]
+    fn a_running_node_with_no_chain_is_given_its_first_block_by_upkeep() {
+        // The devnet's first block is dated behind the wall clock on purpose,
+        // so the rules take it whatever day this runs.
+        let params = ConsensusParams::for_network("devnet").expect("devnet exists");
+        let node = Node::bind(params, loopback()).unwrap();
+        assert_eq!(
+            node.opening(),
+            None,
+            "an open network has no opening to wait for"
+        );
+        *node.shared.chain() = ChainStore::new(params);
+        wait_until("upkeep to lay the first block down", || {
+            node.height() == Some(0)
+        });
+        node.shutdown();
     }
 
     /// What a node was writing or reading when its disk refused is said in
@@ -12439,24 +12540,6 @@ mod peers_and_loops {
             UNREACHABLE_SENDERS,
             "the table grew past its ceiling"
         );
-    }
-
-    /// Refusing this build's own first block is written down, and said while
-    /// the node has no chain.
-    ///
-    /// Nothing called the note: a node that refused its own network's first
-    /// block and wrote nothing passed, which is the one clock this node can be
-    /// sure is wrong, and nobody told.
-    #[test]
-    fn refusing_its_own_first_block_is_written_down() {
-        let node = quiet();
-        assert_eq!(node.clock_behind(), None);
-        node.shared.own_first_block_refused(4_000, 1_000);
-        let said = node
-            .clock_behind()
-            .expect("refusing its own first block said nothing");
-        assert!(said.own_first_block, "and it was not said for what it was");
-        assert_eq!(said.seconds, 4_000);
     }
 
     /// A node says it can show a newcomer the chain only when its log holds
@@ -15077,9 +15160,9 @@ mod clock_tests {
     use cairn_ledger::validation::ConsensusParams;
 
     use super::{
-        clock_is_behind, count_out_of_step, is_peer_fault, open_the_chain, window_is_over,
-        ChainStore, OutOfStep, WireError, BEHIND_BLOCKS, BEHIND_MEMORY, BEHIND_PEERS,
-        BEHIND_SENDERS, FLOOD_WINDOW,
+        clock_is_behind, count_out_of_step, is_peer_fault, not_yet_open, open_the_chain,
+        window_is_over, ChainStore, Opening, OutOfStep, WireError, BEHIND_BLOCKS, BEHIND_MEMORY,
+        BEHIND_PEERS, BEHIND_SENDERS, FLOOD_WINDOW,
     };
     use crate::wire::MAX_FRAME_BYTES;
 
@@ -15163,73 +15246,76 @@ mod clock_tests {
     #[test]
     fn both_conditions_are_needed_before_a_clock_is_blamed() {
         let enough = met(BEHIND_BLOCKS, BEHIND_PEERS as u64);
-        let said = clock_is_behind(&enough, DRIFT, false).expect("both met");
+        let said = clock_is_behind(&enough, DRIFT).expect("both met");
         assert_eq!(said.blocks, BEHIND_BLOCKS);
         assert_eq!(said.peers, BEHIND_PEERS);
         assert_eq!(said.seconds, 900, "and it names the gap it actually saw");
         assert_eq!(said.drift, DRIFT);
-        assert!(!said.own_first_block);
 
         assert!(
-            clock_is_behind(&met(BEHIND_BLOCKS - 1, BEHIND_PEERS as u64), DRIFT, false).is_none(),
+            clock_is_behind(&met(BEHIND_BLOCKS - 1, BEHIND_PEERS as u64), DRIFT).is_none(),
             "a handful is a miner with a fast clock"
         );
         assert!(
-            clock_is_behind(&met(BEHIND_BLOCKS, 1), DRIFT, false).is_none(),
+            clock_is_behind(&met(BEHIND_BLOCKS, 1), DRIFT).is_none(),
             "and one address is one machine, which is what a stranger has"
         );
     }
 
-    /// **The one clock refusal that is nobody else's word.**
+    /// **A node started before its network opens waits for the opening, and
+    /// says when it is, rather than calling its clock slow.**
     ///
-    /// The first block of the network is compiled into this binary. No peer
-    /// sends it and nobody but this machine can be wrong about it, so one is
-    /// enough where a run from several peers is otherwise needed.
+    /// AUDIT, repaired (testnet-8, 01-F1). A network is released ahead of the
+    /// opening its first block is dated at, so every node installed for it
+    /// starts with that block too far ahead of its clock. It read that
+    /// refusal as proof the machine's clock was behind.
     #[test]
-    fn refusing_this_builds_own_first_block_says_it_on_its_own() {
-        let mut record = OutOfStep {
-            own_first_block: true,
-            ..OutOfStep::default()
-        };
-        count_out_of_step(&mut record, None, 4_000, 1_000);
-        let said = clock_is_behind(&record, DRIFT, true).expect("its own first block settles it");
-        assert!(said.own_first_block);
-        assert_eq!(said.peers, 0, "nobody sent it");
-
-        assert!(
-            clock_is_behind(&record, DRIFT, false).is_none(),
-            "and it is spent once the node has a chain: the first block is laid \
-             down once at start, so a clock put right while the node runs lets \
-             it take the chain from a peer, and a line that stayed would be \
-             telling its owner to fix something already fixed"
-        );
-    }
-
-    /// **A machine dated before the day the network opened cannot start, and
-    /// used to do it in silence.**
-    ///
-    /// AUDIT, repaired. `open_the_chain` read the refusal out of an
-    /// `is_err()` and returned. The node then had no chain, so every peer's
-    /// tip failed the same check, it kept nobody and showed no height, and
-    /// what an operator had to work from was a node that looked like one
-    /// waiting for its first peer.
-    #[test]
-    fn a_clock_behind_the_first_block_is_named_rather_than_dropped() {
+    fn a_first_block_dated_ahead_of_the_clock_is_an_opening_to_wait_for() {
         let params = ConsensusParams::for_network("testnet-8").expect("testnet-8 exists");
         let opened = genesis::opens_at(params.network);
-        assert!(opened > 0, "testnet-8 pins a first block");
+        let drift = params.max_timestamp_drift;
+        assert!(opened > drift, "testnet-8 pins a first block");
 
+        let early = opened - drift - 1;
         let mut chain = ChainStore::new(params);
-        let ahead = open_the_chain(&mut chain, None, params, opened - DRIFT - 60)
-            .expect("a machine this far behind refuses its own first block");
-        assert_eq!(ahead, DRIFT + 60, "and how far behind it is, is the answer");
-        assert!(chain.is_empty(), "the block is still not taken");
+        open_the_chain(&mut chain, None, params, early);
+        assert!(
+            chain.is_empty(),
+            "the block is not taken before the drift allows"
+        );
+        assert_eq!(
+            not_yet_open(&params, false, early),
+            Some(Opening {
+                at: opened,
+                in_seconds: drift + 1,
+                drift,
+            })
+        );
+        assert_eq!(
+            not_yet_open(&params, true, early),
+            None,
+            "a node that holds a chain is not waiting for anything"
+        );
 
-        // And a machine whose clock is right lays the block down and says
-        // nothing, which is every ordinary start.
-        let mut chain = ChainStore::new(params);
-        assert!(open_the_chain(&mut chain, None, params, opened + 60).is_none());
-        assert!(!chain.is_empty());
+        // The rules take it once the clock is within the drift of the
+        // opening, and from then the network is open to this node.
+        let due = opened - drift;
+        assert_eq!(not_yet_open(&params, false, due), None);
+        open_the_chain(&mut chain, None, params, due);
+        assert!(
+            !chain.is_empty(),
+            "the block is taken at the opening less the drift"
+        );
+
+        let unpinned = ConsensusParams {
+            opens_at: u64::MAX,
+            ..ConsensusParams::testnet()
+        };
+        assert_eq!(
+            not_yet_open(&unpinned, false, 0),
+            None,
+            "a network with no first block to lay down has no opening to wait for"
+        );
     }
 
     /// A network with no first block pinned, which is what the tests
@@ -15240,24 +15326,19 @@ mod clock_tests {
         let params = ConsensusParams::testnet();
         assert!(params.genesis.is_none());
         let mut chain = ChainStore::new(params);
-        assert!(open_the_chain(&mut chain, None, params, 0).is_none());
+        open_the_chain(&mut chain, None, params, 0);
         assert!(chain.is_empty());
     }
 
     /// A silence longer than the memory ends the count of blocks from the
-    /// future, and does not end what the first block of this network said.
+    /// future.
     ///
     /// The same rule as the count of unreadable blocks, written the same way,
     /// and held by nothing either: a count that never lapsed passed, as did
-    /// one that lapsed a second early or at every second block in one second,
-    /// and one that forgot this node had refused its own network's first
-    /// block, which no peer sent it and no silence unsays.
+    /// one that lapsed a second early or at every second block in one second.
     #[test]
-    fn a_silence_ends_the_count_and_not_what_the_first_block_said() {
-        let mut record = OutOfStep {
-            own_first_block: true,
-            ..OutOfStep::default()
-        };
+    fn a_silence_ends_the_count() {
+        let mut record = OutOfStep::default();
         count_out_of_step(&mut record, Some(address(1)), 900, 1_000);
         count_out_of_step(&mut record, Some(address(2)), 900, 1_000);
         assert_eq!(
@@ -15281,10 +15362,6 @@ mod clock_tests {
             (record.blocks, record.peers.len()),
             (1, 1),
             "a silence past the memory starts the count again"
-        );
-        assert!(
-            record.own_first_block,
-            "and leaves standing that this node refused its own first block"
         );
 
         count_out_of_step(&mut record, Some(address(5)), 900, 500);

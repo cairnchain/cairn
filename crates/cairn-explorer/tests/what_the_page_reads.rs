@@ -64,6 +64,7 @@ fn node_states() -> Vec<String> {
     for body in [
         rust_fn("node_object"),
         rust_fn("clock_field"),
+        rust_fn("opening_field"),
         rust_fn("unweighable_field"),
         rust_fn("filling_field"),
         rust_fn("unanswered_field"),
