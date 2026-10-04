@@ -131,8 +131,8 @@ paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
-| `testnet-8` | `0000000777f0...` | 1791117741 | 60 s |
-| `devnet` | `000001a9e0d6...` | 1791108741 | 5 s |
+| `testnet-8` | `0000000270eb...` | 1791120306 | 60 s |
+| `devnet` | `000000e13c0c...` | 1791111306 | 5 s |
 | `mainnet` | not made yet | | |
 
 There is an explorer, which is a node that also serves a website: the chain in

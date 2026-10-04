@@ -103,7 +103,7 @@ fn run() -> Result<(), String> {
             when(block.header.timestamp)
         );
         if let Some(old) = &old {
-            traces.extend(traces_of(old, &block));
+            traces.extend(traces_of(network, old, &block));
         }
         constants.push((
             constant_of(network),
@@ -244,26 +244,31 @@ fn mint(mut params: ConsensusParams, timestamp: u64, message: &str) -> Result<Bl
     Ok(block)
 }
 
-/// Each way the repository writes something about `old`, beside how it
-/// writes the same thing about `new`.
-fn traces_of(old: &Block, new: &Block) -> Vec<Trace> {
+/// Each way the repository writes something about `old`, the first block of
+/// `network`, beside how it writes the same thing about `new`.
+fn traces_of(network: &str, old: &Block, new: &Block) -> Vec<Trace> {
     let (old_id, new_id) = (old.id().to_string(), new.id().to_string());
     let (old_time, new_time) = (old.header.timestamp, new.header.timestamp);
+    let what = |thing: &str| format!("{network}'s {thing}");
     vec![
-        Trace::word("an identifier", &old_id, &new_id),
+        Trace::word(what("identifier"), &old_id, &new_id),
         Trace {
-            what: "a shortened identifier",
+            what: what("identifier shortened"),
             old: format!("{}...", &old_id[..12]),
             new: format!("{}...", &new_id[..12]),
             ends_a_word: false,
         },
-        Trace::word("a timestamp", &old_time.to_string(), &new_time.to_string()),
         Trace::word(
-            "a timestamp in Rust",
+            what("timestamp"),
+            &old_time.to_string(),
+            &new_time.to_string(),
+        ),
+        Trace::word(
+            what("timestamp in Rust"),
             &underscored(old_time),
             &underscored(new_time),
         ),
-        Trace::word("a date", &when(old_time), &when(new_time)),
+        Trace::word(what("date"), &when(old_time), &when(new_time)),
     ]
 }
 
@@ -271,14 +276,14 @@ fn traces_of(old: &Block, new: &Block) -> Vec<Trace> {
 /// so that a timestamp is not found inside a longer number or a run of
 /// hexadecimal.
 struct Trace {
-    what: &'static str,
+    what: String,
     old: String,
     new: String,
     ends_a_word: bool,
 }
 
 impl Trace {
-    fn word(what: &'static str, old: &str, new: &str) -> Self {
+    fn word(what: String, old: &str, new: &str) -> Self {
         Self {
             what,
             old: old.to_owned(),
