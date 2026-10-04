@@ -284,14 +284,14 @@ fn the_burst_of_two_october_raises_the_next_block_two_and_a_half_times_not_seven
         difficulty: 581_235_837,
     };
     assert_eq!(
-        (first_honest_asked as f64 / before.difficulty as f64).round(),
-        768.0
+        (first_honest_asked + before.difficulty / 2) / before.difficulty,
+        768
     );
     assert!(back_near_normal.difficulty < 2 * before.difficulty);
     let burst_ended = before.timestamp + INTRUDER[79];
     assert_eq!(
-        ((back_near_normal.timestamp - burst_ended) as f64 / 3_600.0).round(),
-        33.0
+        (back_near_normal.timestamp - burst_ended + 1_800) / 3_600,
+        33
     );
     let origin = Origin {
         timestamp: before.timestamp - TARGET * before.height,
@@ -734,18 +734,18 @@ fn the_bound_adds_a_third_of_the_first_wait_to_a_large_departure() {
 #[test]
 fn a_departure_from_thousands_of_times_ends_in_a_run_at_the_floor() {
     for (times, least, most) in [
-        (2_048u64, 0, 100),
-        (4_096, 500, 1_500),
-        (8_192, 6_000, 9_000),
+        (2_048u64, 0.0, 100.0),
+        (4_096, 500.0, 1_500.0),
+        (8_192, 6_000.0, 9_000.0),
     ] {
         let mut runs: Vec<f64> = (0..16)
             .map(|seed| departure(times, Some(seed)).at_the_floor as f64)
             .collect();
         runs.sort_by(f64::total_cmp);
-        let run = (runs[7] + runs[8]) / 2.0;
+        let run = f64::midpoint(runs[7], runs[8]);
         println!("{times} times: a median of {run:.0} honest blocks at the floor");
         assert!(
-            (least as f64..most as f64).contains(&run),
+            (least..most).contains(&run),
             "{times} times left {run:.0} blocks at the floor, outside {least} to {most}"
         );
     }
