@@ -70,7 +70,7 @@ fn run() -> Result<(), String> {
         .canonicalize()
         .map_err(|error| format!("cannot find the repository: {error}"))?;
     let messages = messages_given()?;
-    let now = SystemTime::now()
+    let minted_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "the clock reads before 1970".to_owned())?
         .as_secs();
@@ -95,7 +95,7 @@ fn run() -> Result<(), String> {
                     format!("{network} has no first block to take a message from: name one")
                 })?,
         };
-        let block = mint(params, now - early, &message)?;
+        let block = mint(params, minted_at - early, &message)?;
         println!(
             "{network:<10} {}  dated {} ({}), {message:?}",
             block.id(),
@@ -117,18 +117,18 @@ fn run() -> Result<(), String> {
         let Ok(text) = std::fs::read_to_string(root.join(&path)) else {
             continue;
         };
-        let (mut new, mut counts) = replaced(&text, &traces);
+        let (mut rewrite, mut counts) = replaced(&text, &traces);
         if path == Path::new(GENESIS) {
             for (constant, hex) in &constants {
-                new = with_constant(&new, constant, hex)?;
+                rewrite = with_constant(&rewrite, constant, hex)?;
                 counts.push(format!("the bytes of {constant}"));
             }
         }
-        if new != text {
-            std::fs::write(root.join(&path), &new)
+        if rewrite != text {
+            std::fs::write(root.join(&path), &rewrite)
                 .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
             println!("rewrote {}: {}", path.display(), counts.join(", "));
-            rewritten.push((path, new));
+            rewritten.push((path, rewrite));
         }
     }
     if rewritten.is_empty() {
@@ -205,7 +205,7 @@ fn mint(mut params: ConsensusParams, timestamp: u64, message: &str) -> Result<Bl
     let stride = u64::try_from(cores).unwrap_or(1);
     let workers: Vec<_> = (0..stride)
         .map(|start| {
-            let mut header = block.header.clone();
+            let mut header = block.header;
             let found = Arc::clone(&found);
             let nonce = Arc::clone(&nonce);
             std::thread::spawn(move || {
