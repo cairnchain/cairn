@@ -1,20 +1,28 @@
 //! Mints the first blocks of the current test network and of the devnet
 //! again, and writes them into every place the repository pins them.
 //!
-//! Run with `cargo run --release -p cairn-ledger --example remint`, from
-//! anywhere in the repository, on the code that is about to ship. To change
-//! what a block says, name the network and the new message after `--`:
-//! `cargo run --release -p cairn-ledger --example remint -- testnet "..."`.
-//! Otherwise each block keeps the message it carries.
+//! Run with `cargo run --release -p cairn-ledger --example remint -- --opens-at
+//! 2026-10-06T18:00:00Z`, from anywhere in the repository, on the code that is
+//! about to ship. The opening is a time in UTC, written with its `Z`, and it
+//! has to be ahead of this machine's clock. To change what a block says, name
+//! the network and the new message after it: `... --opens-at
+//! 2026-10-06T18:00:00Z testnet "..."`. Otherwise each block keeps the message
+//! it carries.
 //!
-//! A published network's first block is minted at its opening, because the
+//! A published network's first block is dated at its opening, because the
 //! retarget's schedule starts at that block's timestamp: every target time a
-//! network opens after its first block is dated is a block asked less than
-//! the network's real rate, down to the floor. So the blocks a restart is
-//! written against are provisional, and this is what replaces them on the
-//! day. The test network's block is dated the moment this runs, and the
-//! devnet's [`DEVNET_DATED_EARLY`] before it, as early as
-//! `cairn-net/tests/pinned_network.rs` needs and no earlier.
+//! network opens after its first block is dated is a block asked less than the
+//! network's real rate, down to the floor. And no node can run a network
+//! before a build carrying its first block has been merged, released and
+//! installed, so a block dated the moment it is minted opens that network late
+//! by all of that. So the test network's block is dated at an opening
+//! announced ahead, and minted before it: the release carries it, every server
+//! is installed with it, and a node started early waits for the opening and
+//! opens the chain by itself (`deploy/README.md` has the steps). The devnet's
+//! is dated [`DEVNET_DATED_EARLY`] before the moment this runs rather than
+//! before the opening: `cairn-net/tests/pinned_network.rs` mines forward from
+//! it behind the wall clock, and the release's checks run that test before the
+//! opening.
 //!
 //! Then it reads every file git tracks and replaces each trace of an old block
 //! with the new one's: the bytes of the constant in `genesis.rs`, the
@@ -23,7 +31,8 @@
 //! underscores Rust writes it with, and as the date and time a comment gives.
 //! It says which files it rewrote and what it replaced in each, and which of
 //! their lines still call a block provisional, since those are sentences for a
-//! person to settle.
+//! person to settle. A release refuses to go out while `genesis.rs` or the
+//! README still says provisional (`.github/workflows/release.yml`).
 
 #![allow(
     clippy::expect_used,
@@ -39,7 +48,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use cairn_ledger::block::Block;
-use cairn_ledger::genesis::DEVNET_DATED_EARLY;
+use cairn_ledger::genesis::{when, DEVNET_DATED_EARLY};
 use cairn_ledger::pow::meets_target;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer, MAX_COINBASE_EXTRA};
 use cairn_ledger::validation::{assemble_block, ConsensusParams};
@@ -47,8 +56,31 @@ use cairn_ledger::LedgerState;
 use cairn_primitives::codec::Encode;
 
 /// The networks this mints again, by the name `for_network` answers to, and
-/// how long before the moment this runs each first block is dated.
-const NETWORKS: [(&str, u64); 2] = [("testnet", 0), ("devnet", DEVNET_DATED_EARLY)];
+/// when each first block is dated.
+const NETWORKS: [(&str, Dated); 2] = [
+    ("testnet", Dated::AtTheOpening),
+    ("devnet", Dated::Before(DEVNET_DATED_EARLY)),
+];
+
+/// When a first block is dated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dated {
+    /// At the opening announced on the command line.
+    AtTheOpening,
+    /// This many seconds before the moment this runs.
+    Before(u64),
+}
+
+impl Dated {
+    /// The timestamp for a block minted at `now` for a network announced to
+    /// open at `opening`.
+    const fn at(self, opening: u64, now: u64) -> u64 {
+        match self {
+            Self::AtTheOpening => opening,
+            Self::Before(early) => now.saturating_sub(early),
+        }
+    }
+}
 
 /// Where the constants holding the first blocks live, from the repository's
 /// root.
@@ -69,15 +101,21 @@ fn run() -> Result<(), String> {
         .join("../..")
         .canonicalize()
         .map_err(|error| format!("cannot find the repository: {error}"))?;
-    let messages = messages_given()?;
     let minted_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "the clock reads before 1970".to_owned())?
         .as_secs();
+    let Asked { opening, messages } = asked(std::env::args().skip(1).collect(), minted_at)?;
+    println!(
+        "the test network opens on {}, {} from now",
+        when(opening),
+        span(opening - minted_at)
+    );
+    println!();
 
     let mut traces = Vec::new();
     let mut constants = Vec::new();
-    for (name, early) in NETWORKS {
+    for (name, dated) in NETWORKS {
         let params = ConsensusParams::for_network(name)
             .ok_or_else(|| format!("this build has no rules for `{name}`"))?;
         let network = params.network.name().ok_or("a network with no name")?;
@@ -95,7 +133,7 @@ fn run() -> Result<(), String> {
                     format!("{network} has no first block to take a message from: name one")
                 })?,
         };
-        let block = mint(params, minted_at - early, &message)?;
+        let block = mint(params, dated.at(opening, minted_at), &message)?;
         println!(
             "{network:<10} {}  dated {} ({}), {message:?}",
             block.id(),
@@ -158,17 +196,130 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// The messages named on the command line, as pairs of a network and what
-/// its first block should say.
-fn messages_given() -> Result<Vec<(String, String)>, String> {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if arguments.len() % 2 != 0 {
-        return Err("give a message as a network and the message, in pairs".to_owned());
+/// What the command line asks for: the opening, and the messages given as
+/// pairs of a network and what its first block should say.
+#[derive(Debug, PartialEq, Eq)]
+struct Asked {
+    opening: u64,
+    messages: Vec<(String, String)>,
+}
+
+/// Reads the command line, refusing an opening that is not ahead of `now`.
+fn asked(arguments: Vec<String>, now: u64) -> Result<Asked, String> {
+    const USAGE: &str = "name the opening, in UTC: `--opens-at 2026-10-06T18:00:00Z`, then any \
+                         messages as a network and the message, in pairs";
+    let mut opening = None;
+    let mut rest = Vec::new();
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--opens-at" {
+            let given = arguments.next().ok_or(USAGE)?;
+            if opening.replace(utc(&given)?).is_some() {
+                return Err("name the opening once".to_owned());
+            }
+        } else {
+            rest.push(argument);
+        }
     }
-    Ok(arguments
-        .chunks(2)
-        .map(|pair| (pair[0].clone(), pair[1].clone()))
-        .collect())
+    let opening = opening.ok_or(USAGE)?;
+    if opening <= now {
+        return Err(format!(
+            "the opening has to be ahead of this machine's clock, and {} was {} ago: the \
+             test network's first block is dated at it, and a network that opens after its \
+             first block is dated hands out a nearly free block for every minute of the gap",
+            when(opening),
+            span(now - opening)
+        ));
+    }
+    if rest.len() % 2 != 0 {
+        return Err(USAGE.to_owned());
+    }
+    Ok(Asked {
+        opening,
+        messages: rest
+            .chunks(2)
+            .map(|pair| (pair[0].clone(), pair[1].clone()))
+            .collect(),
+    })
+}
+
+/// A time written `2026-10-06T18:00:00Z` or `2026-10-06T18:00Z`, as seconds
+/// since 1970. Only UTC, and only with its `Z`, so that nobody announces an
+/// opening in the time of the machine they happen to be at.
+fn utc(text: &str) -> Result<u64, String> {
+    let refused = || format!("{text:?} is not a time in UTC like 2026-10-06T18:00:00Z");
+    let body = text.strip_suffix('Z').ok_or_else(refused)?;
+    let (date, time) = body.split_once('T').ok_or_else(refused)?;
+    let number = |part: &str, digits: usize| {
+        if part.len() == digits && part.bytes().all(|byte| byte.is_ascii_digit()) {
+            part.parse::<u64>().map_err(|_| refused())
+        } else {
+            Err(refused())
+        }
+    };
+    let date: Vec<&str> = date.split('-').collect();
+    let time: Vec<&str> = time.split(':').collect();
+    let (year, month, day) = match date[..] {
+        [year, month, day] => (number(year, 4)?, number(month, 2)?, number(day, 2)?),
+        _ => return Err(refused()),
+    };
+    let (hour, minute, second) = match time[..] {
+        [hour, minute] => (number(hour, 2)?, number(minute, 2)?, 0),
+        [hour, minute, second] => (number(hour, 2)?, number(minute, 2)?, number(second, 2)?),
+        _ => return Err(refused()),
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if year < 1970
+        || !(1..=12).contains(&month)
+        || !(1..=days_in_month).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return Err(refused());
+    }
+    // A civil date to days since 1970, after Howard Hinnant's
+    // `days_from_civil`, the reverse of what `when` does.
+    let year = year - u64::from(month <= 2);
+    let era = year / 400;
+    let year_of_era = year - era * 400;
+    let month_index = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Ok(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+/// A length of time the way a person says one: `1 day, 4 hours and 5
+/// minutes`, to the minute, or in seconds under one.
+fn span(seconds: u64) -> String {
+    let unit = |count: u64, name: &str| {
+        let plural = if count == 1 { "" } else { "s" };
+        format!("{count} {name}{plural}")
+    };
+    if seconds < 60 {
+        return unit(seconds, "second");
+    }
+    let parts: Vec<String> = [
+        (seconds / 86_400, "day"),
+        (seconds % 86_400 / 3_600, "hour"),
+        (seconds % 3_600 / 60, "minute"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, name)| unit(count, name))
+    .collect();
+    match parts.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => unit(0, "minute"),
+    }
 }
 
 /// Mines a first block for `params` dated `timestamp` and saying `message`,
@@ -384,46 +535,158 @@ fn underscored(value: u64) -> String {
     out
 }
 
-/// A timestamp the way a comment here gives one: `30 September 2026 at
-/// 20:40:58 UTC`.
-fn when(timestamp: u64) -> String {
-    const MONTHS: [&str; 12] = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ];
-    let days = timestamp / 86_400;
-    let seconds = timestamp % 86_400;
-    // Days since 1970 to a civil date, after Howard Hinnant's
-    // `civil_from_days`, for dates after the epoch.
-    let shifted = days + 719_468;
-    let era = shifted / 146_097;
-    let day_of_era = shifted % 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + u64::from(month <= 2);
-    format!(
-        "{day} {} {year} at {:02}:{:02}:{:02} UTC",
-        MONTHS[usize::try_from(month - 1).unwrap_or(0)],
-        seconds / 3_600,
-        seconds % 3_600 / 60,
-        seconds % 60
-    )
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use cairn_ledger::validation::{connect_block, expected_difficulty, BlockError};
+
+    fn words(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn an_opening_is_read_in_utc_and_written_back_the_same() {
+        for (text, seconds) in [
+            ("2026-10-06T18:00:00Z", 1_791_309_600),
+            ("2026-10-06T18:00Z", 1_791_309_600),
+            ("2000-02-29T00:00:00Z", 951_782_400),
+            ("1970-01-01T00:00:00Z", 0),
+            ("2100-03-01T23:59:59Z", 4_107_628_799),
+        ] {
+            assert_eq!(utc(text), Ok(seconds), "{text}");
+        }
+        assert_eq!(when(1_791_309_600), "6 October 2026 at 18:00:00 UTC");
+    }
+
+    #[test]
+    fn a_time_that_is_not_plainly_utc_is_refused() {
+        for text in [
+            "2026-10-06T18:00:00",
+            "2026-10-06T18:00:00+02:00",
+            "2026-10-06 18:00:00Z",
+            "2026-10-6T18:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-00-01T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2100-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-10-00T00:00:00Z",
+            "2026-10-06T24:00:00Z",
+            "2026-10-06T18:60:00Z",
+            "2026-10-06T18:00:60Z",
+            "1969-12-31T23:59:59Z",
+            "2026-10-06T18Z",
+            "2026-10-06T18:00:00:00Z",
+            "+026-10-06T18:00:00Z",
+            "1791309600",
+        ] {
+            assert!(utc(text).is_err(), "{text} was read as a time");
+        }
+        assert_eq!(utc("2024-02-29T12:00:00Z"), Ok(1_709_208_000));
+    }
+
+    #[test]
+    fn the_opening_is_asked_for_and_has_to_be_ahead_of_the_clock() {
+        let opening = 1_791_309_600;
+        let given = asked(
+            words("--opens-at 2026-10-06T18:00:00Z testnet hello"),
+            opening - 1,
+        )
+        .unwrap();
+        assert_eq!(given.opening, opening);
+        assert_eq!(
+            given.messages,
+            vec![("testnet".to_owned(), "hello".to_owned())]
+        );
+        assert!(
+            asked(words("testnet hello"), 0).is_err(),
+            "no opening named"
+        );
+        assert!(
+            asked(words("--opens-at"), 0).is_err(),
+            "an opening with no time"
+        );
+        assert!(
+            asked(words("--opens-at 2026-10-06T18:00Z testnet"), 0).is_err(),
+            "a message with no network"
+        );
+        assert!(
+            asked(
+                words("--opens-at 2026-10-06T18:00Z --opens-at 2026-10-07T18:00Z"),
+                0
+            )
+            .is_err(),
+            "two openings"
+        );
+        let refused = asked(words("--opens-at 2026-10-06T18:00:00Z"), opening).unwrap_err();
+        assert!(
+            refused.contains("ahead of this machine's clock") && refused.contains("0 seconds ago"),
+            "an opening at the moment this runs is not ahead of it: {refused}"
+        );
+        let refused = asked(words("--opens-at 2026-10-06T18:00:00Z"), opening + 3_660).unwrap_err();
+        assert!(
+            refused.contains("1 hour and 1 minute ago"),
+            "a past opening says how long ago it was: {refused}"
+        );
+    }
+
+    #[test]
+    fn a_length_of_time_is_said_to_the_minute() {
+        assert_eq!(span(0), "0 seconds");
+        assert_eq!(span(1), "1 second");
+        assert_eq!(span(59), "59 seconds");
+        assert_eq!(span(60), "1 minute");
+        assert_eq!(span(3_600), "1 hour");
+        assert_eq!(span(3_660), "1 hour and 1 minute");
+        assert_eq!(
+            span(86_400 + 7_200 + 300 + 7),
+            "1 day, 2 hours and 5 minutes"
+        );
+        assert_eq!(span(2 * 86_400 + 60), "2 days and 1 minute");
+    }
+
+    /// The test network's block is dated at the opening, and the devnet's
+    /// [`DEVNET_DATED_EARLY`] before the moment this runs, which is behind
+    /// the wall clock whatever day the release's checks run on.
+    #[test]
+    fn the_test_network_is_dated_at_its_opening_and_the_devnet_behind_the_clock() {
+        let (now, opening) = (1_791_000_000, 1_791_309_600);
+        let dated: Vec<(&str, u64)> = NETWORKS
+            .iter()
+            .map(|(name, dated)| (*name, dated.at(opening, now)))
+            .collect();
+        assert_eq!(
+            dated,
+            vec![("testnet", opening), ("devnet", now - DEVNET_DATED_EARLY)]
+        );
+    }
+
+    /// A block minted for an opening carries it, and a node takes it once its
+    /// clock is within the drift of it and asks the block after it the
+    /// opening difficulty: the network opens on its schedule.
+    #[test]
+    fn a_block_minted_for_an_opening_is_dated_at_it_and_opens_on_schedule() {
+        let opening = 1_791_309_600;
+        let params = ConsensusParams {
+            genesis_difficulty: 1 << 6,
+            ..ConsensusParams::for_network("testnet").unwrap()
+        };
+        let block = mint(params, opening, "opens later").unwrap();
+        assert_eq!(block.header.timestamp, opening);
+        let rules = ConsensusParams {
+            genesis: Some(block.id()),
+            opens_at: block.header.timestamp,
+            ..params
+        };
+        let drift = rules.max_timestamp_drift;
+        let mut early = LedgerState::new();
+        assert!(matches!(
+            connect_block(&mut early, &block, &rules, opening - drift - 1),
+            Err(BlockError::TimestampTooFarAhead { .. })
+        ));
+        let mut state = LedgerState::new();
+        connect_block(&mut state, &block, &rules, opening - drift).unwrap();
+        assert_eq!(expected_difficulty(&state, &rules), 1 << 6);
+    }
 }

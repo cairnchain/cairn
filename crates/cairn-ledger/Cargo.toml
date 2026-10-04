@@ -23,3 +23,9 @@ cairn-crypto.workspace = true
 # rather than timing anything. Only the test build asks for it.
 cairn-primitives = { workspace = true, features = ["count-hashing"] }
 hex.workspace = true
+
+# Its own tests run with the workspace's: what it reads on the command line
+# and how it dates each block are what a network opens on.
+[[example]]
+name = "remint"
+test = true
