@@ -30,7 +30,8 @@ use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
-use cairn_ledger::pow::{meets_target, work_of, DIFFICULTY_WINDOW};
+use cairn_ledger::pow::{meets_target, work_of};
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start_with_count, draw, levels_of, seed_of, work_before, Sample, SampledStart,
     StartError, SHALLOWEST,
@@ -217,7 +218,7 @@ impl Forgery {
             .map(|sample: &Sample| sample.header.height)
             .max()
             .unwrap_or(0);
-        let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+        let from = usize::try_from(deepest.saturating_sub(BELOW_THE_PINNED)).unwrap();
         let mut tail = self.shown[from..last].to_vec();
         tail.push(tip);
 

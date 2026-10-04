@@ -15,7 +15,9 @@ use crate::emission;
 
 use crate::block::{Activation, Block, BlockHeader, BLOCK_VERSION};
 use crate::note::{Address, NetworkId, Note, NoteId};
-use crate::pow::{median_time_past, meets_target, next_difficulty, work_of, MIN_DIFFICULTY};
+use crate::pow::{
+    median_time_past, meets_target, next_difficulty, work_of, Origin, MIN_DIFFICULTY,
+};
 use crate::state::{cold_leaf, BlockUndo, ColdSpend, LedgerState, StateTransition};
 use crate::transaction::{
     CoinbaseTransaction, Input, Transfer, Witness, COINBASE_VERSION, MAX_COINBASE_EXTRA,
@@ -113,18 +115,16 @@ const DEFAULT_TARGET_BLOCK_TIME: u64 = 60;
 /// clock.
 ///
 /// Counted in blocks because what it is measured against is counted in
-/// blocks. The retarget clamps each gap to six targets, and the median it
-/// reads is eleven blocks wide, so an allowance written in seconds for every
-/// network was twenty clamp ceilings on testnet and two hundred and forty on
-/// devnet. At that width a minority dating its blocks at the allowance, or an
-/// honest miner whose clock is an hour or two fast, holds the median in the
-/// future; honest blocks dated at the median plus one then advance the
-/// retarget's timeline a second at a time, and the retarget reads a chain
-/// producing blocks in no time. Measured with a thirty percent share at two
-/// hours: testnet ran at 1.53 times its target with single blocks asked for
-/// 115 times the steady difficulty, devnet at fourteen times its target.
+/// blocks: the retarget's half life is sixty of them, so ten is a sixth of a
+/// half life on every network, and a timestamp the allowance lets run ahead
+/// lowers the next block's difficulty by `2^(-1/6)` and no more, which the
+/// next honest timestamp takes back. An allowance written in seconds for
+/// every network, two hours, was what a moving average once read as twenty
+/// of its clamp ceilings on testnet and two hundred and forty on devnet, and
+/// a minority dating its blocks at it held the median in the future and the
+/// chain ran at 1.53 times its target on testnet and fourteen on devnet.
 /// `tests/retarget_timewarp.rs` holds the chain within a tenth of its target
-/// at this width.
+/// at this width against a thirty percent share at the ceiling.
 ///
 /// Ten blocks is ten minutes on the public networks, which a clock kept by NTP
 /// meets with room, and it is a rule about the reader rather than about the
@@ -144,8 +144,8 @@ const fn drift_allowance(target_block_time: u64) -> u64 {
 /// Four thousand and ninety six hashes for a block, which is about a
 /// millisecond on one core here, so a couple of hundred blocks is a fixture a
 /// test can afford. What matters is that it is not the floor: the retarget can
-/// fall six times from here before it reaches [`MIN_DIFFICULTY`], and it can
-/// rise as far as a test is willing to pay for. A published network opens at
+/// fall by its bound six times from here before it reaches [`MIN_DIFFICULTY`],
+/// and it can rise as far as a test is willing to pay for. A published network opens at
 /// 2^23 or 2^27, where a test cannot afford a second block, and that is the
 /// whole reason this number exists rather than one of those.
 pub const MINEABLE_DIFFICULTY: u64 = 4_096;
@@ -501,6 +501,35 @@ impl ConsensusParams {
             // nothing as this one, so deleting it was a mutant nothing could
             // kill; `network_rules.rs` holds that it answers nothing.
             _ => None,
+        }
+    }
+
+    /// Where the retarget's schedule starts: the moment this network opened
+    /// and the difficulty its first block carries.
+    ///
+    /// Two fields every node already holds in its binary, never anything a
+    /// peer says. On every network that pins a first block they are that
+    /// block's timestamp and difficulty: [`Self::opens_at`] is read off the
+    /// pinned block itself, and the block carries [`Self::genesis_difficulty`]
+    /// because [`expected_difficulty`] demands it of every first block. So a
+    /// node that joined by handover, and has never held the first block or any
+    /// header near it, measures the schedule from the same place as one that
+    /// replayed from it, and so does a newcomer weighing a stranger's chain.
+    ///
+    /// The headers a node keeps could not have served: the first block leaves
+    /// that window ninety one blocks in, and a ledger handed over arrives with
+    /// the window at its own height. A field of its own beside these two would
+    /// have been a third number for the same block, free to disagree with it.
+    ///
+    /// A network that pins nothing, which is what tests run, may date its first
+    /// block after its opening; its schedule still starts at the opening, so
+    /// that chain begins behind it and its second block is asked for a little
+    /// less than its first. Every published network dates its first block at
+    /// its opening, which `tests/network_rules.rs` holds.
+    pub const fn origin(&self) -> Origin {
+        Origin {
+            timestamp: self.opens_at,
+            difficulty: self.genesis_difficulty,
         }
     }
 
@@ -1575,12 +1604,14 @@ pub fn evaluate_block_body(
 }
 
 /// The difficulty the next block must carry.
+///
+/// The first block carries the network's opening difficulty, and every block
+/// after it what the retarget asks of its parent against the schedule that
+/// started there. See [`next_difficulty`].
 pub fn expected_difficulty(state: &LedgerState, params: &ConsensusParams) -> u64 {
-    let recent = state.recent_headers();
-    if recent.is_empty() {
-        params.genesis_difficulty.max(MIN_DIFFICULTY)
-    } else {
-        next_difficulty(recent, params.target_block_time)
+    match state.recent_headers().last() {
+        None => params.genesis_difficulty.max(MIN_DIFFICULTY),
+        Some(parent) => next_difficulty(parent, params.origin(), params.target_block_time),
     }
 }
 

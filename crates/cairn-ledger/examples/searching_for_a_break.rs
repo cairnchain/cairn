@@ -69,7 +69,7 @@
     clippy::too_many_lines
 )]
 
-use cairn_ledger::pow::DIFFICULTY_WINDOW;
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{draw, levels_for, MOST_TAIL, SAMPLES, SHALLOWEST};
 use cairn_primitives::hash::{hash, Domain};
 use cairn_primitives::Hash32;
@@ -256,7 +256,7 @@ fn the_threshold(boards: &[Board]) {
 /// buys, and once over every count a prover could state instead.
 ///
 /// Only depths the draw is responsible for are swept. A fork shallower than the
-/// band the draw leaves unresolved, plus the retarget window under it, is caught
+/// band the draw leaves unresolved, plus the ninety headers under it, is caught
 /// by the run up to the tip, and counting that as the draw's doing is the
 /// mistake this whole file stands downstream of.
 fn the_depth_guarantee(boards: &[Board], total: u128) {
@@ -508,12 +508,12 @@ impl Board {
     /// Whether a chain stating this many halvings can be weighed at all.
     ///
     /// The run up to the tip carries every block of the band the draw leaves
-    /// unresolved, plus a retarget window. Past `MOST_TAIL` headers a reader
+    /// unresolved, plus the ninety headers below it. Past `MOST_TAIL` headers a reader
     /// refuses the weighing before it looks at a single draw, so a forger that
     /// states too few halvings has refused its own forgery.
     fn weighable(&self) -> bool {
         let band = self.total >> self.levels.min(127);
-        let blocks = band / PER_BLOCK + u128::from(DIFFICULTY_WINDOW as u64) + 1;
+        let blocks = band / PER_BLOCK + u128::from(BELOW_THE_PINNED) + 1;
         blocks <= u128::from(MOST_TAIL)
     }
 
@@ -534,12 +534,12 @@ impl Board {
     /// The shallowest depth a gap may reach before the run up to the tip is
     /// what refuses it rather than the draw.
     ///
-    /// The draw resolves no finer than the top band, and the run starts a full
-    /// retarget window below the deepest thing the draw pinned. A gap shallower
+    /// The draw resolves no finer than the top band, and the run starts ninety
+    /// headers below the deepest thing the draw pinned. A gap shallower
     /// than that is caught, but not by the draw, and counting it here is the
     /// mistake this whole file exists downstream of.
     fn out_of_the_runs_reach(&self) -> u128 {
-        (self.total >> self.levels.min(127)) + u128::from(DIFFICULTY_WINDOW as u64 + 1) * PER_BLOCK
+        (self.total >> self.levels.min(127)) + u128::from(BELOW_THE_PINNED + 1) * PER_BLOCK
     }
 }
 

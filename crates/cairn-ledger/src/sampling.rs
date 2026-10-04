@@ -35,8 +35,8 @@ use cairn_primitives::Hash32;
 use crate::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
 use crate::note::NetworkId;
 use crate::pow::{
-    median_time_past, meets_target, next_difficulty, work_of, DIFFICULTY_WINDOW,
-    MAX_RETARGET_FACTOR, MIN_DIFFICULTY,
+    median_time_past, meets_target, next_difficulty, work_of, MAX_RETARGET_FACTOR,
+    MEDIAN_TIME_WINDOW, MIN_DIFFICULTY, RECENT_HEADERS,
 };
 use crate::state::header_leaf;
 use crate::validation::ConsensusParams;
@@ -176,9 +176,10 @@ use crate::validation::ConsensusParams;
 ///
 /// Ten hours at a block a minute, and the depth is the part that is
 /// guaranteed. A branch sitting at the difficulty floor may state the same
-/// depth in under half that time, since the retarget stops asking for more
-/// once the gaps average about half the target, so any argument that wants a
-/// duration has to say which of the two chains it is timing.
+/// depth in an hour less, the half life of slack the floor's edge gives it,
+/// since every block after that has to state a target of time or the
+/// retarget asks for more, so any argument that wants a duration has to say
+/// which of the two chains it is timing.
 ///
 /// Past 50% nothing here helps, and nothing anywhere else does either: a
 /// forger at half the work has nothing left to invent and can mine the chain.
@@ -191,11 +192,12 @@ use crate::validation::ConsensusParams;
 /// What a tip costs has been stated wrong twice. This paragraph first said a
 /// tip costs the tip's own work, so that even 2^80 tips were out of the
 /// question on a chain of any real difficulty. The run up to the tip is held
-/// to the difficulty the retarget demands, and the retarget lets a run whose
-/// stated gaps sit at the clamp ceiling walk that demand down to
-/// [`MIN_DIFFICULTY`], where every nonce is a valid tip: from 2^40, 826
-/// blocks, 82 hours of stated time and about twenty one blocks' work, paid
-/// once. It then said a tip costs one hash and the [`SAMPLES`] hashes of its
+/// to the difficulty the retarget demands, and the retarget lets a run dated
+/// behind its schedule walk that demand down to [`MIN_DIFFICULTY`] by the
+/// bound's quarter a header, where every nonce is a valid tip: from 2^40, 20
+/// headers, 40 hours of stated time and a block and a third of work, paid
+/// once. Under the moving average the retarget used to be it was 826 headers
+/// and 82 hours. It then said a tip costs one hash and the [`SAMPLES`] hashes of its
 /// draw, 2^12, which was still too much: a forger stops at the first question
 /// that lands in its invented work, about forty hashes in at 40%.
 ///
@@ -203,13 +205,13 @@ use crate::validation::ConsensusParams;
 /// hardest header of its run, and that is what gives a seed a price: at least
 /// the band the draw leaves unresolved over 2^18, a thousandth of an average
 /// block on a chain that ran to schedule. Measured on a thirty year chain, the
-/// cheapest tip a forger can present costs 2^18 hashes at testnet-7's opening
-/// difficulty and 2^14 at the devnet's. [`MOST_FALL`] says why it is not the
+/// cheapest tip a forger can present costs 2^17.9 hashes at testnet-7's
+/// opening difficulty and 2^13.9 at the devnet's. [`MOST_FALL`] says why it is not the
 /// chain's difficulty, and what the tie costs an honest chain.
 ///
 /// So the figure is stated against a budget. At 40% the inequality above
 /// leaves 2^-161.9 a tip, which holds under 2^-128 against 2^33 tips and not
-/// against 2^34; 2^33 tips cost 2^51 hashes on testnet-7 and 2^47 on the
+/// against 2^34; 2^33 tips cost 2^50.9 hashes on testnet-7 and 2^46.9 on the
 /// devnet at those difficulties. The staircase the draw really is is worth
 /// more per question than the inequality, so that budget is a floor and not
 /// the budget; at the measured 42.96% there is none at all, since that is
@@ -303,8 +305,8 @@ pub struct Sample {
 pub struct SampledStart {
     /// The header everything else is measured against.
     pub tip: BlockHeader,
-    /// Every header from a full retarget window below the deepest thing the
-    /// draw pinned, up to the tip. Oldest first.
+    /// Every header from [`BELOW_THE_PINNED`] below the deepest thing the draw
+    /// pinned, up to the tip. Oldest first.
     ///
     /// The draw deliberately stops resolving [`SHALLOWEST`] blocks from the
     /// tip, and for a while nothing else looked up there either. That was
@@ -320,8 +322,8 @@ pub struct SampledStart {
     /// What was missing is that the top of a chain was tied to no difficulty
     /// anybody could check. The run below fixes that by starting at a header
     /// the draw actually landed on, and walking upward under the retarget:
-    /// each header carries the difficulty the window demands of it, dates
-    /// after that window's median, adds its own work to the total, and
+    /// each header carries the difficulty its parent demands of it, dates
+    /// after the median of the window below it, adds its own work to the total, and
     /// carries the version its height requires, and the tip at the end of it
     /// stands within [`MOST_FALL`] of its hardest header. The
     /// window below the pinned header comes along too, and is honest because
@@ -330,28 +332,27 @@ pub struct SampledStart {
     ///
     /// Held together with the tip's timestamp being near the reader's own
     /// clock, that makes the cheap run cost the one thing a forger cannot
-    /// manufacture. Blocks at the floor have to average about half the target
-    /// or the retarget demands more of them, so a thousand and twenty four of
-    /// them span at least 8 h 21 m, and a reader
+    /// manufacture. Blocks at the floor have to stand behind their schedule,
+    /// and every block dated closer than the target moves them toward it, so
+    /// past the half life of slack the floor's edge gives they average the
+    /// target or the retarget demands more of them: a thousand and twenty
+    /// four of them span at least 16 h 04 m, and a reader
     /// refuses a tip more than ten blocks ahead of its own
     /// clock. Ten blocks is [`ConsensusParams::max_timestamp_drift`], ten
     /// minutes on the public networks. This used to say a day, and then two
     /// hours, which was the rule until a minority dating its blocks two hours
     /// ahead was measured slowing the chain by half.
     ///
-    /// Half the target rather than the target, and the difference is a factor
-    /// of two on the waiting. At the floor the retarget answers
-    /// `floor(target / gap)` over an evenly spaced window, which is already
-    /// one at 31 seconds a block, so a thousand and twenty four evenly spaced
-    /// cheap blocks span 8 h 49 m and not the 17 h 04 m this used to claim.
-    /// Spaced unevenly they do about five percent better: the tightest branch
-    /// found spans 30 069 seconds, 8 h 21 m, and that is the figure an
-    /// argument is entitled to. The argument survives: the run still has to
-    /// state far more time than the drift lets a reader take in advance, so
-    /// the forger still sits through the difference in real time. The even
-    /// boundary is pinned at exactly 30 and 31 seconds in
-    /// `tests/retarget_timewarp.rs::the_floor_holds_from_thirty_one_seconds_and_not_from_thirty`,
-    /// and the uneven branch beside it.
+    /// Under the moving average the retarget used to be, the same blocks had
+    /// to average only half the target, because at the floor it answered
+    /// `floor(target / gap)`: a thousand and twenty four of them spanned 8 h
+    /// 21 m at the tightest. Under the schedule the tightest branch found
+    /// spends its hour of slack at once and runs a target a block after it,
+    /// 57 841 seconds, and evenly spaced it holds the floor at 57 seconds a
+    /// block and not 56. Both are pinned in `tests/retarget_timewarp.rs`. The
+    /// argument is the same and stronger: the run has to state far more time
+    /// than the drift lets a reader take in advance, so the forger sits
+    /// through the difference in real time.
     pub tail: Vec<BlockHeader>,
     /// The header the tip was built on, opened in the tip's own history.
     ///
@@ -502,16 +503,28 @@ pub enum StartError {
 /// cannot be weighed and has to be read, which is a real limit and is stated
 /// rather than hidden. A chain that has lost sixteen times its hash rate and
 /// not recovered is the shape that reaches it.
-pub const MOST_TAIL: u64 = 16 * SHALLOWEST + DIFFICULTY_WINDOW as u64;
+pub const MOST_TAIL: u64 = 16 * SHALLOWEST + BELOW_THE_PINNED;
+
+/// Headers the run up to the tip carries below the deepest one the draw
+/// pinned.
+///
+/// What a node keeps behind a header, [`RECENT_HEADERS`], less the header
+/// itself, so the first header above the pinned one is judged against the
+/// window a node judging it as a block would have held. The rules read less
+/// of it than that: the retarget reads the parent, which is the pinned header
+/// itself, and the median ten more. Ninety was the moving average's window and
+/// it stays while the window does, because the run's length is part of what
+/// a weighing says on the wire.
+pub const BELOW_THE_PINNED: u64 = RECENT_HEADERS as u64 - 1;
 
 /// How far below the hardest header of the run a tip may stand, counting
 /// from the pinned header up.
 ///
 /// The draw is seeded by the tip, so a forger that dislikes its questions
 /// buys another tip, and a tip costs its difficulty. The run is held to the
-/// retarget, and the retarget lets a run whose stated gaps sit at the clamp
-/// ceiling walk its demand down to [`MIN_DIFFICULTY`]: a few hundred blocks,
-/// paid once, after which every nonce is a tip and a fresh set of questions
+/// retarget, and the retarget lets a run dated behind its schedule walk its
+/// demand down to [`MIN_DIFFICULTY`] by a quarter a header: a handful of
+/// blocks, paid once, after which every nonce is a tip and a fresh set of questions
 /// costs what it takes to see one of them land in the forger's invented work,
 /// about forty hashes. The documents said a tip costs the chain's difficulty,
 /// and nothing here held a tip to anything.
@@ -524,7 +537,10 @@ pub const MOST_TAIL: u64 = 16 * SHALLOWEST + DIFFICULTY_WINDOW as u64;
 /// least 256 times its mean difficulty, so a fresh seed costs at least a
 /// thousandth of an average block. Measured on a thirty year chain in
 /// `tests/the_price_of_a_seed.rs`, the cheapest tip a forger can present is
-/// 2^18 hashes at testnet-7's opening difficulty and 2^14 at the devnet's.
+/// 2^17.9 hashes at testnet-7's opening difficulty and 2^13.9 at the devnet's,
+/// against 2^18.0 and 2^14.0 under the moving average the retarget used to be:
+/// the walk got faster and the price did not move, because it rests on this
+/// tie and on the ceiling on the run, not on the walk.
 /// That is not the chain's difficulty, and no tie of this kind makes it so: a
 /// run whose tip fell this far is what an honest chain looks like after a
 /// loss.
@@ -533,20 +549,31 @@ pub const MOST_TAIL: u64 = 16 * SHALLOWEST + DIFFICULTY_WINDOW as u64;
 /// where its difficulty is low. Held to the pinned header alone, it lays a
 /// cheap stretch where the deepest question lands, climbs out of it to carry
 /// the band, and walks back down to within the tie of the cheap header:
-/// measured the same way, that tip costs 2^10.2 hashes on testnet-7 and 2^7.4
+/// measured the same way, that tip costs 2^11.2 hashes on testnet-7 and 2^8.1
 /// on the devnet.
 ///
 /// What it costs an honest chain is a loss of hash rate it cannot be weighed
 /// across. The retarget follows a loss with noise of its own, and on chains
-/// with random block times the hardest header of the run stood up to twice as
-/// far above the tip as the loss alone puts it. So this is twice the sixteen
-/// [`MOST_TAIL`] is written for: no chain that lost sixteen times its hash
-/// rate was refused, sixty four of them on each network. One that lost twenty
-/// or more is refused on testnet-7 from about eight hours after the loss, for
-/// up to a day at twenty, about as long as the ceiling on the run refuses it
-/// anyway, and under six days at any loss beyond what the ceiling refuses. A
-/// newcomer reads such a chain rather than weighing it, where a peer keeps
-/// it. A rule about the reader, like the drift: it makes no block invalid.
+/// with random block times the hardest header of the run stood up to about
+/// 1.6 times as far above the tip as the loss alone puts it, against twice
+/// under the moving average this was set from. So this is twice the sixteen
+/// [`MOST_TAIL`] is written for, with room: no chain that lost sixteen times
+/// its hash rate was refused, sixty four of them on each network, and on
+/// testnet-7 none that lost twenty. One that lost twenty four or more is
+/// refused on testnet-7 from about eight hours after the loss, for up to 28
+/// hours at twenty four, about half as long as the ceiling on the run refuses
+/// it anyway, and under five and a half days at any loss beyond. A newcomer
+/// reads such a chain rather than weighing it, where a peer keeps it. A rule
+/// about the reader, like the drift: it makes no block invalid.
+///
+/// A burst of hash rate that lifts the difficulty past this and leaves does
+/// the same to an honest chain for a while, and it is dear to cause: thirty
+/// two times takes a branch five half lives ahead of its schedule, about two
+/// thousand seven hundred and fifty blocks of the honest work, where the
+/// moving average reached it in three blocks. Measured in the same file, a
+/// thirty year chain refuses newcomers for up to about 680 target times after
+/// such a burst and a young one of two thousand blocks for 720 to 2 000, a
+/// quarter or less of what the burst cost in honest time.
 pub const MOST_FALL: u64 = 32;
 
 /// The least work `blocks` blocks can carry, starting from a block of this
@@ -1143,17 +1170,19 @@ fn check_the_genesis(start: &SampledStart, params: &ConsensusParams) -> Result<(
     }
 }
 
-// `check_the_tail` keeps the retarget's window of summaries and reads the
-// median off it as well, so the median's window has to fit inside it.
-const _: () = assert!(crate::pow::MEDIAN_TIME_WINDOW <= DIFFICULTY_WINDOW + 1);
+// `check_the_tail` reads the median off the eleven headers below each one it
+// judges, and the first header above the pinned one has to have them in the
+// run, so the run below the pinned header has to hold the median's window.
+const _: () = assert!(MEDIAN_TIME_WINDOW as u64 <= BELOW_THE_PINNED);
 
 /// Walks the top of the chain, which the draw does not reach.
 ///
-/// Starts a full retarget window below the deepest header the draw landed on,
+/// Starts [`BELOW_THE_PINNED`] below the deepest header the draw landed on,
 /// so the window the first checked header is judged against is one a forger
 /// would have had to mine that header on top of. From there every header is
 /// held to the rules a node applies to any block it is handed: the difficulty
-/// the window demands, a timestamp past that window's median, its own work
+/// its parent demands against the network's schedule, a timestamp past the
+/// median of the window below it, its own work
 /// added to the total, and real work behind its own identifier. The version
 /// its height requires needs no window, so every header of the run is held to
 /// that, below the pinned header too.
@@ -1161,8 +1190,9 @@ const _: () = assert!(crate::pow::MEDIAN_TIME_WINDOW <= DIFFICULTY_WINDOW + 1);
 /// And once the whole run has been walked, the tip is held to it: no more
 /// than [`MOST_FALL`] times below the hardest header from the pinned one up.
 /// Each header can carry exactly what the retarget asks and the run still end
-/// on a tip at the floor, because the retarget asks less of long gaps, and a
-/// tip at the floor is a fresh set of questions for one hash.
+/// on a tip at the floor, because the retarget asks less of a run dated
+/// behind its schedule, and a tip at the floor is a fresh set of questions for
+/// one hash.
 ///
 /// Not the drift. A header of the run dated far past the reader's clock is
 /// refused by the block path when its block arrives, and taken once the clock
@@ -1191,8 +1221,7 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
         return Err(StartError::NothingOpened);
     };
 
-    let window = u64::try_from(DIFFICULTY_WINDOW).unwrap_or(u64::MAX);
-    let from = pinned.height.saturating_sub(window);
+    let from = pinned.height.saturating_sub(BELOW_THE_PINNED);
     let Some(span) = tip.height.checked_sub(from) else {
         return Err(StartError::TailWrongLength {
             given: u64::try_from(start.tail.len()).unwrap_or(u64::MAX),
@@ -1212,16 +1241,6 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
         return Err(StartError::TailWrongLength { given, wanted });
     }
 
-    // A window and one more, which is all this ever holds: it is trimmed to
-    // that at the end of every step. Reserving the run's own length instead
-    // sized a reader's allocation from a number the sender chose, for room
-    // nothing ever puts anything in.
-    //
-    // The retarget's window and not `RECENT_HEADERS`, which is what every rule
-    // needs, and the median below reads this too. The two are the same number
-    // while the median's window is the shorter, which the assertion above this
-    // function says.
-    let mut summaries: Vec<HeaderSummary> = Vec::with_capacity(DIFFICULTY_WINDOW.saturating_add(1));
     let mut previous: Option<&BlockHeader> = None;
     let mut carried_the_pinned = false;
     // The hardest header from the pinned one up, which the tip is held to.
@@ -1234,7 +1253,7 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
     // says the node is too old, and stops it.
     let judges_versions =
         params.version_at(tip.height) <= BLOCK_VERSION && tip.version <= BLOCK_VERSION;
-    for header in &start.tail {
+    for (index, header) in start.tail.iter().enumerate() {
         belongs_to_this_network(header, params)?;
         if !meets_target(&header.id(), header.difficulty) {
             return Err(StartError::TailWithoutWork { at: header.height });
@@ -1260,12 +1279,19 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
             if Some(header.height) != below.height.checked_add(1) || header.previous != below.id() {
                 return Err(StartError::TailNotConsecutive { at: header.height });
             }
-            // Below the pinned header nothing can be checked but the chain
-            // itself, since the window that would judge those difficulties is
-            // not here. Above it the rules apply in full, and that is where a
+            // Below the pinned header only the chain itself is checked. When
+            // the retarget read ninety gaps the window that would have judged
+            // those difficulties was not here; it reads the header below now,
+            // so they could be judged, and are not: they are here to seed the
+            // median of the first header above, and what a weighing refuses is
+            // left as it was until the window itself is revisited. Above the
+            // pinned header the rules apply in full, and that is where a
             // forger's cheap run would have to live.
             if below.height >= pinned.height {
-                let demanded = next_difficulty(&summaries, params.target_block_time);
+                // The parent alone, against the schedule from the network's
+                // first block, which the rules carry rather than the run.
+                let demanded =
+                    next_difficulty(&below.summary(), params.origin(), params.target_block_time);
                 if header.difficulty != demanded {
                     return Err(StartError::TailAtTheWrongDifficulty {
                         at: header.height,
@@ -1273,7 +1299,19 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
                         demanded,
                     });
                 }
-                if median_time_past(&summaries).is_some_and(|median| header.timestamp <= median) {
+                // The median of the eleven headers below this one, read off
+                // the run itself. It used to be read off a window the walk
+                // kept and trimmed at the moving average's ninety one, which
+                // no rule reads any more; any trim of eleven or more gives
+                // the same median, so the trim was a number nothing could
+                // tell apart from its neighbours.
+                let below_it = start
+                    .tail
+                    .get(index.saturating_sub(MEDIAN_TIME_WINDOW)..index)
+                    .unwrap_or_default();
+                let window: Vec<HeaderSummary> =
+                    below_it.iter().map(BlockHeader::summary).collect();
+                if median_time_past(&window).is_some_and(|median| header.timestamp <= median) {
                     return Err(StartError::TailOutOfTime { at: header.height });
                 }
                 if Some(header.total_work)
@@ -1290,14 +1328,6 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
             }
             carried_the_pinned = true;
             hardest = header.difficulty;
-        }
-        summaries.push(HeaderSummary {
-            height: header.height,
-            timestamp: header.timestamp,
-            difficulty: header.difficulty,
-        });
-        if summaries.len() > DIFFICULTY_WINDOW.saturating_add(1) {
-            summaries.remove(0);
         }
         previous = Some(header);
     }
@@ -1484,8 +1514,7 @@ pub fn open_start(
         .map(|sample: &Sample| sample.header.height)
         .max()
         .unwrap_or(tip.height);
-    let window = u64::try_from(DIFFICULTY_WINDOW).unwrap_or(u64::MAX);
-    let from = deepest.saturating_sub(window);
+    let from = deepest.saturating_sub(BELOW_THE_PINNED);
 
     // How long the run would be, worked out before a header is read for it.
     //
@@ -1772,12 +1801,11 @@ mod tests {
     #[test]
     fn a_run_built_in_memory_is_walked_at_its_ceiling_and_refused_one_past_it() {
         let params = ConsensusParams::testnet();
-        let window = u64::try_from(DIFFICULTY_WINDOW).unwrap();
         for (wanted, refused_for_its_length) in [(MOST_TAIL, false), (MOST_TAIL + 1, true)] {
             // The draw landed a full window up, so the run starts at height
             // zero and holds one header more than the tip is high.
             let mut pinned = bare_header();
-            pinned.height = window;
+            pinned.height = BELOW_THE_PINNED;
             let mut tip = bare_header();
             tip.height = wanted - 1;
             let start = SampledStart {
@@ -2229,12 +2257,20 @@ mod tests {
     /// stood in the way. Nothing asked.
     #[test]
     fn two_run_headers_at_the_last_height_there_is_are_not_consecutive() {
-        let params = ConsensusParams::testnet();
+        // On schedule at those heights, which a second a block and a header
+        // dated at its own height is, so that every header but the repeated
+        // one is what the retarget asks: a run that far up and dated a minute
+        // a block from 1 000 stands so far ahead of its schedule that every
+        // header is asked for four times the last.
+        let params = ConsensusParams {
+            target_block_time: 1,
+            ..ConsensusParams::testnet()
+        };
         let heights: Vec<u64> = (u64::MAX - 99..=u64::MAX)
             .chain(std::iter::once(u64::MAX))
             .collect();
         let works: Vec<u128> = (1..=101).collect();
-        let run = floor_run(&heights, &works, |_| {});
+        let run = floor_run(&heights, &works, |header| header.timestamp = header.height);
 
         assert_eq!(
             check_the_tail(&tail_only(run, 89), &params),

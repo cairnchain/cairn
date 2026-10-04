@@ -79,13 +79,20 @@ impl Branch {
         Self {
             params,
             state: LedgerState::new(),
-            clock: 1_000,
+            clock: 0,
         }
     }
 
     fn mine(&mut self, miner: &SecretKey, spacing: u64) -> Block {
         let height = self.state.next_height().unwrap();
-        self.clock += spacing;
+        // The first block is dated at the network's opening, where the
+        // retarget's schedule starts, so a chain on schedule after it is asked
+        // the opening difficulty.
+        self.clock = if height == 0 {
+            self.params.opens_at
+        } else {
+            self.clock + spacing
+        };
         let coinbase = CoinbaseTransaction::new(
             height,
             vec![Note::new(self.params.initial_reward, miner.public_key())],
@@ -353,12 +360,11 @@ fn a_switch_at_the_window_applying_more_than_it_undid_leaves_the_node_bounded() 
 
     let mut common = Branch::new(params);
     let shared = common.run(&miner, HELD_WINDOW + 8, TARGET);
-    // A full window moves the difficulty far more slowly than the twenty block
-    // chain above, because the retarget averages over ninety. So the two
-    // branches are pulled further apart to reach the same shape: ours comes
-    // four times too fast, and the rival is dated at six times the target,
-    // which is where `pow.rs` clamps a solve time and therefore the slowest a
-    // gap can be worth. Eight against sixteen is what that buys.
+    // The two branches are pulled apart to reach the same shape: ours comes
+    // four times too fast, so each of its blocks stands further ahead of the
+    // schedule and is asked a little more, and the rival is dated six targets
+    // apart, so each of its blocks is asked about a twentieth less than the
+    // last. Eight against sixteen is what that buys.
     let mut ours = common.fork();
     let ours_blocks = ours.run(&miner, 8, TARGET / 4);
     let mut theirs = common.fork();

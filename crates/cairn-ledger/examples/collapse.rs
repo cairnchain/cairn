@@ -23,7 +23,7 @@
 )]
 
 use cairn_ledger::block::HeaderSummary;
-use cairn_ledger::pow::{next_difficulty, DIFFICULTY_WINDOW};
+use cairn_ledger::pow::{next_difficulty, Origin, HALF_LIFE_IN_BLOCKS, RECENT_HEADERS};
 
 /// The block time every network in this repository targets.
 const TARGET: u64 = 60;
@@ -31,13 +31,13 @@ const TARGET: u64 = 60;
 /// Shares of the hash rate left after the collapse.
 const SHARES: [f64; 5] = [0.5, 0.2, 0.1, 0.05, 0.01];
 
-/// Blocks to run before the collapse, so the window is full and the chain is
-/// exactly on schedule.
-const SETTLED: usize = DIFFICULTY_WINDOW * 2;
+/// Blocks to run before the collapse, so the window a node keeps is full and
+/// the chain is exactly on schedule.
+const SETTLED: usize = RECENT_HEADERS * 2;
 
 fn main() {
     println!("Recovering from a fall in hash rate");
-    println!("target block time {TARGET} s, window {DIFFICULTY_WINDOW} blocks\n");
+    println!("target block time {TARGET} s, half life {HALF_LIFE_IN_BLOCKS} blocks\n");
 
     println!(
         "{:>8}  {:>12}  {:>10}  {:>12}  {:>12}",
@@ -90,6 +90,11 @@ fn recover(share: f64) -> Recovery {
     let mut timestamp = 1_000_000u64;
     let mut difficulty = start_difficulty as u64;
     let mut height = 0u64;
+    // The schedule starts at the first block, at the starting difficulty.
+    let origin = Origin {
+        timestamp,
+        difficulty,
+    };
 
     for _ in 0..SETTLED {
         headers.push(HeaderSummary {
@@ -100,7 +105,11 @@ fn recover(share: f64) -> Recovery {
         trim(&mut headers);
         height += 1;
         timestamp += TARGET;
-        difficulty = next_difficulty(&headers, TARGET);
+        difficulty = next_difficulty(
+            headers.last().unwrap_or(&origin_summary(origin)),
+            origin,
+            TARGET,
+        );
     }
 
     rate *= share;
@@ -128,7 +137,11 @@ fn recover(share: f64) -> Recovery {
         });
         height += 1;
         trim(&mut headers);
-        difficulty = next_difficulty(&headers, TARGET);
+        difficulty = next_difficulty(
+            headers.last().unwrap_or(&origin_summary(origin)),
+            origin,
+            TARGET,
+        );
 
         if to_half.is_nan() && solvetime <= TARGET as f64 * 2.0 {
             to_half = elapsed;
@@ -147,9 +160,18 @@ fn recover(share: f64) -> Recovery {
     }
 }
 
+/// The first block, as the retarget reads a parent.
+fn origin_summary(origin: Origin) -> HeaderSummary {
+    HeaderSummary {
+        height: 0,
+        timestamp: origin.timestamp,
+        difficulty: origin.difficulty,
+    }
+}
+
 /// Keeps only what a node keeps, so the simulation sees what a node sees.
 fn trim(headers: &mut Vec<HeaderSummary>) {
-    let keep = DIFFICULTY_WINDOW + 1;
+    let keep = RECENT_HEADERS;
     if headers.len() > keep {
         headers.drain(..headers.len() - keep);
     }

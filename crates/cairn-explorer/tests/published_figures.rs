@@ -1180,7 +1180,7 @@ fn the_papers_weighing_is_the_size_this_build_encodes() {
     // And the run up to the tip, which the paper prices on its own. It said
     // 200 kB, the figure from when the draw stopped a thousand and twenty four
     // blocks from the tip; the draw stops at `SHALLOWEST` now, and the run is
-    // the headers from a retarget window below the deepest pinned draw.
+    // the headers from a node's window below the deepest pinned draw.
     let run = start.tail.encode().len();
     println!(
         "the run up to the tip is {} headers, {run} bytes",
@@ -1505,8 +1505,9 @@ const A_YEAR: u64 = 365 * 24 * 60;
 /// blocks, and materialising one per point of the sweep below is minutes.
 ///
 /// The step is instant here and is not on a real chain: the retarget moves by
-/// at most a factor of four a block and lags by a window, so a fall of five
-/// hundred takes a handful of blocks to arrive. Against the tens of thousands
+/// at most a factor of four a block and halves for every half life the chain
+/// falls behind, so a fall of five hundred takes some hours and a few hundred
+/// blocks to arrive. Against the tens of thousands
 /// of blocks the answer is measured in, that is nothing, and it errs towards
 /// the chain being weighable rather than away from it.
 struct Fallen {
@@ -1546,10 +1547,11 @@ impl Fallen {
         }
     }
 
-    /// The run of headers `check_the_tail` demands of this chain: a full
-    /// retarget window below the deepest header the draw pinned, up to the tip.
+    /// The run of headers `check_the_tail` demands of this chain: from
+    /// `BELOW_THE_PINNED` below the deepest header the draw pinned, up to the
+    /// tip.
     fn run_wanted(&self, seed: u8) -> u64 {
-        let window = u64::try_from(cairn_ledger::pow::DIFFICULTY_WINDOW).unwrap();
+        let window = cairn_ledger::sampling::BELOW_THE_PINNED;
         let tip = self.blocks - 1;
         let difficulty = if tip < self.before {
             self.high

@@ -35,8 +35,9 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::handover::{accept, Handover};
 use cairn_ledger::note::Note;
+use cairn_ledger::pow::meets_target;
 use cairn_ledger::pow::RECENT_HEADERS;
-use cairn_ledger::pow::{meets_target, DIFFICULTY_WINDOW};
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start_with_count, covering, draw, levels_of, seed_of, work_before, Sample, SampledStart,
     StartError,
@@ -142,7 +143,7 @@ impl Keeper {
             .map(|sample: &Sample| sample.header.height)
             .max()
             .unwrap_or(0);
-        let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+        let from = usize::try_from(deepest.saturating_sub(BELOW_THE_PINNED)).unwrap();
         // The run has to end at the tip actually offered, not at the one this
         // chain has, or every row below reads as a broken run.
         let mut tail = self.headers[from..last].to_vec();

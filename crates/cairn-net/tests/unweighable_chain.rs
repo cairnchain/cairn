@@ -17,7 +17,7 @@
 //! loss until months or years after it, and every honest archivist alive then
 //! fails in exactly the same words. And a newcomer refuses a tip more than
 //! `cairn_ledger::sampling::MOST_FALL` times below the run it stands on, which
-//! a chain that lost more than about sixteen times its hash rate shows from
+//! a chain that lost more than about twenty times its hash rate shows from
 //! hours after the loss; that refusal holds in every other respect, so it is
 //! held against nobody.
 

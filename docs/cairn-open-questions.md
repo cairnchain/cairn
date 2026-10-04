@@ -5,12 +5,12 @@ stylesheet: cairn-design.css
 strap:
   Trois questions qu'une *revue extérieure* a posées, et la position prise
   sur chacune.
-byline: Questions ouvertes · v1.2
-byline: 31 août 2026, revu le 29 septembre 2026
+byline: Questions ouvertes · v1.3
+byline: 31 août 2026, revu le 3 octobre 2026
 byline: Complète le document de conception
 numerals: roman
 subsections: unnumbered
-footer: Cairn · questions ouvertes v1.2
+footer: Cairn · questions ouvertes v1.3
 footer: Statut : positions prises, à discuter
 footer: Rien de ce document n'est un conseil en investissement
 ---
@@ -344,3 +344,22 @@ savons :
 </ul>
 
 <p class="pull">La revue demandait que trois silences deviennent trois positions. Les voici : datées, chiffrées, et prises pour être contredites par écrit.</p>
+
+## La difficulté | Ce que la vague testnet-8 laisse ouvert
+
+<p class="lede">Ces deux questions ne viennent pas de la revue. Elles viennent du testnet : le 2 octobre 2026, un inconnu a miné quatre-vingts blocs en deux minutes et la moyenne mobile qui réglait la difficulté a presque arrêté le réseau pendant un jour et demi. La règle a changé ; deux variantes ont été écartées de ce changement, et sont écrites ici plutôt qu'oubliées.</p>
+
+La règle est désormais ASERT : ce qu'un bloc doit à la difficulté dépend de
+l'écart entre la chaîne et un calendrier fixé à son premier bloc, avec une
+demi-vie de soixante blocs, une heure sur les réseaux publics, et jamais plus
+d'un facteur quatre d'un bloc au suivant. Une rafale qui porte la difficulté à
+`X` fois celle des mineurs honnêtes laisse environ `X` temps-cible au prochain
+bloc honnête, et elle a coûté environ `X` fois le débit honnête pendant
+`tau / ln 2` : le dommage vaut `T ln 2 / tau` de ce que l'attaquant a payé, un
+quatre-vingt-septième, contre environ sept dixièmes pour la moyenne mobile.
+
+<ul class="open">
+  <li><b>Lire l'horodatage du bloc lui-même.</b> La règle lit l'horodatage du parent. Une variante lirait celui du bloc en cours : le premier bloc honnête après le départ d'un mineur verrait sa difficulté baisser à mesure que le temps passe, et attendrait au plus environ <code>tau * log2(1 + X T ln 2 / tau)</code> au lieu de <code>X</code> temps-cible. Mais la difficulté d'un en-tête cesserait d'être fixée par son parent seul : la pesée d'une chaîne inconnue, qui déduit le travail minimal d'une suite de blocs de la borne par bloc, raisonnerait sur une règle dont l'en-tête choisit lui-même une partie. Écartée de cette vague pour cette raison, et à rouvrir avec la pesée.</li>
+  <li><b>Réduire la fenêtre aux onze en-têtes de la médiane.</b> Un nœud garde quatre-vingt-onze en-têtes, la fenêtre de l'ancienne moyenne mobile ; la règle n'en lit plus qu'un, la médiane onze. Les garder coûte peu, mais le nombre est sur le fil : un transfert de registre en porte autant, et la suite qu'une pesée examine commence quatre-vingt-dix en-têtes sous le plus profond tirage. La réduire change les deux échanges. Du même coup, la suite récente d'un transfert et les en-têtes qu'une pesée reçoit sous le plus profond tirage pourraient voir leur difficulté jugée en-tête par en-tête, puisque la règle ne lit plus que le parent ; ils ne le sont pas aujourd'hui, parce que chacun de ces en-têtes a déjà été jugé comme bloc et qu'un refus de plus dans ces échanges se décide avec eux.</li>
+  <li><b>La date du premier bloc compte désormais pour toujours.</b> Le calendrier part de l'horodatage du premier bloc. Un réseau dont le premier bloc est daté bien avant son ouverture réelle démarre en retard sur son calendrier, au plancher de difficulté, jusqu'à avoir rattrapé ce retard. Le premier bloc du devnet est daté vingt-neuf jours avant d'avoir été miné, à dessein, pour un test qui mine une longue chaîne en avant de lui ; un devnet lancé aujourd'hui depuis lui minerait au plancher jusqu'à avoir rattrapé ces vingt-neuf jours, cinq cent un mille blocs de cinq secondes. À trancher quand le premier bloc de testnet-8 sera frappé.</li>
+</ul>

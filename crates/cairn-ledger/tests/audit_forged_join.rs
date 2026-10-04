@@ -7,7 +7,7 @@
 //!
 //! The shape is: the honest chain untouched, then a run of headers that cost
 //! one hash each, long enough that the run swallows the anchor and the whole
-//! difficulty window under it. Nothing in either check looks at a header below
+//! window of recent headers under it. Nothing in either check looks at a header below
 //! the anchor except through the aggregate work bound, and that bound is a
 //! lower bound, which a forger claiming *more* work satisfies for free.
 
@@ -23,11 +23,11 @@
 use cairn_accumulator::forest::ForestProof;
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
-use cairn_ledger::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
+use cairn_ledger::block::{BlockHeader, BLOCK_VERSION};
 use cairn_ledger::handover::accept;
 use cairn_ledger::note::Note;
-use cairn_ledger::pow::DIFFICULTY_WINDOW;
 use cairn_ledger::pow::{meets_target, next_difficulty, RECENT_HEADERS};
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start, draw, levels_of, seed_of, work_before, Sample, SampledStart, SAMPLES,
 };
@@ -107,10 +107,6 @@ fn mine(mut candidate: BlockHeader) -> BlockHeader {
     panic!("no nonce found");
 }
 
-fn summaries(headers: &[BlockHeader]) -> Vec<HeaderSummary> {
-    headers.iter().map(BlockHeader::summary).collect()
-}
-
 /// AUDIT FINDING: both new checks pass on a chain whose last 121 headers were
 /// never mined and whose ledger is one the forger wrote.
 #[test]
@@ -127,10 +123,11 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
     let (_donor_headers, donor) = mine_chain(9, 30);
     let donor_root = donor.state_root();
 
-    // Long enough that the anchor and the whole difficulty window under it
-    // are headers the forger made: `check_buried` reads the window out of
-    // what the sender supplies, so a window of the forger's own floor-
-    // difficulty headers demands the floor of every block above it.
+    // Long enough that the anchor and the whole window of recent headers under
+    // it are headers the forger made: `check_buried` reads the window out of
+    // what the sender supplies, and the retarget asks of each header what its
+    // parent, the forger's own, demands: no more than four times a header at
+    // the floor, a block at a time, so the run stays cheap.
     let run = 120u64;
     assert!(
         run >= u64::try_from(RECENT_HEADERS).unwrap() + BURIAL,
@@ -156,13 +153,12 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
     for height in HONEST..=tip_height {
         clock += params.target_block_time;
         // Below the anchor nothing checks a difficulty, so the floor it is.
-        // At and above the anchor the run is checked block by block, and the
-        // window it is checked against is the forger's own floor-difficulty
-        // headers, which demand the floor right back.
+        // At and above the anchor the run is checked block by block, and each
+        // header is asked what the retarget asks of the forger's own header
+        // below it.
         let difficulty = if height > anchor_height {
-            let from = usize::try_from(height - u64::try_from(RECENT_HEADERS).unwrap()).unwrap();
-            let to = usize::try_from(height - 1).unwrap();
-            next_difficulty(&summaries(&forged[from..=to]), params.target_block_time)
+            let parent = &forged[usize::try_from(height - 1).unwrap()];
+            next_difficulty(&parent.summary(), params.origin(), params.target_block_time)
         } else {
             1
         };
@@ -229,7 +225,7 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
         .map(|sample| sample.header.height)
         .max()
         .unwrap();
-    let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+    let from = usize::try_from(deepest.saturating_sub(BELOW_THE_PINNED)).unwrap();
     let tail = forged[from..].to_vec();
     let start = SampledStart {
         genesis: ForestProof::default(),
@@ -279,9 +275,10 @@ fn a_free_run_cannot_swallow_the_anchor_any_more() {
 
     // The handover on its own would still take it, and that is worth being
     // explicit about rather than leaving as a gap somebody rediscovers.
-    // `check_buried` seeds its retarget window from the headers the sender
-    // supplies, so a run of the forger's own floor-difficulty headers demands
-    // the floor right back. What stops the forgery is the weighing above,
+    // `check_buried` seeds its window from the headers the sender supplies,
+    // and the retarget asks each header what the forger's own header below it
+    // demands, which from a header at the floor climbs four times a block at
+    // most and stays cheap. What stops the forgery is the weighing above,
     // which is the only gate anything from the network passes through: a node
     // asks for a ledger only from a peer whose tip it has just weighed. The
     // other caller of `accept` is a node reading its own ledger file back at

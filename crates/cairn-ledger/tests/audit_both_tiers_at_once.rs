@@ -202,7 +202,11 @@ fn rerun_above(handover: &mut Handover, below: &[BlockHeader], params: &Consensu
 
     for height in (at.height + 1)..=tip_height {
         clock += SPACING;
-        let difficulty = next_difficulty(&window, params.target_block_time);
+        let difficulty = next_difficulty(
+            &summary(&previous),
+            params.origin(),
+            params.target_block_time,
+        );
         let header = BlockHeader {
             version: 1,
             network: params.network,

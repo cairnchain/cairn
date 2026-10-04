@@ -1271,8 +1271,9 @@ at a time by whoever starts a node.
 <table>
   <thead><tr><th>Parameter</th><th class="n">Value</th><th>What reads it</th></tr></thead>
   <tbody>
-    <tr><td>target block time</td><td class="n">60 s</td><td>the retarget and the solve-time clamp</td></tr>
-    <tr><td>genesis difficulty</td><td class="n">2<sup>27</sup></td><td>the first block, before any history exists</td></tr>
+    <tr><td>target block time</td><td class="n">60 s</td><td>the retarget's schedule and its half life of sixty of them</td></tr>
+    <tr><td>opening moment</td><td class="n">the first block's timestamp</td><td>no block before it; the retarget's schedule starts there</td></tr>
+    <tr><td>genesis difficulty</td><td class="n">2<sup>27</sup></td><td>the first block, and the difficulty the retarget's schedule starts from</td></tr>
     <tr><td>drift allowance</td><td class="n">600 s</td><td>how far ahead of a reader a timestamp may sit: ten target block times</td></tr>
     <tr><td>halving interval</td><td class="n">1 051 200</td><td>the emission schedule</td></tr>
     <tr><td>initial reward</td><td class="n">5 000 000 000 pebbles</td><td>the emission schedule</td></tr>
@@ -1287,10 +1288,11 @@ A throwaway network may set some of them far lower, and the reference
 implementation's does: a five second block, a genesis difficulty of
 2<sup>23</sup>, and a burial and maturity of 32. The emission schedule is the
 same everywhere. The drift allowance is ten of the network's own target block
-times everywhere, so the throwaway network's is 50 seconds: it is measured
-against the retarget's clamp, which is counted in blocks, and a number of
-seconds shared by networks whose blocks differ twelvefold is what the
-timestamp rules below were once wrong about.
+times everywhere, so the throwaway network's is 50 seconds, and so is the
+retarget's half life, sixty of them: five minutes there. Both are counted in
+blocks because what they are measured against is, and a number of seconds
+shared by networks whose blocks differ twelvefold is what the timestamp rules
+below were once wrong about.
 
 ### Proof of work
 
@@ -1351,158 +1353,179 @@ expecting one this protocol does not have.
 
 ### The difficulty retarget
 
-Every block retargets. There is no epoch and no boundary at which the
-difficulty is allowed to move and between which it is not.
+Every block retargets, and what it is asked depends on where its branch stands
+against a schedule fixed at the network's first block, not on the path the
+branch took to get there. The rule is ASERT, the absolutely scheduled
+exponentially rising targets of Bitcoin Cash's aserti3-2d, written for
+difficulty rather than for target: every half life a branch stands ahead of
+its schedule doubles the difficulty, and every half life behind it halves it.
 
 <table>
   <thead><tr><th>Constant</th><th class="n">Value</th><th>What it is</th></tr></thead>
   <tbody>
-    <tr><td>difficulty window</td><td class="n">90</td><td>gaps the answer is weighed over</td></tr>
-    <tr><td>solve-time clamp</td><td class="n">6</td><td>multiple of the target block time one gap may count for, in either direction</td></tr>
+    <tr><td>half life</td><td class="n">60</td><td>target block times a branch must stand ahead of its schedule for the difficulty to double: an hour at a sixty second block</td></tr>
+    <tr><td>fraction bits</td><td class="n">16</td><td>the fixed point the exponent is carried in</td></tr>
     <tr><td>retarget clamp</td><td class="n">4</td><td>factor one step may move the difficulty by, in either direction</td></tr>
     <tr><td>minimum difficulty</td><td class="n">1</td><td>the floor, at which every identifier meets the target</td></tr>
-    <tr><td>headers kept</td><td class="n">91</td><td>summaries a node must hold to apply every rule here</td></tr>
+    <tr><td>headers kept</td><td class="n">91</td><td>summaries a node holds: the median reads the last 11 and the retarget the last one</td></tr>
   </tbody>
 </table>
 
-The input is a run of header summaries from the branch the candidate block
-extends, oldest first. A summary is a height, a timestamp and a difficulty,
-and nothing else: a node MUST hold the last 91 of them and MUST NOT let the
-answer depend on holding more. A node given a longer run MUST use only the
-last 91, or two honest nodes with different amounts of history would demand
-different difficulties of the same block.
+The input is the parent the candidate block extends, as a header summary, which
+is a height `h`, a timestamp `t` and a difficulty `P`, and four network
+parameters: the target block time `T`, the opening moment `t0` and the genesis
+difficulty `D0`, which are the first block's timestamp and difficulty, and the
+retarget's half life of 60 target block times. **The schedule's starting point
+MUST come from the network's parameters and never from a peer.** A node that
+joined by handover never held the first block or any header near it, and a
+newcomer weighing a stranger's chain is told nothing it can trust about where
+that chain began; both read `t0` and `D0` from the rules they run, as a node
+that replayed from the first block does.
 
-Given that run `h[0] … h[m-1]` and a target block time `T`:
+1. If the branch has no blocks, the answer is the genesis difficulty, or 1 if
+   that is lower. Stop.
+2. If `T` is 0 there is no schedule, and the answer is `P`, or 1 if that is
+   lower. Stop. No network has a target block time of nought.
+3. Let `D` be `D0`, or 1 if that is lower; let `Q` be `P`, or 1 if that is
+   lower; and let `tau = 60 * T`.
+4. Let `n = T * h - (t - t0)`, a signed integer: the seconds the parent stands
+   ahead of its schedule, negative behind it.
+5. Let `e = floor(n * 65536 / tau)`. The division rounds toward negative
+   infinity, not toward zero.
+6. Let `s = floor(e / 65536)` and `f = e - 65536 * s`, so that
+   `0 <= f < 65536`.
+7. Let `factor = 65536 + ((195766423245049 * f + 971821376 * f^2 +
+   5127 * f^3 + 2^47) >> 48)`.
+8. Let `r = floor(D * factor * 2^s / 65536)`: when `s` is 16 or more that is
+   `D * factor * 2^(s - 16)`, and otherwise `floor(D * factor / 2^(16 - s))`.
+9. Let `low = floor(Q / 4)`, or 1 if that is lower, and
+   `high = Q * 4`, or 2<sup>64</sup> minus 1 if that is lower.
+10. The answer is `r` raised to `low` if it is below it, and lowered to
+   `high` if it is above it.
 
-1. If `m` is 0, the branch has no blocks and the answer is the network's
-   genesis difficulty, or 1 if that is lower.
-2. Let `last` be `h[m-1]`, and let `n` be the smaller of `m - 1` and 90.
-3. If `n` is 0, or `T` is 0, the answer is `last.difficulty`, or 1 if that is
-   lower. Stop.
-4. Let `w[0] … w[n]` be the last `n + 1` summaries. `w[0]` is the anchor and
-   contributes no gap and no difficulty; the `n` after it contribute one each.
-5. Let `ceiling` be `T * 6`.
-6. Set `counted` to `w[0].timestamp`, `weighted` to 0, and `sum_d` to 0.
-7. For `i` from 1 to `n`, in order, over signed arithmetic wide enough not to
-   wrap:
-   `gap = clamp(w[i].timestamp - counted, -ceiling, +ceiling)`,
-   then `counted = counted + gap`,
-   then `weighted = weighted + i * gap`,
-   then `sum_d = sum_d + w[i].difficulty`.
-8. Let `previous` be `last.difficulty`, or 1 if that is lower.
-9. **If `weighted` is zero or negative, the answer is `previous * 4`, and
-   nothing below applies.** Stop.
-10. Let `expected = n * (n + 1) / 2 * T`.
-11. Let `average = sum_d / n`, or 1 if that is lower.
-12. Let `next = average * expected / weighted`.
-13. Let `low = previous / 4`, or 1 if that is lower, and `high = previous * 4`.
-14. The answer is `next` clamped into `low … high`, and never below 1.
+Every quantity above is an exact integer. The cubic at step 7 is the
+aserti3-2d approximation of `65536 * 2^(f / 65536)`, within 0.013 per cent of
+it everywhere, never decreasing in `f`, and below 131 072 at the top, which is
+what keeps the rule from ever asking less of an earlier parent. Its intermediate
+sum reaches 18 446 563 080 438 344 768 at `f = 65535`, within a ten
+thousandth of 2<sup>64</sup>: it fits an unsigned 64-bit integer and nothing
+narrower, and the reference implementation carries it in 128 bits.
 
-Every division is integer division truncated toward zero, and every quantity
-divided at steps 10 to 14 is non-negative.
+**Width.** `n * 65536` and `r` can be far larger than 64 bits. An
+implementation MAY carry them in 128 bits and saturate where they do not fit,
+because a value that does not fit is past `high` at step 10 whichever way it
+was rounded: the reference implementation saturates `T * h`, `n * 65536` and
+`r` and gives the exact answer in every case. An implementation that wraps at
+any of these points has left the protocol.
 
-**Each gap is measured from `counted` and not from the previous header's own
-timestamp.** That is the one step an implementer will write differently by
-reflex, and writing it differently produces a different chain. `counted` is a
-timeline the retarget keeps for itself: it opens at the anchor's timestamp and
-then moves only by what the retarget actually counted, so a header thrown
-forward past the clamp advances the timeline by the clamp and no more, and the
-headers after it have their gaps measured from where the timeline really
-stands. The excess comes back in full while the header is inside the window.
-Measuring each gap against its own parent instead leaves the give-back short
-by whatever the clamp cut off, which is exactly the difference a miner holding
-two blocks in a row keeps.
+**The floor division at step 5.** A parent one second behind its schedule has
+`n = -1`, and `e` is then -19 at a sixty second block, not the -18 a truncating
+division gives. Truncation rounds both sides toward the schedule, and the
+difference is a different difficulty on every block that is behind by a
+fraction of a unit. It is the one step an implementer will write differently
+by reflex.
 
-The anchor's timestamp is taken raw, and that is the one place the excess is
-counted a second time. When a header thrown forward becomes `w[0]`, the
-timeline opens at the time it claimed, so the gaps after it measure short by
-what it claimed beyond the clamp, once, for the retarget that has it as its
-anchor. At a drift allowance of ten target block times that is under a
-hundredth of the steady difficulty on either network, measured; it was 1.36
-times the steady difficulty on a sixty second chain and four times on a five
-second one when the allowance was two hours.
+**The block after the first.** Its parent is the first block, at height 0, so
+`n` is `t0` less the first block's own timestamp. Every network that pins a
+first block dates it at its opening moment, which makes `n` nought, `factor`
+65 536 and the answer `D`: the second block carries the genesis difficulty, as
+the first does. A network that pins nothing may date its first block after its
+opening, and its schedule still starts at the opening, so such a chain begins
+behind its schedule.
 
-Three edge cases the rule answers explicitly, and each is a case a second
-implementation reaches by accident before it reaches it on purpose.
+**What the clamp is for.** The schedule rarely comes near it. What a block is
+asked over its parent's is `2^((T - g) / tau)`, `g` the parent's own stated
+gap, so the clamp binds only after a gap more than two half lives longer than
+the target, or one that runs two half lives backwards. Measured on chains with
+random block times whose hash rate fell fifty times, it bound on one block in
+eighteen thousand. It stays because the weighing reasons from it: a run of
+blocks implies a least and a most work only because no step moves the
+difficulty further than this.
 
-**A span of zero.** A window whose timestamps are all the same measures no
-time. It is not a division by zero and it is not an unchanged difficulty: the
-answer is the steepest rise the rule allows, `previous * 4`.
-
-**A span running backwards.** A gap may be negative, down to `-ceiling`, and a
-window can therefore weigh out to a negative total. That is a chain claiming
-it produced its blocks in less than no time, and it takes the same answer as a
-span of zero: `previous * 4`. A negative gap is worth the time it gives back
-and not one second more, which is what stops a miner buying difficulty by
-alternating a forward jump with a backward one.
-
-**Saturation.** Every addition and multiplication saturates rather than
-wrapping. If `previous * 4` is past what a `u64` holds, the answer is
-`u64::MAX`. If `average * expected` is past what a `u128` holds it saturates
-there before the division, and the clamp at step 14 bounds the result in any
-case. An implementation that wraps instead of saturating at any of these
-points has left the protocol.
-
-**On a chain shorter than the window** the same formula runs with `n = m - 1`,
-and the weights, the expected span and the average all follow `n`. There is no
-warm-up rule and no special case. Two consequences: the block at height 1 sees
-one summary, so `n` is 0 and it MUST carry the genesis block's difficulty
-unchanged; the block at height 2 is the first that can retarget, off a single
-gap.
-
-Two properties of this rule are easy to state backwards, and both have been
-stated backwards in this project's own documents.
-
-**It answers slowly, in hours rather than minutes.** The weights run 1 to 90
-and sum to 4 095, so the newest gap carries 90 parts of 4 095, about 2.2 per
-cent of the measurement. Measured on a chain warmed to a full window exactly
-on schedule at difficulty 1 000 000, one block arriving at the clamp ceiling,
-which is six times the target, brings the next difficulty to 900 990, about a
-tenth of the way down, and a block arriving a hundred times the target late
-brings it to the same 900 990, because the clamp makes the two the same block.
-On the same fixture a hash rate that halves has half of the doubling
-correction after 22 blocks and 2 247 seconds of chain time, which is 37
-minutes, and ninety per cent of it after 90 blocks and 7 345 seconds, a little
-over two hours. A tenfold loss reaches ninety per cent after 64 blocks and
-13 080 seconds. The damping is what a miner writing its own timestamps cannot
-get past, and it is the same damping that makes an honest answer take hours.
-
-**At the floor the rule reduces to a division, and the floor is held from
-about half the target and not from the target.** When `previous` is 1 and every
-difficulty in the window is 1, `average` is 1 and steps 10 to 12 collapse: with
-a window spaced evenly `g` seconds apart, `expected` is `4095 * T`, `weighted`
-is `4095 * g`, and the answer is `T / g` clamped into 1 … 4. At a sixty second
-target, for an evenly spaced window:
+These are vectors from an independent reference written with unbounded
+integers; `crates/cairn-ledger/tests/asert_vectors.txt` holds 52 of them, and an
+implementation that reproduces that file has reproduced the arithmetic.
 
 <table>
-  <thead><tr><th class="n">Spacing</th><th class="n">Next difficulty</th></tr></thead>
+  <thead><tr><th class="n">T</th><th class="n">t0</th><th class="n">D0</th><th class="n">h</th><th class="n">t</th><th class="n">P</th><th class="n">Answer</th><th>Case</th></tr></thead>
   <tbody>
-    <tr><td class="n">1 s</td><td class="n">4 (the clamp; the ratio is 60)</td></tr>
-    <tr><td class="n">15 s</td><td class="n">4</td></tr>
-    <tr><td class="n">20 s</td><td class="n">3</td></tr>
-    <tr><td class="n">30 s</td><td class="n">2</td></tr>
-    <tr><td class="n">31 s</td><td class="n">1</td></tr>
-    <tr><td class="n">60 s or more</td><td class="n">1</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">0</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">134217728</td><td>block-one</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">1000000</td><td class="n">1850800858</td><td class="n">134217728</td><td class="n">134217728</td><td>on-schedule-1m</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">1000</td><td class="n">1790857258</td><td class="n">134217728</td><td class="n">268435456</td><td>tau-ahead</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">1000</td><td class="n">1790864458</td><td class="n">134217728</td><td class="n">67108864</td><td>tau-behind</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">1000</td><td class="n">1790860857</td><td class="n">134217728</td><td class="n">134244352</td><td>ahead-1s</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">1000</td><td class="n">1790860859</td><td class="n">134217728</td><td class="n">134191104</td><td>behind-1s</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">500</td><td class="n">1790829838</td><td class="n">134217728</td><td class="n">163342336</td><td>ahead-17m</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">292835381</td><td class="n">1195</td><td class="n">1790877238</td><td class="n">292835381</td><td class="n">118931978</td><td>behind-1.3-tau</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">292835381</td><td class="n">1275</td><td class="n">1790872745</td><td class="n">585670762</td><td class="n">711802310</td><td>burst-end</td></tr>
+    <tr><td class="n">60</td><td class="n">0</td><td class="n">1099511627776</td><td class="n">0</td><td class="n">1</td><td class="n">1099511627776</td><td class="n">1099293523968</td><td>neg-round-1</td></tr>
+    <tr><td class="n">60</td><td class="n">0</td><td class="n">65536</td><td class="n">0</td><td class="n">1</td><td class="n">65536</td><td class="n">65523</td><td>neg-round-tiny</td></tr>
+    <tr><td class="n">60</td><td class="n">1</td><td class="n">1099511627776</td><td class="n">0</td><td class="n">0</td><td class="n">1099511627776</td><td class="n">1099729731584</td><td>pos-round-1</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">1000</td><td class="n">1790824858</td><td class="n">134217728</td><td class="n">536870912</td><td>clamp-up</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">1000</td><td class="n">1790896858</td><td class="n">134217728</td><td class="n">33554432</td><td>clamp-down</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">100</td><td class="n">1790950858</td><td class="n">2</td><td class="n">1</td><td>floor-from-two</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">0</td><td class="n">100</td><td class="n">1790803258</td><td class="n">1</td><td class="n">2</td><td>origin-zero</td></tr>
+    <tr><td class="n">60</td><td class="n">1790800858</td><td class="n">18446744073709551615</td><td class="n">1000</td><td class="n">1790857258</td><td class="n">18446744073709551615</td><td class="n">18446744073709551615</td><td>saturate-ceiling</td></tr>
+    <tr><td class="n">60</td><td class="n">0</td><td class="n">18446744073709551615</td><td class="n">18446744073709551615</td><td class="n">0</td><td class="n">18446744073709551615</td><td class="n">18446744073709551615</td><td>far-ahead-max</td></tr>
+    <tr><td class="n">1</td><td class="n">0</td><td class="n">1073741824</td><td class="n">4611686018427387904</td><td class="n">4611686018427387934</td><td class="n">1073741824</td><td class="n">759185408</td><td>height-2^62</td></tr>
+    <tr><td class="n">5</td><td class="n">1790000000</td><td class="n">8388608</td><td class="n">4000</td><td class="n">1790019923</td><td class="n">8388608</td><td class="n">10022144</td><td>devnet-ahead</td></tr>
+    <tr><td class="n">0</td><td class="n">1790800858</td><td class="n">134217728</td><td class="n">1000</td><td class="n">1790800858</td><td class="n">12345</td><td class="n">12345</td><td>target-zero</td></tr>
   </tbody>
 </table>
 
-So a chain at the floor spaced evenly 31 seconds apart holds the floor for as
-long as anyone cares to keep it, and one spaced evenly 30 apart leaves it at
-the second block. A chain need not be spaced evenly. The floor holds while
-`weighted` stays above `4095 * T / 2`, and ninety gaps of 30 seconds with one
-of 31 among them keep it there for ever, at a mean just over 30 seconds; the
-first window after a fork holds the honest chain's gaps, which buys a little
-more at the start. The tightest branch of 1 024 blocks found, taking each
-timestamp as low as the median rule and a retarget of 1 allow, spans 30 069
-seconds, 8 h 21 m, against the 31 744 an even 31 seconds gives.
+Four properties of this rule are worth stating, because the rule it replaced
+had the opposite of each.
+
+**On schedule nothing moves, and a half life is a factor of two exactly.** A
+parent standing exactly on its schedule is asked `D`, at any height. One
+standing a half life ahead has `f` nought and `s` one, and is asked exactly
+`2 * D`; a half life behind, exactly `D / 2`.
+
+**It forgets the path.** Only the parent's timestamp is read, so a timestamp
+thrown forward lowers the next difficulty and the next honest timestamp takes
+all of it back. A block dated at the drift allowance, ten target block times
+late, lowers the difficulty of the one block after it by `2^(-10/60)`, about
+eleven per cent, and nothing after that. The moving average this replaced
+damped one late block to a tenth of a move and kept the damping in its window
+for ninety blocks, which is what made a burst of hash rate cost the honest
+chain a day and a half: on 2 October 2026 eighty testnet-7 blocks mined in two
+minutes raised the difficulty 768 times. Under this rule the same eighty blocks
+stand 4 656 seconds ahead of the schedule, and the next block is asked 2.45
+times what it was.
+
+**It answers in hours.** Measured on a chain on schedule at a sixty second
+block, every block taking as long as its difficulty asks of the hash rate that
+remains: a hash rate that halves has half of its answer after 35 blocks and 60
+minutes of chain time, and ninety per cent after 147 blocks and 3 h 18 m. A
+tenfold loss reaches ninety per cent after 55 blocks and 3 h 19 m.
+
+**What a burst leaves behind is about what it paid.** Reaching a difficulty
+`X` times the honest one takes a branch `log2(X)` half lives ahead of its
+schedule, which at the difficulties on the way is about `X * tau / ln 2`
+seconds of the honest hash rate, and it leaves about `X` target times for the
+next honest block. The stall a departing miner leaves is about `T ln 2 / tau`
+of the honest work it spent, one eighty seventh at a one hour half life.
+
+**At the floor the rule is a place, not a spacing.** The answer is the floor
+while `r` is below 2, which is while the parent stands far enough behind its
+schedule: `log2(D)` half lives less one. Every block dated closer than the
+target moves the branch toward its schedule, so no spacing below the target
+holds the floor for good, and the slack a branch starts from is what it stood
+behind before. A chain on schedule at the floor's edge, which is a chain whose
+genesis difficulty is the floor, has an hour of it. Spaced evenly from there,
+1 024 blocks hold the floor at 57 seconds a block and not at 56, and span
+58 368 seconds. The tightest branch of 1 024 blocks found, taking each
+timestamp as low as the median rule and an answer of 1 allow, spends the hour
+at once and then runs a target a block, and spans 57 841 seconds, 16 h 04 m.
+A branch forked off a chain at a real difficulty has further to fall: a half
+life of stated time for every halving below where it forked.
 
 Any argument that prices a run of blocks at the floor MUST price it by what
-such a run can span and not at a per-block spacing: a run of 1 024 at 30 069
-seconds or less, and never at the target, which is twice what it costs. The
-figure is measured rather than derived, and an implementation that finds a
-tighter branch has found a smaller number that arguments are then bound by.
-Off a real difficulty the same spacing is not free: 31 seconds a block off
-2<sup>20</sup> asks for very nearly twice the difficulty a block.
+such a run can span: a run of 1 024 at 57 841 seconds or less, which is the
+target for every block less one half life of slack. The figure is measured
+rather than derived, and an implementation that finds a tighter branch has
+found a smaller number that arguments are then bound by. Under the moving
+average the same figure was 30 069 seconds.
 
 ### Timestamps
 
@@ -1537,16 +1560,14 @@ epoch, plus the network's drift allowance, which is ten of its target block
 times: 600 seconds on the public networks.
 
 The allowance is counted in blocks because what it is measured against is. It
-was 7 200 seconds on every network, which is twenty of the retarget's clamp
-ceilings at a sixty second block. A minority dating its blocks that far ahead,
-or an honest miner whose clock was an hour or two fast, held the median time
-past in the future; an honest block dated at the median plus one then moved the
-retarget's timeline a second while real time moved a minute, and the retarget
-read a chain producing blocks in no time and asked for its steepest rise, block
-after block. Measured with a thirty per cent share, a sixty second chain ran at
-1.53 times its target with single blocks asked for 115 times the steady
-difficulty, and a five second one at fourteen times its target. At ten target
-block times the same share leaves both within a tenth of their target. A
+was 7 200 seconds on every network, which against the moving average the
+retarget then was let a minority dating its blocks that far ahead, or an honest
+miner whose clock was an hour or two fast, hold the median time past in the
+future: measured with a thirty per cent share, a sixty second chain ran at 1.53
+times its target and a five second one at fourteen times. At ten target block
+times, a sixth of the retarget's half life, a timestamp at the allowance lowers
+the next block's difficulty by `2^(-1/6)` and the next honest timestamp takes it
+back, and the same share leaves both networks within a tenth of their target. A
 clock kept by NTP meets ten minutes with room.
 
 **The first two are facts about the block. The third is a fact about the
@@ -1722,11 +1743,12 @@ thing the rule exists to prevent. Every network specified here sets the two
 equal.
 
 What burial costs is chain time. At a sixty second block, 1 024 blocks on
-schedule is 61 440 seconds, 17 h 04 m. At the difficulty floor a branch can be
-held at a little over 30 seconds a block, as the retarget section shows, and
-the tightest such branch of 1 024 blocks found spans 30 069 seconds, 8 h 21 m.
-**The second figure is the one any argument about how long an attacker must
-sit is entitled to**, and it is under half the first. The drift bound is what
+schedule is 61 440 seconds, 17 h 04 m. At the difficulty floor a branch can
+spend at most a half life of slack and then has to run a target a block, as the
+retarget section shows, and the tightest such branch of 1 024 blocks found
+spans 57 841 seconds, 16 h 04 m. **The second figure is the one any argument
+about how long an attacker must sit is entitled to.** Under the moving average
+the retarget used to be it was 30 069 seconds, under half the first. The drift bound is what
 keeps that time real: a node refuses a block more than ten blocks ahead of its
 own clock, ten minutes on the public networks, so a branch spanning more than
 eight hours cannot be handed over all at once, and its author waits out the
@@ -1942,8 +1964,8 @@ Both counted sequences carry their own ceiling, checked before anything is
 reserved for them, because both are chosen by whoever sent the structure. A
 decoder MUST refuse more than 4 096 samples and more than 8 282 headers in the
 tail. The second is the deepest run this weighing will ever walk, and it is
-`16 * 512 + 90`: sixteen times the band the draw leaves unresolved, plus one
-retarget window. A chain whose difficulty has fallen far enough below its own
+`16 * 512 + 90`: sixteen times the band the draw leaves unresolved, plus the
+ninety headers the run carries below the pinned one. A chain whose difficulty has fallen far enough below its own
 lifetime average has more blocks inside that band than the ceiling allows, and
 such a chain cannot be weighed at all. It has to be read. That is a real limit
 and it is stated rather than hidden.
@@ -2146,16 +2168,23 @@ genuine honest header, and the run really is worth what it says, which is
 almost nothing, honestly stated.
 
 The tail closes that. It MUST be exactly the consecutive run of headers from
-one full retarget window below the deepest header the draw landed on, up to and
-including the tip, oldest first. The pinned header is the deepest by height
+ninety below the deepest header the draw landed on, up to and including the
+tip, oldest first: what a node keeps behind a header, less the header. The
+rules read less of it than that, the retarget the header below and the median
+the eleven below, and ninety stays because it was the window of the moving
+average the retarget used to be and the run's length is part of what a
+weighing says. The pinned header is the deepest by height
 among the opened samples; the parent does not count, because it is required
 rather than drawn and so a forger chooses it. The window below the pinned
 header comes along because those headers have to chain into it, and a forger
 cannot swap them without having mined the pinned header on top of its own.
 
-Below the pinned header, only the chaining and the version are checked, since
-the window that would judge those difficulties is not present and the version
-needs none. At and above it, each header is held to the same rules a node
+Below the pinned header, only the chaining and the version are checked. The
+retarget could judge those difficulties, since it reads only the header below
+and the network's first block, but those headers are there to seed the median
+of the first header above the pinned one, and judging them would be a refusal
+this exchange has never made; it is left to the wave that revisits the
+window. At and above it, each header is held to the same rules a node
 applies to any block it is handed: the difficulty the retarget demands of it, a
 timestamp later than the median of its window, and its own work added to its
 parent's total.
@@ -2170,8 +2199,9 @@ weighing. It is the last check a weighing makes, so a showing refused for it
 held in every other respect, and every honest peer serving a chain whose
 miners left offers the same one. It is there because the draw is seeded by the tip, so a fresh set of
 questions costs what the tip costs, and a run whose every header carries the
-difficulty the retarget demands can still walk that demand down to the floor
-with long stated gaps and end on a tip that costs one hash. The run holds at
+difficulty the retarget demands can still walk that demand down to the floor,
+dating its headers behind the schedule so that each falls by the bound's
+quarter, and end on a tip that costs one hash. The run holds at
 most 8 191 headers above the pinned one, and together with the pinned header
 they carry the band the draw leaves unresolved, so the hardest of them carries
 at least the band over 8 192, and a tip within the tie carries at least the
@@ -2198,10 +2228,10 @@ network here.
 It is checked before the draw rather than left to the validation that follows,
 for two reasons. It is where the decision is made: without it a forger hands
 over a chain whose cheap blocks are spaced across days it never waited, since
-blocks at the difficulty floor have to average about half the target or the
-retarget demands more of them, so a run of them states far more time than a
-reader will take in advance and the forger has to sit through the difference in
-real time. And the same timestamp is what the number of halvings is counted
+blocks at the difficulty floor have to average the target, less a half life of
+slack, or the retarget demands more of them, so a run of them states far more
+time than a reader will take in advance and the forger has to sit through the
+difference in real time. And the same timestamp is what the number of halvings is counted
 from, so the bound on it has to be in force before any question is asked rather
 than after the answers are in.
 
@@ -2304,15 +2334,17 @@ any node sits for its first blocks after connecting. Both numbers are inside the
 1 024 a node refuses to reorganise past, which is what makes the position a node
 can be carried back out of by the ordinary rule. Any argument that wants a
 duration instead has to say which chain it is timing, because a branch sitting
-at the difficulty floor states the same depth in a fraction of the time.
+at the difficulty floor states the same depth in a little less time, a half
+life of slack less.
 
 It is per tip, and a tip is what a forger buys. The seed is the tip's own
 identifier, so a forger that dislikes the questions it drew can find another tip
 and ask again, and a forger with `g` tips faces `g` times the chance. A tip
-costs its difficulty, which is not the chain's. A run whose stated gaps sit at
-the clamp ceiling walks the retarget's demand down to the floor: from
-2<sup>40</sup> the walk is 826 blocks, 82 hours of stated time and about
-twenty-one blocks' work, paid once, and a forger that forked deep has the time.
+costs its difficulty, which is not the chain's. A run dated behind its
+schedule walks the retarget's demand down to the floor by the bound's quarter a
+header: from 2<sup>40</sup> the walk is 20 headers, 40 hours of stated time and
+a block and a third of work, paid once, and a forger that forked deep has the
+time. Under the moving average it was 826 headers and 82 hours.
 Before the tie described with the run, every nonce after that walk was a tip,
 and a fresh set of questions cost what it takes to see one of them land in the
 invented work: at 40 per cent about forty hashes, since a forger stops at the
@@ -2320,15 +2352,18 @@ first. The tie puts a floor under a tip at the band the draw leaves unresolved
 over 2<sup>18</sup>, which on a chain that ran to schedule is at least a
 thousandth of an average block. Measured on a thirty year chain at the two
 networks' opening difficulties, the cheapest tip a forger can present costs
-2<sup>18</sup> hashes on testnet-7 and 2<sup>14</sup> on the devnet; held to the
-pinned header alone it would cost 2<sup>10.2</sup> and 2<sup>7.4</sup>. It does
-not cost the chain's difficulty, and no tie of this kind can make it: a run
-whose tip fell by the tie is what an honest chain looks like after a loss.
+2<sup>17.9</sup> hashes on testnet-7 and 2<sup>13.9</sup> on the devnet; held to
+the pinned header alone it would cost 2<sup>11.2</sup> and 2<sup>8.1</sup>. The
+faster walk moved the first two by a tenth of a halving from the 2<sup>18.0</sup>
+and 2<sup>14.0</sup> the moving average gave, because the floor rests on the
+run's ceiling and the tie, not on the walk. It does not cost the chain's
+difficulty, and no tie of this kind can make it: a run whose tip fell by the
+tie is what an honest chain looks like after a loss.
 
 So the figure MUST be quoted against a grinding budget. At 40 per cent the
 inequality above gives 2^-161.9 a tip, which stays under 2^-128 against
 2<sup>33</sup> tips and not against 2<sup>34</sup>, and 2<sup>33</sup> tips
-cost 2<sup>51</sup> hashes on testnet-7 and 2<sup>47</sup> on the devnet at
+cost 2<sup>50.9</sup> hashes on testnet-7 and 2<sup>46.9</sup> on the devnet at
 those difficulties. The staircase the draw really is is worth more per question
 than the inequality, so that budget is a floor under the real one and not the
 real one; at the measured 42.96 per cent there is no budget at all, since that
@@ -2336,13 +2371,24 @@ is the share at which one tip alone reaches 2^-128.
 
 The tie is what an honest chain pays for this. The retarget follows a loss of
 hash rate with noise of its own, and on chains with random block times the
-hardest header of a run stood up to twice as far above the tip as the loss
-alone puts it, so a tie of 32 refused no chain that lost sixteen times its hash
-rate, sixty-four of them on each network. A chain that lost twenty or more
-cannot be weighed on testnet-7 from about eight hours after the loss, for up to
-a day at twenty, about as long as the ceiling on the run's length refuses it
-anyway, and for under six days at any loss beyond what the ceiling refuses; a
-newcomer reads such a chain instead, where a peer keeps it.
+hardest header of a run stood up to about 1.6 times as far above the tip as the
+loss alone puts it, so a tie of 32 refused no chain that lost sixteen times its
+hash rate, sixty-four of them on each network, and on testnet-7 none that lost
+twenty. A chain that lost twenty four or more cannot be weighed on testnet-7
+from about eight hours after the loss, for up to 28 hours at twenty four, about
+half as long as the ceiling on the run's length refuses it anyway, and for
+under five and a half days at any loss beyond; a newcomer reads such a chain
+instead, where a peer keeps it.
+
+A burst of hash rate that lifts the difficulty past the tie and leaves does the
+same to a newcomer, until the deepest question lands above the burst. Reaching
+thirty two times the honest difficulty takes a branch five half lives ahead of
+its schedule, about 2 750 blocks of the honest work, 46 hours of it at a sixty
+second block. Measured after bursts of 33, 64 and 128 times: a thirty year chain
+refuses newcomers for up to about 680 target times after the burst, 11 hours on
+testnet-7, and a young chain of two thousand blocks for 720 to 2 000, 12 to 32
+hours, while the burst cost four to five times that in honest work. Under the
+moving average three blocks of four times each reached the same tie.
 
 Past half the world's work nothing here helps, and nothing anywhere else does
 either: a forger at half has nothing left to invent and can mine the chain.
@@ -2520,8 +2566,13 @@ under, and a run that starts at the first block holds every header the rule
 read from its first. Below the twelfth entry of any other run a median over
 fewer headers is not the rule, and over timestamps that do not rise it can
 stand above the real one and refuse an honest handover, so a node MUST NOT ask
-it there. The retarget is not asked of the recent run at all: it reads ninety
-gaps, so no header of a run of ninety-one can be judged by it.
+it there. The retarget is not asked of the recent run. Since the retarget
+became ASERT it could be, from the second header on, because it reads only the
+header below and the network's first block; it is not, because every header of
+the run is the anchor's hash ancestry and was judged as a block by every node
+that holds it, so asking would refuse nothing the chain does not already
+refuse, and a new refusal in this list is left to the wave that revisits the
+window.
 
 ### What is pinned by a commitment, and what is not
 

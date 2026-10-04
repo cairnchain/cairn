@@ -6373,7 +6373,7 @@ fn refused(error: StartError) -> Shown {
 mod weighing_tests {
     use cairn_accumulator::Archive;
     use cairn_ledger::block::{BlockHeader, BLOCK_VERSION};
-    use cairn_ledger::pow::{next_difficulty, DIFFICULTY_WINDOW, MIN_DIFFICULTY};
+    use cairn_ledger::pow::{next_difficulty, HALF_LIFE_IN_BLOCKS, MIN_DIFFICULTY};
     use cairn_ledger::sampling::{check_start, open_start, SampledStart, StartError, SAMPLES};
     use cairn_ledger::state::header_leaf;
     use cairn_ledger::validation::{mine_header, ConsensusParams};
@@ -6382,12 +6382,25 @@ mod weighing_tests {
 
     use super::{weigh, Shown};
 
-    /// A chain that climbs, holds, and walks the retarget's demand down to the
-    /// floor with every header at the difficulty demanded of it, which is
-    /// what an honest chain whose miners all but left looks like to a
-    /// newcomer, and a real showing of its tip.
+    /// The rules the showing is made and weighed under: a network opened at
+    /// the first block's date, so the schedule starts there, and at a
+    /// difficulty a chain can fall from.
+    fn params() -> ConsensusParams {
+        ConsensusParams {
+            opens_at: 1_000_000,
+            genesis_difficulty: 1 << 12,
+            ..ConsensusParams::testnet()
+        }
+    }
+
+    /// A chain that holds its schedule, then loses its miners so badly that
+    /// each block comes more than two hours after the last and the retarget
+    /// falls by its whole bound a block down to the floor, with every header
+    /// at the difficulty demanded of it, and a real showing of its tip. That
+    /// is what an honest chain whose miners all but left looks like to a
+    /// newcomer.
     fn a_showing_of_a_chain_that_fell() -> SampledStart {
-        let params = ConsensusParams::testnet();
+        let params = params();
         let target = params.target_block_time;
         let mut archive = Archive::new();
         let mut headers: Vec<BlockHeader> = Vec::new();
@@ -6401,7 +6414,7 @@ mod weighing_tests {
                     transactions_root: Hash32::ZERO,
                     state_root: Hash32::ZERO,
                     history,
-                    timestamp: previous.map_or(1_000_000, |below| below.timestamp + gap),
+                    timestamp: previous.map_or(params.opens_at, |below| below.timestamp + gap),
                     difficulty,
                     total_work: previous.map_or(0, |below| below.total_work)
                         + u128::from(difficulty),
@@ -6410,28 +6423,27 @@ mod weighing_tests {
                 mine_header(candidate, 1 << 24).unwrap()
             };
         let demanded = |headers: &[BlockHeader]| {
-            let from = headers.len().saturating_sub(DIFFICULTY_WINDOW + 1);
-            let window: Vec<_> = headers[from..].iter().map(BlockHeader::summary).collect();
-            next_difficulty(&window, target)
+            next_difficulty(&headers.last().unwrap().summary(), params.origin(), target)
         };
-        let genesis = header(None, archive.forest().commitment(), 0, MIN_DIFFICULTY);
+        let genesis = header(
+            None,
+            archive.forest().commitment(),
+            0,
+            params.genesis_difficulty,
+        );
         archive.add(header_leaf(&genesis.id()));
         headers.push(genesis);
-        let gaps = std::iter::repeat_n(1, 6).chain(std::iter::repeat_n(target, 100));
-        for gap in gaps {
+        // Two half lives and a target past the last block, so each one falls
+        // by four, the most the bound allows.
+        let collapse = 2 * HALF_LIFE_IN_BLOCKS * target + target + 1;
+        let mut gaps = std::iter::repeat_n(target, 100);
+        loop {
+            let gap = gaps.next().unwrap_or(collapse);
+            if gap == collapse && demanded(&headers) == MIN_DIFFICULTY {
+                break;
+            }
             let asked = demanded(&headers);
             let next = header(headers.last(), archive.forest().commitment(), gap, asked);
-            archive.add(header_leaf(&next.id()));
-            headers.push(next);
-        }
-        while demanded(&headers) > MIN_DIFFICULTY {
-            let asked = demanded(&headers);
-            let next = header(
-                headers.last(),
-                archive.forest().commitment(),
-                6 * target,
-                asked,
-            );
             archive.add(header_leaf(&next.id()));
             headers.push(next);
         }
@@ -6467,7 +6479,7 @@ mod weighing_tests {
     /// archivist off for a chain's collapse passed.
     #[test]
     fn a_tip_fallen_below_its_run_is_not_taken_for_the_senders_doing() {
-        let params = ConsensusParams::testnet();
+        let params = params();
         let start = a_showing_of_a_chain_that_fell();
         let now = start.tip.timestamp;
         assert!(

@@ -383,10 +383,9 @@ fn caught_out(honest: &[BlockHeader], claim: f64, count: usize, salt: u64, lie: 
                 .map(|sample: &Sample| sample.header.height)
                 .max()
                 .unwrap_or(0);
-            let from = usize::try_from(
-                deepest.saturating_sub(cairn_ledger::pow::DIFFICULTY_WINDOW as u64),
-            )
-            .unwrap_or(0);
+            let from =
+                usize::try_from(deepest.saturating_sub(cairn_ledger::sampling::BELOW_THE_PINNED))
+                    .unwrap_or(0);
             shown.get(from..).map(<[_]>::to_vec).unwrap_or_default()
         },
         // The best parent it has: the header it really does sit above.

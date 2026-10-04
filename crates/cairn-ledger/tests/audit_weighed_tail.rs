@@ -29,7 +29,8 @@ use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{BlockHeader, HeaderSummary};
 use cairn_ledger::note::Note;
-use cairn_ledger::pow::{median_time_past, meets_target, DIFFICULTY_WINDOW};
+use cairn_ledger::pow::{median_time_past, meets_target};
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError, SAMPLES,
 };
@@ -132,7 +133,7 @@ fn honest() -> Weighing {
         })
         .collect();
     let pinned = samples.iter().map(|s| s.header.height).max().unwrap();
-    let from = usize::try_from(pinned.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+    let from = usize::try_from(pinned.saturating_sub(BELOW_THE_PINNED)).unwrap();
     let below = tip.height - 1;
     let start = SampledStart {
         genesis: ForestProof::default(),
