@@ -202,7 +202,7 @@ fn forge(honest: &Honest, run: u64, delta: u128) -> Forgery {
                     .max()
                     .unwrap_or(0);
                 let from = usize::try_from(
-                    deepest.saturating_sub(cairn_ledger::pow::DIFFICULTY_WINDOW as u64),
+                    deepest.saturating_sub(cairn_ledger::sampling::BELOW_THE_PINNED),
                 )
                 .unwrap_or(0);
                 headers[from..].to_vec()
@@ -287,10 +287,9 @@ fn the_honest_chain_still_checks_out() {
                 .map(|sample: &Sample| sample.header.height)
                 .max()
                 .unwrap_or(0);
-            let from = usize::try_from(
-                deepest.saturating_sub(cairn_ledger::pow::DIFFICULTY_WINDOW as u64),
-            )
-            .unwrap_or(0);
+            let from =
+                usize::try_from(deepest.saturating_sub(cairn_ledger::sampling::BELOW_THE_PINNED))
+                    .unwrap_or(0);
             honest.headers[from..].to_vec()
         },
         history: archive.forest().roots_only(),

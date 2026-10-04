@@ -914,9 +914,10 @@ fn belongs_to_this_network(
 /// Checks the run of recent headers hands over what it claims.
 ///
 /// The run is the last [`RECENT_HEADERS`] headers of the chain, ending at the
-/// anchor. It is what seeds the difficulty window the buried run above it is
-/// then judged against, which is why what it is allowed to say matters more
-/// than its own length suggests.
+/// anchor. It is what seeds the window the buried run above it is then judged
+/// against: the median reads its last eleven and the retarget its last one,
+/// the anchor, which is why what it is allowed to say matters more than its
+/// own length suggests.
 ///
 /// **Why it cannot be forged, which is not the same as why it is checked.**
 /// Every field of a header is inside its identifier, and this walks the run
@@ -955,17 +956,17 @@ fn belongs_to_this_network(
 /// It was not asked at all, and this run seeds the window the buried run is
 /// judged by.
 ///
-/// **What is not checked, and why not.** The difficulty is worse than
-/// circular. The retarget reads ninety gaps, so
-/// judging a header needs ninety one below it, and the run carries ninety
-/// below the anchor. `check_buried` escapes that by starting one above the
-/// anchor, where the message does hold ninety one. No header inside this run
-/// can be judged however long the run is made, because each one added is
-/// itself unjudgeable; the anchor could be, at the price of carrying one more
-/// header on the wire. Measured, that is worth 1.38 times the cost of a
-/// burial, at most 1.90, and only against a sender free to choose the anchor,
-/// which the network path does not allow. A wire format is not changed for
-/// that.
+/// **What is not checked, and why not.** The difficulty. When the retarget
+/// was a moving average over ninety gaps no header of this run could be
+/// judged at all, since each needed ninety one below it. The retarget now
+/// reads only the header below and the network's first block, so every header
+/// from the second on could be judged here, the anchor included. It is not,
+/// for the reason the version and the work are: the run is the anchor's hash
+/// ancestry, so a difficulty bent anywhere in it breaks the chain of
+/// identifiers and is refused as not consecutive, and each header was judged
+/// as a block by every node that holds it. Asking would change which sentence
+/// comes back and refuse nothing more, and a refusal added to a handover's
+/// normative list is left to the wave that revisits the window itself.
 fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), HandoverError> {
     let at = &handover.at;
     let Some(last) = handover.recent.last() else {
@@ -1143,8 +1144,9 @@ pub fn check_buried(
     // has to be the anchor's. `accept` asks this in `check_recent` before it
     // gets here; this function is public and asked nothing of the window it
     // was handed, so an empty one judged the first header against no history
-    // at all, where the retarget answers the floor: the difficulty of a first
-    // block, answered a second way.
+    // at all. That was a second answer for its difficulty when the retarget
+    // read the window; it reads the anchor itself now, and what an empty or a
+    // foreign window would still leave unjudged is the median.
     if recent.last().map(BlockHeader::id) != Some(at.id()) {
         return Err(HandoverError::RecentNotEndingAtTip);
     }
@@ -1186,7 +1188,14 @@ pub fn check_buried(
                 required: wanted,
             });
         }
-        let demanded = next_difficulty(&window, params.target_block_time);
+        // The retarget reads the parent alone, against the schedule from the
+        // network's first block, which the rules carry: nothing in the run or
+        // the window a sender hands over decides where the schedule starts.
+        let demanded = next_difficulty(
+            &previous.summary(),
+            params.origin(),
+            params.target_block_time,
+        );
         if header.difficulty != demanded {
             return Err(HandoverError::BuriedAtTheWrongDifficulty {
                 at: header.height,
@@ -1670,12 +1679,12 @@ mod tests {
     /// empty included, rather than judging the first buried header against a
     /// window of nothing.
     ///
-    /// The retarget answers the floor for an empty window, where a first
-    /// block's difficulty is the network's opening one, so the same header had
-    /// two answers. `accept` never reached it, because `check_recent` refuses
-    /// an empty run first; `check_buried` is public and asked nothing of the
-    /// window it was handed, so a run at the floor above an anchor passed with
-    /// no window at all.
+    /// When the retarget read the window it answered the floor for an empty
+    /// one, where a first block's difficulty is the network's opening one, so
+    /// the same header had two answers. It reads the anchor now, and the median
+    /// is what a window of nothing would leave unasked. `accept` never reached
+    /// it, because `check_recent` refuses an empty run first; `check_buried` is
+    /// public and asked nothing of the window it was handed.
     #[test]
     fn a_buried_run_is_not_judged_against_a_window_that_does_not_end_at_the_anchor() {
         let at = header(5, Hash32::from_bytes([1; 32]), 6, 1_000);

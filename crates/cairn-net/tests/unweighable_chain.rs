@@ -17,7 +17,7 @@
 //! loss until months or years after it, and every honest archivist alive then
 //! fails in exactly the same words. And a newcomer refuses a tip more than
 //! `cairn_ledger::sampling::MOST_FALL` times below the run it stands on, which
-//! a chain that lost more than about sixteen times its hash rate shows from
+//! a chain that lost more than about twenty times its hash rate shows from
 //! hours after the loss; that refusal holds in every other respect, so it is
 //! held against nobody.
 
@@ -446,9 +446,9 @@ fn a_showing_dated_ahead() -> SampledStart {
 ///
 /// Ten is more than the run of refusals a node counts before it names its
 /// clock, and more than it counts before it names the chain.
-fn a_newcomer_shown(start: &SampledStart) -> (Node, Vec<ShowsItEarly>) {
+fn a_newcomer_shown(start: &SampledStart, rules: ConsensusParams) -> (Node, Vec<ShowsItEarly>) {
     let shown = start.encode();
-    let newcomer = Node::bind(params(), loopback()).unwrap();
+    let newcomer = Node::bind(rules, loopback()).unwrap();
     let peers: Vec<ShowsItEarly> = (0..10u8)
         .map(|index| {
             ShowsItEarly::start(
@@ -585,7 +585,7 @@ impl ShowsItEarly {
 /// passed.
 #[test]
 fn a_showing_dated_past_this_clock_is_said_to_be_about_the_clock() {
-    let (newcomer, peers) = a_newcomer_shown(&a_showing_dated_ahead());
+    let (newcomer, peers) = a_newcomer_shown(&a_showing_dated_ahead(), params());
     let (unweighable, behind) = what_it_says(&newcomer);
     let showings: u64 = peers
         .iter()
@@ -632,7 +632,7 @@ fn a_showing_that_fails_at_its_own_date_is_not_taken_for_the_clock() {
         ),
         "the premise: at the date its tip carries, the showing does not weigh"
     );
-    let (newcomer, peers) = a_newcomer_shown(&start);
+    let (newcomer, peers) = a_newcomer_shown(&start, params());
     let (unweighable, behind) = what_it_says(&newcomer);
     for peer in &peers {
         peer.stop();
@@ -652,16 +652,24 @@ fn a_showing_that_fails_at_its_own_date_is_not_taken_for_the_clock() {
     );
 }
 
-/// A real showing of a chain that climbed, held, and then lost its miners:
-/// every header at the difficulty the retarget demanded, the last of them
-/// walked down to the floor by long gaps, and the tip dated in the past.
-fn a_showing_of_a_chain_that_fell() -> SampledStart {
-    let params = params();
-    let target = params.target_block_time;
+/// A real showing of a chain that held its schedule and then lost its miners
+/// so badly that each block came more than two hours after the last: every
+/// header at the difficulty the retarget demanded, the last of them falling by
+/// the whole bound a block down to the floor, and the tip dated in the past.
+/// With the rules it was mined under, which open when its first block is
+/// dated, at a difficulty it can fall from.
+fn a_showing_of_a_chain_that_fell() -> (SampledStart, ConsensusParams) {
+    let start = unix_now() - 3 * 24 * 3_600;
+    let target = params().target_block_time;
+    let params = ConsensusParams {
+        opens_at: start + target,
+        genesis_difficulty: 1 << 12,
+        ..params()
+    };
     let mut forge = Forge {
         params,
         state: LedgerState::new(),
-        clock: unix_now() - 3 * 24 * 3_600,
+        clock: start,
     };
     let mut headers: Vec<BlockHeader> = Vec::new();
     // `mine_many` states six hundred seconds a block; this states `gap`.
@@ -669,18 +677,18 @@ fn a_showing_of_a_chain_that_fell() -> SampledStart {
         forge.clock = forge.clock + gap - 600;
         headers.push(forge.mine_many(1)[0].header);
     };
-    for _ in 0..6 {
-        spaced(&mut forge, 1);
-    }
     for _ in 0..100 {
         spaced(&mut forge, target);
     }
+    // Two half lives and a target past the last block, so each one falls by
+    // four, the most the bound allows.
+    let collapse = 2 * cairn_ledger::pow::HALF_LIFE_IN_BLOCKS * target + target + 1;
     while cairn_ledger::validation::expected_difficulty(&forge.state, &params)
         > cairn_ledger::pow::MIN_DIFFICULTY
     {
-        spaced(&mut forge, 6 * target);
+        spaced(&mut forge, collapse);
     }
-    spaced(&mut forge, 6 * target);
+    spaced(&mut forge, collapse);
     let tip = *headers.last().unwrap();
 
     let mut archive = Archive::new();
@@ -703,7 +711,7 @@ fn a_showing_of_a_chain_that_fell() -> SampledStart {
         ),
         "the premise: the showing fails the tie and nothing else"
     );
-    start
+    (start, params)
 }
 
 /// **Showings of a chain whose miners left are said to be about the chain, in
@@ -719,7 +727,8 @@ fn a_showing_of_a_chain_that_fell() -> SampledStart {
 /// never add up passed.
 #[test]
 fn showings_of_a_chain_whose_miners_left_are_said_to_be_about_the_chain() {
-    let (newcomer, peers) = a_newcomer_shown(&a_showing_of_a_chain_that_fell());
+    let (start, rules) = a_showing_of_a_chain_that_fell();
+    let (newcomer, peers) = a_newcomer_shown(&start, rules);
     let (unweighable, behind) = what_it_says(&newcomer);
     for peer in &peers {
         peer.stop();

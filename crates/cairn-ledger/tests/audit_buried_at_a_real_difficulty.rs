@@ -48,7 +48,8 @@ use cairn_ledger::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
 use cairn_ledger::handover::{check_buried, HandoverError, MOST_BURIED};
 use cairn_ledger::note::Note;
 use cairn_ledger::pow::{
-    median_time_past, meets_target, next_difficulty, MIN_DIFFICULTY, RECENT_HEADERS,
+    median_time_past, meets_target, next_difficulty, HALF_LIFE_IN_BLOCKS, MIN_DIFFICULTY,
+    RECENT_HEADERS,
 };
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
@@ -61,8 +62,11 @@ use cairn_primitives::Hash32;
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 24;
 const TARGET: u64 = 60;
-/// The clamp `pow.rs` puts on a solve time before the retarget reads it.
-const CEILING: u64 = 6 * TARGET;
+/// The retarget's half life on this network, in seconds.
+const HALF_LIFE: u64 = HALF_LIFE_IN_BLOCKS * TARGET;
+/// A gap after which the schedule asks for a quarter of the difficulty, the
+/// most the bound lets one block fall: two half lives past the target.
+const FALL: u64 = 2 * HALF_LIFE + TARGET + 1;
 
 /// The anchor sits at 175, so the honest chain has to reach it and then some.
 /// The extra twenty four are the honest run the control tests use.
@@ -104,14 +108,13 @@ impl Chain {
         let mut headers = Vec::with_capacity(count);
         let mut forests = Vec::with_capacity(count + 1);
         let mut forest = Archive::new();
-        let mut clock = 1_000u64;
-
         forests.push(forest.clone());
         for _ in 0..count {
             let height = state.next_height().unwrap();
-            // On schedule, so the retarget leaves the opening difficulty where
-            // it is and the window under the anchor really demands it.
-            clock += TARGET;
+            // On schedule from the network's opening, where its first block is
+            // dated, so the retarget leaves the opening difficulty where it is
+            // and the anchor really carries it.
+            let clock = params.opens_at + TARGET * height;
             let coinbase = CoinbaseTransaction::new(
                 height,
                 vec![Note::new(params.initial_reward, miner.public_key())],
@@ -158,28 +161,36 @@ fn solve(mut candidate: BlockHeader) -> BlockHeader {
 /// `difficulty_of` is asked for the difficulty of each header, given the window
 /// as it stands under it, so a forger that states whatever it likes and one
 /// that states what the retarget demands are the same construction with one
-/// closure changed. Everything else is built the way the rules build it: the
+/// closure changed. `gap_of` dates each header after the one below, given the
+/// difficulty it states. Everything else is built the way the rules build it: the
 /// forest is the honest one below the anchor with the anchor and then each new
 /// header folded in, and each header states the forest it follows.
-fn forge<F>(chain: &Chain, count: usize, gap: u64, difficulty_of: F) -> Vec<BlockHeader>
+fn forge<F, G>(chain: &Chain, count: usize, gap_of: G, difficulty_of: F) -> Vec<BlockHeader>
 where
     F: Fn(&[HeaderSummary]) -> u64,
+    G: Fn(u64) -> u64,
 {
-    forge_over(chain, ANCHOR, &recent(chain), count, gap, difficulty_of)
+    forge_over(chain, ANCHOR, &recent(chain), count, gap_of, difficulty_of)
+}
+
+/// What the retarget demands of the header above the last one in `window`.
+fn demanded(window: &[HeaderSummary]) -> u64 {
+    next_difficulty(window.last().unwrap(), params().origin(), TARGET)
 }
 
 /// The same, on any anchor and any run of headers below it, which is what a
 /// chain younger than the window hands over.
-fn forge_over<F>(
+fn forge_over<F, G>(
     chain: &Chain,
     at: usize,
     recent: &[BlockHeader],
     count: usize,
-    gap: u64,
+    gap_of: G,
     difficulty_of: F,
 ) -> Vec<BlockHeader>
 where
     F: Fn(&[HeaderSummary]) -> u64,
+    G: Fn(u64) -> u64,
 {
     let params = params();
     let anchor = chain.headers[at];
@@ -193,7 +204,7 @@ where
 
     for _ in 0..count {
         let difficulty = difficulty_of(&window);
-        clock += gap;
+        clock += gap_of(difficulty);
         let header = solve(BlockHeader {
             version: BLOCK_VERSION,
             network: params.network,
@@ -259,7 +270,7 @@ fn an_honest_run_at_a_real_difficulty_ties_the_ledger_to_its_tip() {
 fn a_burial_mined_at_the_floor_is_refused_by_the_difficulty_rule_and_not_by_the_forest() {
     let chain = honest();
     let anchor = chain.headers[ANCHOR];
-    let run = forge(chain, RUN, TARGET, |_| MIN_DIFFICULTY);
+    let run = forge(chain, RUN, |_| TARGET, |_| MIN_DIFFICULTY);
     let tip = *run.last().unwrap();
 
     assert_eq!(tip.height, 175 + RUN as u64);
@@ -318,20 +329,20 @@ fn a_burial_mined_at_the_floor_is_refused_by_the_difficulty_rule_and_not_by_the_
     );
 }
 
-/// A chain younger than the window the rules read hands over what it has, and
+/// A chain younger than the window a node keeps hands over what it has, and
 /// the receiver judges the run on the window as it fills.
 ///
 /// Every other fixture here anchors a hundred and seventy five blocks in, so
-/// the window is already full before the run starts and stays full: the slide
-/// that keeps it at `RECENT_HEADERS` takes one header off for every one it
-/// puts on, and trimming a header early or late is the same window. On a young
-/// chain it is not. The window starts short, grows as the run is walked, and
-/// what the retarget reads changes with it, so a slide that trims one header
-/// early answers a difficulty the miner was never asked for and refuses an
-/// honest run.
+/// the window is already full before the run starts and stays full. On a
+/// young chain it starts short and grows as the run is walked. The retarget
+/// reads only the header below each one, and the median the last eleven, so
+/// what this holds is that a short window judges an honest run the way the
+/// chain judged it: a window started from the wrong header, or one that lost
+/// the anchor, would date or price the run against a parent the miner never
+/// built on.
 ///
 /// That is the shape of a newly opened network, where a newcomer arrives
-/// before the chain is as old as its own retarget window.
+/// before the chain is as old as the window a node keeps.
 #[test]
 fn a_chain_younger_than_the_window_is_judged_on_the_window_as_it_fills() {
     let chain = honest();
@@ -345,11 +356,9 @@ fn a_chain_younger_than_the_window_is_judged_on_the_window_as_it_fills() {
     );
     let anchor = chain.headers[at];
 
-    // Dated at twice the target, so the retarget really moves and what the
-    // window holds decides by how much.
-    let run = forge_over(chain, at, &recent, 25, TARGET * 2, |window| {
-        next_difficulty(window, TARGET)
-    });
+    // Dated at twice the target, so the retarget really moves, a little
+    // further behind the schedule at every header.
+    let run = forge_over(chain, at, &recent, 25, |_| TARGET * 2, demanded);
     let tip = *run.last().unwrap();
     assert!(
         recent.len() + run.len() > RECENT_HEADERS,
@@ -403,25 +412,45 @@ fn a_run_of_exactly_the_ceiling_is_not_refused_for_its_length() {
 ///
 /// A forger does not have to state a difficulty nobody demanded. It can date
 /// its run far enough apart that the retarget lowers the difficulty for it, one
-/// quarter at a time, and reach the floor honestly after six headers. Every
-/// header then states exactly what the rules demand of it, and `check_buried`
-/// takes the run.
+/// quarter at a time, and reach the floor honestly after six headers dated two
+/// half lives apart. Every header then states exactly what the rules demand of
+/// it, and `check_buried` takes the run.
 ///
 /// So what the rule buys is not that a burial is expensive in hashes. It is
-/// that a burial cheap in hashes is expensive in time: the retarget only lowers
-/// for a timeline that really advanced, each gap counts for at most six times
-/// the target, and the run has to be dated across the whole of it. The two
-/// numbers this prints are the whole of the answer, and the second one is the
-/// defence: a tip that far ahead of the fork cannot be produced at once, the
-/// honest chain goes on working through it, and what the sampling weighs is
-/// still 721 920 against everything the honest chain did meanwhile.
+/// that a burial cheap in hashes is expensive in time. The retarget lowers the
+/// difficulty only for a chain behind its schedule, by half for every half
+/// life behind, and holds it at the floor only while every block after that
+/// states a target of time: 4 096 is twelve halvings, so the floor sits eleven
+/// half lives behind the schedule, and every header the run carries has to be
+/// dated across all of it. The two numbers this prints are the whole of the
+/// answer, and the second one is the defence: a tip that far ahead of the fork
+/// cannot be produced at once, the honest chain goes on working through it,
+/// and what the sampling weighs is still a few thousand hashes against
+/// everything the honest chain did meanwhile.
+///
+/// Under the moving average this rule replaced, each gap counted for at most
+/// six targets, so the same walk took 1 024 gaps of six targets; here it takes
+/// six long ones and a target for each of the rest, which is less time but
+/// never less than the bound asserted below, whatever the forger's spacing.
 #[test]
 fn a_burial_walked_down_to_the_floor_costs_time_instead_of_hashes() {
     let chain = honest();
     let anchor = chain.headers[ANCHOR];
-    let run = forge(chain, RUN, CEILING, |window| {
-        next_difficulty(window, TARGET)
-    });
+    // Each header above the floor dated late enough that the one after it
+    // falls by the whole bound, and each one at the floor a target after the
+    // last, which is the least that keeps it there.
+    let run = forge(
+        chain,
+        RUN,
+        |difficulty| {
+            if difficulty > MIN_DIFFICULTY {
+                FALL
+            } else {
+                TARGET
+            }
+        },
+        demanded,
+    );
     let tip = *run.last().unwrap();
 
     check_buried(
@@ -444,14 +473,22 @@ fn a_burial_walked_down_to_the_floor_costs_time_instead_of_hashes() {
         u128::from(MINEABLE_DIFFICULTY) * RUN as u128,
         seconds / 86_400
     );
-    assert_eq!(steps[0], MINEABLE_DIFFICULTY);
+    assert_eq!(
+        steps,
+        [MINEABLE_DIFFICULTY, 1_024, 256, 64, 16, 4, 1, 1],
+        "a quarter a header down to the floor"
+    );
     assert_eq!(run.last().unwrap().difficulty, MIN_DIFFICULTY);
     assert!(
         hashes * 10 < u128::from(MINEABLE_DIFFICULTY) * RUN as u128,
         "the hashes are the part the rule does not buy back"
     );
+    // The floor holds only below a difficulty of two, eleven half lives under
+    // the anchor's 4 096, so the last header's parent stands at least that far
+    // behind the schedule the anchor was on, and every header between was
+    // dated a target on top of it.
     assert!(
-        seconds >= (RUN as u64) * CEILING,
+        seconds >= (RUN as u64 - 1) * TARGET + 11 * HALF_LIFE,
         "and the time is the part it does: {seconds} seconds over {RUN} blocks"
     );
 }

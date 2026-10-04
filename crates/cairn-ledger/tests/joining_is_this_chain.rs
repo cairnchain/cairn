@@ -47,7 +47,8 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::{NetworkId, Note};
-use cairn_ledger::pow::{DIFFICULTY_WINDOW, RECENT_HEADERS};
+use cairn_ledger::pow::RECENT_HEADERS;
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError, SAMPLES,
 };
@@ -75,6 +76,9 @@ const FOREIGN: NetworkId = NetworkId::new(0xDEAD_BEEF);
 fn mined_under() -> ConsensusParams {
     let mut params = ConsensusParams::testnet().with_burial(BURIAL);
     params.genesis_difficulty = OPENING;
+    // The network opens when its first block is dated, as every published
+    // one does, which is also where the retarget's schedule starts.
+    params.opens_at = CLOCK + params.target_block_time;
     params
 }
 
@@ -144,7 +148,7 @@ fn honest_join() -> Joined {
         })
         .collect();
     let deepest = samples.iter().map(|s| s.header.height).max().unwrap();
-    let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+    let from = usize::try_from(deepest.saturating_sub(BELOW_THE_PINNED)).unwrap();
     let below = tip.height - 1;
     let start = SampledStart {
         genesis: archive.prove_in(0, tip.height).unwrap(),
@@ -331,6 +335,13 @@ fn a_header_dated_at_the_opening_itself_is_weighed() {
         .map(|header| header.timestamp)
         .min()
         .expect("the weighing carries headers");
+    // The opening is also where the retarget's schedule starts, so it can be
+    // moved only to where it already is: the draw over a chain this short
+    // opens the first block, and the first block is dated at the opening.
+    assert_eq!(
+        earliest, joined.first.timestamp,
+        "the weighing does not open the first block, so this asks nothing"
+    );
 
     let mut opening = mined_under();
     opening.opens_at = earliest;

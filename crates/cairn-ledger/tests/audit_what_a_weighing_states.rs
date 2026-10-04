@@ -116,8 +116,8 @@ fn weighing(chain: &Chain, tip: BlockHeader) -> Option<SampledStart> {
         });
     }
     let pinned = samples.iter().map(|s| s.header.height).max().unwrap();
-    let from = usize::try_from(pinned.saturating_sub(cairn_ledger::pow::DIFFICULTY_WINDOW as u64))
-        .unwrap();
+    let from =
+        usize::try_from(pinned.saturating_sub(cairn_ledger::sampling::BELOW_THE_PINNED)).unwrap();
     let parent = tip.height - 1;
     let mut tail = chain.below[from..].to_vec();
     tail.push(tip);

@@ -424,11 +424,12 @@ fn the_network_a_rule_set_names_is_the_one_its_first_block_belongs_to() {
 /// reader's clock, and no further.
 ///
 /// The allowance was two hours on every network, whatever its block time:
-/// twenty of the retarget's clamp ceilings on testnet and two hundred and
-/// forty on devnet. A minority dating its blocks that far ahead, or an honest
-/// miner an hour or two fast, pulled the median past real time and made the
-/// retarget read honest blocks as arriving in no time, which
-/// `retarget_timewarp.rs` measures. A number written once for every network
+/// twenty of the clamp ceilings the moving average then read on testnet and
+/// two hundred and forty on devnet. A minority dating its blocks that far
+/// ahead, or an honest miner an hour or two fast, pulled the median past real
+/// time and made that retarget read honest blocks as arriving in no time. Ten
+/// blocks is a sixth of the present retarget's half life on every network,
+/// which `retarget_timewarp.rs` measures. A number written once for every network
 /// was the shape of the defect, so the relation is asked of each of them.
 #[test]
 fn every_network_lets_a_timestamp_run_ten_blocks_ahead_and_no_further() {
@@ -481,4 +482,36 @@ fn every_network_can_be_handed_the_ledger_its_rules_allow() {
             "{name} keeps a maturity window the handover's decoder refuses"
         );
     }
+}
+
+/// The retarget's schedule starts at each network's own first block.
+///
+/// The schedule is read from the rules, the opening moment and the opening
+/// difficulty, and never from a peer, so a node that joined by handover and
+/// never held the first block asks every block what a node that replayed from
+/// it asks. That is only the first block's schedule if the two numbers are the
+/// first block's, which is what this holds for every network that has one: a
+/// first block reminted without its rules moving, or the reverse, would start
+/// the schedule somewhere the chain never was, and every block after it would
+/// be asked a difficulty off by the gap.
+#[test]
+fn the_retargets_schedule_starts_at_each_networks_pinned_first_block() {
+    let mut checked = 0;
+    for name in NAMED {
+        let Some(params) = ConsensusParams::for_network(name) else {
+            continue;
+        };
+        let first = cairn_ledger::genesis::block(params.network)
+            .unwrap_or_else(|| panic!("{name} answers and has no first block"));
+        assert_eq!(
+            params.origin(),
+            cairn_ledger::pow::Origin {
+                timestamp: first.header.timestamp,
+                difficulty: first.header.difficulty,
+            },
+            "{name}'s schedule does not start at its first block"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 2, "only {checked} networks were asked");
 }

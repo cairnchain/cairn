@@ -53,7 +53,8 @@
 use cairn_accumulator::forest::{node_hash, Forest, ForestProof};
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::NetworkId;
-use cairn_ledger::pow::{work_of, DIFFICULTY_WINDOW, MIN_DIFFICULTY};
+use cairn_ledger::pow::{work_of, MIN_DIFFICULTY};
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start, draw, levels_for, levels_of, seed_of, work_before, Sample, SampledStart,
     StartError, MOST_TAIL, SAMPLES, SHALLOWEST,
@@ -243,7 +244,7 @@ impl Padded {
             .map(|sample: &Sample| sample.header.height)
             .max()
             .unwrap_or(0);
-        let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+        let from = usize::try_from(deepest.saturating_sub(BELOW_THE_PINNED)).unwrap();
         let tail = self.shown[from..].to_vec();
 
         SampledStart {
@@ -460,7 +461,7 @@ impl Board {
     /// count has refused its own weighing.
     fn weighable(&self) -> bool {
         let band = self.total >> self.levels.min(127);
-        band / REAL + u128::from(DIFFICULTY_WINDOW as u64) < u128::from(MOST_TAIL)
+        band / REAL + u128::from(BELOW_THE_PINNED) < u128::from(MOST_TAIL)
     }
 
     /// The share of draws landing in `[from, to)`.
@@ -491,7 +492,7 @@ fn miss_log2(hit: f64) -> f64 {
 fn best_miss(board: &Board, share: f64) -> f64 {
     let sigma = share / (1.0 - share);
     let total = board.total;
-    let floor = (total >> board.levels.min(127)) + u128::from(DIFFICULTY_WINDOW as u64 + 1) * REAL;
+    let floor = (total >> board.levels.min(127)) + u128::from(BELOW_THE_PINNED + 1) * REAL;
     let mut best = f64::NEG_INFINITY;
     for level in 0..board.levels {
         let shallow = total >> level.saturating_add(1).min(127);
@@ -801,7 +802,7 @@ fn swept(board: &Board, share: f64, steps_per_doubling: u32) -> f64 {
         return 0.0;
     }
     let total = board.total;
-    let floor = (total >> board.levels.min(127)) + u128::from(DIFFICULTY_WINDOW as u64 + 1) * REAL;
+    let floor = (total >> board.levels.min(127)) + u128::from(BELOW_THE_PINNED + 1) * REAL;
     let mut best = f64::NEG_INFINITY;
     let mut consider = |shallow: u128| {
         if shallow < floor {

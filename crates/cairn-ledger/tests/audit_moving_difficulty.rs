@@ -47,8 +47,6 @@ use cairn_ledger::LedgerState;
 const NOW: u64 = 2_000_000_000;
 const ATTEMPTS: u64 = 1 << 24;
 const TARGET: u64 = 60;
-/// The first timestamp of every chain here.
-const CLOCK: u64 = 1_000;
 
 /// A depth a test can mine to, with the maturity following it the way a real
 /// network sets the two.
@@ -58,20 +56,20 @@ fn params() -> ConsensusParams {
     ConsensusParams::mineable_network(BURIAL)
 }
 
-/// Seconds between blocks, in runs: steady, four times too fast, four times
+/// Seconds between blocks, in runs: steady, four times too fast, ten times
 /// too slow, steady again.
 ///
-/// Chosen by simulating the retarget rather than by trying numbers on a chain.
-/// The fast run doubles the difficulty and the slow run halves it back through
-/// the opening, and neither runs away: a spacing under the target is a feedback
-/// loop, since the retarget raises the difficulty and the fixture goes on
-/// producing blocks just as fast, so a long fast run climbs without bound and
-/// stops being mineable. Twenty four blocks at half the target is where it was
-/// stopped, and it costs about 369 000 hashes for the whole chain.
+/// Chosen from the schedule rather than by trying numbers on a chain. A
+/// quarter of the target puts the chain forty five seconds further ahead of
+/// its schedule a block, so forty eight of them stand thirty six minutes
+/// ahead and are asked about one and a half times the opening; ten targets
+/// put it nine targets behind a block, so twenty four of them stand three half
+/// lives below where the fast run left it, an eighth. Neither runs away, and
+/// the whole chain costs about four hundred thousand hashes.
 const SCHEDULE: [(u64, usize); 4] = [
     (TARGET, 12),
-    (TARGET / 2, 24),
-    (TARGET * 4, 24),
+    (TARGET / 4, 48),
+    (TARGET * 10, 24),
     (TARGET, 12),
 ];
 
@@ -92,12 +90,17 @@ fn mine_at(params: &ConsensusParams, spacings: &[u64]) -> (LedgerState, Vec<Bloc
     let mut state = LedgerState::new();
     let mut blocks = Vec::with_capacity(spacings.len());
     let mut judged = Vec::with_capacity(spacings.len());
-    let mut clock = CLOCK;
+    let mut clock = params.opens_at;
     let mut parent_difficulty = None;
 
     for spacing in spacings {
         let height = state.next_height().unwrap();
-        clock += spacing;
+        // The first block is dated at the network's opening, where the
+        // retarget's schedule starts, so a chain on schedule after it is asked
+        // the opening difficulty.
+        if height > 0 {
+            clock += spacing;
+        }
         let demanded = expected_difficulty(&state, params);
         let coinbase = CoinbaseTransaction::new(
             height,
@@ -292,8 +295,10 @@ fn the_shape_every_fixture_had_could_only_ever_be_asked_for_the_floor() {
     }
 
     // And the direction the floor does not stop, so that the sentence above is
-    // a fact about the fixtures rather than a claim about the rule.
-    let (_state, _blocks, fast) = mine_at(&params, &[TARGET / 4; 16]);
+    // a fact about the fixtures rather than a claim about the rule. A quarter
+    // of the target gains forty five seconds of schedule a block, so the
+    // floor's edge, a half life ahead, is passed at the eighty first.
+    let (_state, _blocks, fast) = mine_at(&params, &[TARGET / 4; 96]);
     assert!(
         fast.iter().any(|step| step.difficulty > MIN_DIFFICULTY),
         "the floor is a floor, not a ceiling"

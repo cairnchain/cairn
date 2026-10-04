@@ -13,7 +13,8 @@ use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
-use cairn_ledger::pow::{meets_target, work_of, DIFFICULTY_WINDOW};
+use cairn_ledger::pow::{meets_target, work_of};
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start, check_start_with_count, covering, draw, levels_of, open_start, seed_of,
     work_before, Sample, SampledStart, StartError, SAMPLES,
@@ -125,7 +126,7 @@ impl Keeper {
             .map(|sample: &Sample| sample.header.height)
             .max()
             .unwrap_or(tip.height);
-        let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+        let from = usize::try_from(deepest.saturating_sub(BELOW_THE_PINNED)).unwrap();
         let tail = self.headers[from..=usize::try_from(tip.height).unwrap()].to_vec();
         SampledStart {
             genesis: ForestProof::default(),
@@ -623,7 +624,8 @@ fn a_chain_padded_out_with_weightless_blocks_is_refused() {
             proof: padded.prove(stand_on.height).unwrap(),
         }),
         // The forger's best run: the honest headers below, then its own.
-        tail: keeper.headers[keeper.headers.len() - 1 - DIFFICULTY_WINDOW..]
+        tail: keeper.headers
+            [keeper.headers.len() - 1 - usize::try_from(BELOW_THE_PINNED).unwrap()..]
             .iter()
             .copied()
             .chain([stand_on, forged])

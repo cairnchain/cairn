@@ -70,10 +70,11 @@ impl NetworkId {
     /// tip has to open the header it was built on, and the run of headers
     /// between a handed-over ledger and the tip has to travel with it and be
     /// checked block by block, so weight can no longer be borrowed from a
-    /// chain somebody else mined. And the retarget reads solve times as signed
-    /// values along a timeline of its own, so a miner dating its blocks ahead
-    /// no longer takes six minutes from the measurement and gives one second
-    /// back; past a sixth of the hash rate that had no equilibrium at all.
+    /// chain somebody else mined. And the retarget, a moving average then, came
+    /// to read solve times as signed values along a timeline of its own, so a
+    /// miner dating its blocks ahead no longer took six minutes from the
+    /// measurement and gave one second back; past a sixth of the hash rate
+    /// that had had no equilibrium at all.
     ///
     /// The second of those changes what difficulty every block must carry, so
     /// every block mined under the old rule is invalid under this one and the

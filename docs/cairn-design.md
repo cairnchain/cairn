@@ -5,11 +5,11 @@ stylesheet: cairn-design.css
 strap:
   Une monnaie que *ton téléphone* vérifie lui-même : aujourd'hui, et dans
   trente ans.
-byline: Document de conception · v0.17
-byline: 26 septembre 2026
+byline: Document de conception · v0.18
+byline: 3 octobre 2026
 byline: Nom de code (provisoire)
 numerals: roman
-footer: Cairn · document de conception v0.17
+footer: Cairn · document de conception v0.18
 footer: Statut : prêt à être lancé en public
 footer: Rien de ce document n'est un conseil en investissement
 ---
@@ -221,7 +221,7 @@ démarrage du code.
   <li class="done"><div><b>Le cœur<span class="state">Fait</span></b><span>Billets, signatures, blocs, validation. Écrit en Rust, 50 tests au vert : une chaîne produit des blocs, les vérifie, refuse une double dépense, une signature falsifiée, une création de valeur, un bloc rattaché au mauvais parent.</span></div></li>
   <li class="done"><div><b>Le sceau<span class="state">Fait</span></b><span>L'accumulateur et les preuves d'appartenance et d'absence. Un million de billets tombés tiennent dans au plus soixante-quatre empreintes de 32 octets ; une preuve pèse 586 octets en moyenne. Une preuve périmée cesse de fonctionner, une preuve ne peut pas être rejouée pour un billet voisin, et l'empreinte ne dépend que du contenu, jamais de l'ordre des opérations.</span></div></li>
   <li class="done"><div><b>Les deux tiroirs<span class="state">Fait</span></b><span>Le sceau est branché : le tiroir plafonné que les nœuds gardent, la cave qui ne vit que dans l'empreinte, la descente automatique du plus ancien, et la dépense sur preuve pour ce qui est descendu. Un billet qui remonte de la cave revient dans le tiroir. L'empreinte du bloc engage les deux tiroirs et leurs effectifs, donc la frontière elle-même est vérifiable.</span></div></li>
-  <li class="done"><div><b>Le consensus et l'arbitrage<span class="state">Fait</span></b><span>Minage, difficulté qui se réajuste en quelques blocs, horodatage adossé à la médiane des blocs récents, et la règle qui départage deux versions concurrentes de l'histoire. Chaque bloc appliqué inscrit son propre inverse, donc revenir en arrière coûte les blocs déplacés et non toute l'histoire. Un changement de branche est tout ou rien : un bloc invalide découvert en cours de route ramène le nœud exactement là où il était.</span></div></li>
+  <li class="done"><div><b>Le consensus et l'arbitrage<span class="state">Fait</span></b><span>Minage, difficulté qui suit un calendrier fixé au premier bloc (ASERT, demi-vie d'une heure) et répond à une baisse de moitié du débit en trois heures environ sans qu'une rafale de débit loué puisse geler la chaîne, horodatage adossé à la médiane des blocs récents, et la règle qui départage deux versions concurrentes de l'histoire. Chaque bloc appliqué inscrit son propre inverse, donc revenir en arrière coûte les blocs déplacés et non toute l'histoire. Un changement de branche est tout ou rien : un bloc invalide découvert en cours de route ramène le nœud exactement là où il était.</span></div></li>
   <li class="done"><div><b>Le réseau<span class="state">Fait</span></b><span>Le transport entre machines, la présentation entre pairs, la propagation des blocs et la synchronisation d'un nœud qui démarre de zéro. Cinq nœuds branchés en ligne se transmettent une chaîne entière et un bloc neuf remonte la ligne de proche en proche. Tout ce qui décide quoi que ce soit est écrit pour être testable sans réseau ; la couche qui transporte, elle, ne décide de rien.</span></div></li>
   <li class="done"><div><b>Tenir dans la durée<span class="state">Fait</span></b><span>Un nœud écrit sa chaîne sur disque et la rejoue au démarrage, en la revérifiant plutôt qu'en faisant confiance à son propre disque. Et il trouve ses voisins en les demandant à ceux qu'il a déjà : une seule adresse suffit pour rejoindre un réseau, et plus aucune pour y revenir. Un nœud est joignable à l'adresse d'où sa connexion arrive, jamais à celle qu'il prétend.</span></div></li>
   <li class="done"><div><b>Les exécutables<span class="state">Fait</span></b><span>Un nœud et un portefeuille, en ligne de commande. Le portefeuille ne demande pas à un serveur ce qu'il possède : il rejoint le réseau, vérifie la chaîne lui-même et lit son solde dans le grand livre qu'il vient de valider. Les règles de consensus se choisissent en nommant un réseau et ne se règlent pas une par une. Une transaction attend maintenant dans une réserve qu'un bloc l'emporte, ce qui permet à quelqu'un de payer quelqu'un d'autre. Reste la version téléphone.</span></div></li>
