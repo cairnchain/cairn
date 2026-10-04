@@ -15,6 +15,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use cairn_crypto::PublicKey;
+use cairn_ledger::genesis;
 use cairn_ledger::note::{Address, NetworkId};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::{seeds, KEEP_BLOCK_BYTES};
@@ -620,12 +621,8 @@ pub(crate) fn describe(options: &Options) -> String {
         let _ = writeln!(text, "starts from  {genesis}");
         // The date beside the number: a network is installed ahead of its
         // opening, and this is where an operator reads when that is.
-        let _ = writeln!(
-            text,
-            "opens at     {}, {}",
-            options.params.opens_at,
-            cairn_ledger::genesis::when(options.params.opens_at)
-        );
+        let opens = options.params.opens_at;
+        let _ = writeln!(text, "opens at     {opens}, {}", genesis::when(opens));
     }
     let _ = writeln!(text, "data         {}", options.data.display());
     let _ = writeln!(text, "listen       {}", options.listen);

@@ -290,10 +290,7 @@ case "${listen##*:}" in
     "" | *[!0-9]*) echo "$program: $listen is not an address" >&2; exit 1 ;;
 esac
 echo "$program 0.0.0"
-echo "network      $network (0x00000000)"
-if [ -n "${starts_from:-}" ]; then
-    echo "starts from  $starts_from"
-fi
+echo "network      $network (0x00000000)"; [ -z "${starts_from:-}" ] || echo "starts from  $starts_from"
 if [ -n "$mine" ] && [ "$mine" != off ]; then
     case "$mine" in
         cairn1* | tcairn1* | dcairn1*) address=$mine ;;
@@ -383,9 +380,8 @@ fi"#;
         /// The first block the build `which` starts its network from.
         fn starts_from(&self, which: &str, first: &str) {
             let path = self.root.join(format!("{which}.conf"));
-            let mut conf = fs::read_to_string(&path).unwrap();
-            conf.push_str(&format!("starts_from={first}\n"));
-            fs::write(path, conf).unwrap();
+            let conf = fs::read_to_string(&path).unwrap();
+            fs::write(path, format!("{conf}starts_from={first}\n")).unwrap();
         }
 
         /// A unit already installed, whose command line is `arguments`.
