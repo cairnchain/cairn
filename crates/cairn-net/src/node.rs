@@ -615,6 +615,62 @@ pub enum NodeError {
          node needs a directory of its own, because this one is that network's"
     )]
     OtherNetwork { file: &'static str, because: String },
+    /// What is on this disk is the chain of a network this build no longer
+    /// runs.
+    ///
+    /// [`NodeError::OtherNetwork`] advises starting the node for the network
+    /// the directory holds, which a build without that network's rules cannot
+    /// do: every testnet-7 wallet started under a testnet-8 build was told to.
+    #[error(
+        "{file} holds the chain of {network}, a retired network this build no longer runs: \
+         {because}. Nothing on the disk has been changed, and nothing on it carries over to \
+         the networks this build runs. Move the directory aside or delete it, and start \
+         this node on an empty one"
+    )]
+    RetiredNetwork {
+        file: &'static str,
+        network: String,
+        because: String,
+    },
+    /// What is on this disk is this network's chain from a first block other
+    /// than the one this build pins, dated no earlier than it.
+    ///
+    /// A network is minted again under the same marker when a restart's
+    /// provisional first block is replaced by the one dated at the announced
+    /// opening (`remint`). The replay refused the first record as another
+    /// first block, took that for a fault in the record, and cut the log to
+    /// nothing: a machine moved from the build of one minting to the build of
+    /// the other lost its chain in silence.
+    #[error(
+        "{file} holds {network} from another first block than the one this build starts \
+         from: {because}. It is the same network, minted again, and that directory was \
+         written by a build of the other minting. Nothing on the disk has been changed. \
+         Start it with the build that pins the first block it holds, which picks the chain \
+         up where it was left; if this build's minting is the one meant, nothing on it \
+         carries over, so move the directory aside or delete it and start this node on an \
+         empty one"
+    )]
+    AnotherFirstBlock {
+        file: &'static str,
+        network: String,
+        because: String,
+    },
+    /// What is on this disk is this network as it was before it was minted
+    /// again: its first block is dated before the one this build pins.
+    ///
+    /// Refused as dated before the network opened, which is right, and once
+    /// said to be another network's chain, which is not.
+    #[error(
+        "{file} holds {network} as it was before the network was minted again: {because}. \
+         Nothing on the disk has been changed, and nothing on it carries over, because \
+         {network} starts again from the first block this build pins. Move the directory \
+         aside or delete it, and start this node on an empty one"
+    )]
+    EarlierFirstBlock {
+        file: &'static str,
+        network: String,
+        because: String,
+    },
     /// The ledger this node starts from is there and cannot be used.
     ///
     /// Deliberately fatal, and deliberately before anything is written. The
@@ -4731,7 +4787,9 @@ impl Node {
                 // back, and the blocks it deleted were valid ones some other
                 // build had written.
                 if let Some(error) = refused {
-                    if let Some(stop) = about_the_reader(height, applied == 0, &error) {
+                    if let Some(stop) =
+                        about_the_reader(height, applied == 0, &error, params.network)
+                    {
                         return Err(stop);
                     }
                 }
@@ -8777,7 +8835,8 @@ fn read_handed_ledger(
             "{HANDED_LEDGER} is not a ledger this build can read: {error}"
         ))
     })?;
-    let state = accept(&handover, params).map_err(|error| ledger_refused(&error))?;
+    let state =
+        accept(&handover, params).map_err(|error| ledger_refused(&error, params.network))?;
     let anchor = handover.at.height;
     Ok(Some((
         state,
@@ -8796,7 +8855,7 @@ fn read_handed_ledger(
 /// "which costs the stored blocks", and a copy is refused the same way while
 /// deleting it cures nothing: for another network's directory it costs that
 /// network's node its blocks.
-fn ledger_refused(error: &HandoverError) -> NodeError {
+fn ledger_refused(error: &HandoverError, network: NetworkId) -> NodeError {
     match *error {
         HandoverError::SoftwareTooOld { .. } | HandoverError::WrongVersion { .. } => {
             NodeError::OtherRules {
@@ -8810,16 +8869,27 @@ fn ledger_refused(error: &HandoverError) -> NodeError {
             height,
             expected,
             found,
-        } => NodeError::OtherNetwork {
-            file: HANDED_LEDGER,
-            because: format!(
+        } => not_this_network(
+            HANDED_LEDGER,
+            found,
+            format!(
                 "the header at {height} belongs to {found}, and this node was started for \
                  {expected}"
             ),
-        },
-        HandoverError::BeforeTheNetworkOpened { .. } => NodeError::OtherNetwork {
+        ),
+        // The network is checked first, so this is a header of the network
+        // this node runs, dated before the first block this build pins.
+        HandoverError::BeforeTheNetworkOpened {
+            height,
+            opens_at,
+            found,
+        } => NodeError::EarlierFirstBlock {
             file: HANDED_LEDGER,
-            because: error.to_string(),
+            network: network.to_string(),
+            because: format!(
+                "the header at {height} is dated {found}, before {opens_at}, when the first \
+                 block this build pins opens it"
+            ),
         },
         _ => NodeError::UnusableLedger {
             because: format!("{HANDED_LEDGER} was refused: {error}"),
@@ -8832,13 +8902,21 @@ fn ledger_refused(error: &HandoverError) -> NodeError {
 ///
 /// A build without the rules for a height, which is `SoftwareTooOld` where
 /// the schedule names the height and `UnsupportedVersion` where it does not;
-/// and the first record of the log belonging to another network, which is one
-/// start under a mistyped `--network`. Only the first: a record further up
-/// the log that names another network is not a directory of another network,
-/// it is a record that changed, and it is refused like any other. Asked only
-/// of a record the store stands behind: one it will not is damage, and is
-/// left on the disk before this is reached (see `stands_behind`).
-fn about_the_reader(height: u64, first: bool, error: &ChainError) -> Option<NodeError> {
+/// the first record of the log belonging to another network, which is one
+/// start under a mistyped `--network`; and the first record being another
+/// first block of this same network, which is a directory written by a build
+/// of another minting of it (see [`NodeError::AnotherFirstBlock`]). Only the
+/// first: a record further up the log that names another network is not a
+/// directory of another network, it is a record that changed, and it is
+/// refused like any other. Asked only of a record the store stands behind:
+/// one it will not is damage, and is left on the disk before this is reached
+/// (see `stands_behind`).
+fn about_the_reader(
+    height: u64,
+    first: bool,
+    error: &ChainError,
+    network: NetworkId,
+) -> Option<NodeError> {
     let ChainError::InvalidBlock { source, .. } = error else {
         return None;
     };
@@ -8854,13 +8932,48 @@ fn about_the_reader(height: u64, first: bool, error: &ChainError) -> Option<Node
                  version {BLOCK_VERSION}"
             ),
         }),
-        BlockError::WrongNetwork { .. } | BlockError::BeforeTheNetworkOpened { .. } if first => {
-            Some(NodeError::OtherNetwork {
+        BlockError::WrongNetwork { found, .. } if first => Some(not_this_network(
+            BLOCK_LOG,
+            *found,
+            format!("the block at height {height}: {source}"),
+        )),
+        // The network is checked before the date, so this is a block of the
+        // network this node runs, dated before the first block this build
+        // pins: the network before it was minted again.
+        BlockError::BeforeTheNetworkOpened { opens_at, found } if first => {
+            Some(NodeError::EarlierFirstBlock {
                 file: BLOCK_LOG,
-                because: format!("the block at height {height}: {source}"),
+                network: network.to_string(),
+                because: format!(
+                    "the block at height {height} is dated {found}, before {opens_at}, when the \
+                     first block this build pins opens it"
+                ),
+            })
+        }
+        BlockError::WrongGenesis { expected, found } if first => {
+            Some(NodeError::AnotherFirstBlock {
+                file: BLOCK_LOG,
+                network: network.to_string(),
+                because: format!("its first block is {found}, and this build's is {expected}"),
             })
         }
         _ => None,
+    }
+}
+
+/// What a start says about a directory whose records belong to `found`.
+///
+/// A network this build runs is one the node can be started for, which is
+/// what [`NodeError::OtherNetwork`] says. A network it names and has no rules
+/// for is retired, and that advice cannot be followed.
+fn not_this_network(file: &'static str, found: NetworkId, because: String) -> NodeError {
+    match found.name() {
+        Some(name) if ConsensusParams::for_network(name).is_none() => NodeError::RetiredNetwork {
+            file,
+            network: name.to_owned(),
+            because,
+        },
+        _ => NodeError::OtherNetwork { file, because },
     }
 }
 
@@ -10528,6 +10641,24 @@ mod disk_and_headers {
             .to_string(),
             NodeError::OtherNetwork {
                 file: BLOCK_LOG,
+                because: because.clone(),
+            }
+            .to_string(),
+            NodeError::RetiredNetwork {
+                file: BLOCK_LOG,
+                network: "testnet-7".to_owned(),
+                because: because.clone(),
+            }
+            .to_string(),
+            NodeError::AnotherFirstBlock {
+                file: BLOCK_LOG,
+                network: "testnet-8".to_owned(),
+                because: because.clone(),
+            }
+            .to_string(),
+            NodeError::EarlierFirstBlock {
+                file: BLOCK_LOG,
+                network: "testnet-8".to_owned(),
                 because,
             }
             .to_string(),

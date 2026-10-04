@@ -181,6 +181,12 @@ name_of() {
     (cd / && "$1" --check --network "$2" 2>/dev/null) | awk '/^network/ {print $2; exit}'
 }
 
+# The first block a build starts a network from, for the reason `install.sh`
+# gives beside the same lines: the same name can be a network minted again.
+first_block_of() {
+    (cd / && "$1" --check --network "$2" 2>/dev/null) | awk '/^starts from/ {print $3; exit}'
+}
+
 # A test network gets retired when a rule has to change, and its name stays
 # written in the unit file of every machine that was running it. Carrying a
 # setting forward is right until the build stops accepting it, and then it is
@@ -239,7 +245,7 @@ check_the_line() {
 
 # Moves the chain and the index of a network this machine is leaving out of the
 # way of the one it is joining, and keeps them, for the reason `install.sh`
-# gives beside the same lines.
+# gives beside the same lines, and with the same arguments.
 set_aside() {
     if [ ! -d "$1" ] || [ -z "$(ls -A "$1")" ]; then
         return 0
@@ -251,13 +257,13 @@ set_aside() {
     systemctl stop cairn-explorer 2>/dev/null || true
     if ! mv "$1" "$kept"; then
         systemctl start cairn-explorer 2>/dev/null || true
-        echo "data     $1 holds $2's chain and this machine is moving to $3, and it" >&2
+        echo "data     $1 holds $3 and this machine is moving to $4, and it" >&2
         echo "         could not be moved aside to $kept. Nothing else is changed;" >&2
         echo "         move or empty it yourself and run this again." >&2
         exit 1
     fi
     mkdir -p "$1"
-    echo "data     $2's chain is kept in $kept: an explorer on $3 starts from nothing"
+    echo "data     $3 is kept in $kept: an explorer on $4 starts from nothing"
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -312,11 +318,13 @@ the_settings
 # The network the directory holds, in the words of the build that is running
 # it, asked before that build is replaced, for the reason `install.sh` gives.
 WAS=""
+WAS_FROM=""
 named=$(carried network)
 named=${named%% *}
 if [ -n "$named" ]; then
     if [ -x "$BIN" ]; then
         WAS=$(name_of "$BIN" "$named")
+        WAS_FROM=$(first_block_of "$BIN" "$named")
     fi
     WAS=${WAS:-$named}
 fi
@@ -395,6 +403,7 @@ say "Service"
 # below leaves this machine exactly as it was.
 settle_the_network "$BUILT"
 NOW=$(name_of "$BUILT" "$NETWORK")
+NOW_FROM=$(first_block_of "$BUILT" "$NETWORK")
 ARGS=$(the_line)
 check_the_line "$BUILT"
 
@@ -403,7 +412,13 @@ if ! id cairn >/dev/null 2>&1; then
     useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin cairn
 fi
 if [ -n "$WAS" ] && [ "$WAS" != "$NOW" ]; then
-    set_aside "$DATADIR" "$WAS" "$NOW"
+    set_aside "$DATADIR" "$WAS" "$WAS's chain" "$NOW"
+elif [ -n "$WAS" ] && [ -n "$WAS_FROM" ] && [ -n "$NOW_FROM" ] && [ "$WAS_FROM" != "$NOW_FROM" ]; then
+    # The same network minted again, as in `install.sh`.
+    was_short=$(printf '%s' "$WAS_FROM" | cut -c1-12)
+    now_short=$(printf '%s' "$NOW_FROM" | cut -c1-12)
+    set_aside "$DATADIR" "$WAS-$was_short" "$WAS's chain from first block $was_short..." \
+        "$NOW minted again from $now_short..."
 fi
 mkdir -p "$DATADIR"
 chown cairn:cairn "$DATADIR"
