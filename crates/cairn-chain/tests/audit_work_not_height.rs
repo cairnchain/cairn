@@ -79,13 +79,20 @@ impl Branch {
         Self {
             params,
             state: LedgerState::new(),
-            clock: 1_000,
+            clock: 0,
         }
     }
 
     fn mine(&mut self, miner: &SecretKey, spacing: u64) -> Block {
         let height = self.state.next_height().unwrap();
-        self.clock += spacing;
+        // The first block is dated at the network's opening, where the
+        // retarget's schedule starts, so a chain on schedule after it is asked
+        // the opening difficulty.
+        self.clock = if height == 0 {
+            self.params.opens_at
+        } else {
+            self.clock + spacing
+        };
         let coinbase = CoinbaseTransaction::new(
             height,
             vec![Note::new(self.params.initial_reward, miner.public_key())],
@@ -148,10 +155,11 @@ fn a_rival_of_more_and_easier_blocks_takes_the_branch_and_lengthens_it() {
     // Ours comes twice as fast, so the rules demand more of each block.
     let mut ours = common.fork();
     let ours_blocks = ours.run(&miner, 3, TARGET / 2);
-    // The rival crawls, so the rules demand less, and it needs more blocks to
-    // outweigh three of ours.
+    // The rival crawls, a block every twenty four minutes, so each of its
+    // blocks stands further behind the schedule and is asked about a quarter
+    // less than the last, and it needs more blocks to outweigh three of ours.
     let mut theirs = common.fork();
-    let their_blocks = theirs.run(&wallet(9), 6, TARGET * 4);
+    let their_blocks = theirs.run(&wallet(9), 6, TARGET * 24);
 
     let ours_work = work_of_run(&ours_blocks);
     let their_work = work_of_run(&their_blocks);
@@ -220,16 +228,16 @@ fn a_rival_of_more_and_easier_blocks_takes_the_branch_and_lengthens_it() {
 /// The other direction: a node made shorter by following the heaviest chain.
 ///
 /// This is the case round eleven built by hand once and nothing kept. Ours is
-/// forty blocks that came so slowly the retarget let the difficulty fall by
-/// six; the rival is sixteen that came fast enough to hold it up. Sixteen
-/// outweigh forty, the node undoes forty and applies sixteen, and its own
-/// height goes down by twenty four.
+/// forty blocks that came so slowly the retarget let the difficulty fall
+/// fifty seven times; the rival is sixteen that came fast enough to hold it
+/// up. Sixteen outweigh forty, the node undoes forty and applies sixteen, and
+/// its own height goes down by twenty four.
 ///
-/// The slow spacing is ten times the target and worth six times it, because
-/// `pow.rs` clamps a solve time into six times the target before the retarget
-/// reads it. That is why a fixture cannot buy a faster collapse by dating its
-/// blocks further apart, and it is why the difficulty falls over forty blocks
-/// rather than over six.
+/// The slow spacing is ten times the target, so each block stands nine
+/// targets further behind the schedule than the last, three twentieths of a
+/// half life, and is asked about a tenth less. Spaced further apart they would
+/// fall faster, by four at most a block, which the bound allows and nothing
+/// here needs.
 #[test]
 fn a_rival_of_fewer_and_harder_blocks_takes_the_branch_and_shortens_it() {
     let params = params();
@@ -280,9 +288,9 @@ fn a_rival_of_fewer_and_harder_blocks_takes_the_branch_and_shortens_it() {
         "a switch that undid {removed} and applied {added}, height 139 -> {}",
         store.height().unwrap()
     );
-    // The fifteenth rival block is where the sum passes ours, so that is the
-    // one the switch happens on; the sixteenth arrives afterwards and extends.
-    assert_eq!((removed, added), (40, 15));
+    // The tenth rival block is where the sum passes ours, so that is the one
+    // the switch happens on; the six after it arrive afterwards and extend.
+    assert_eq!((removed, added), (40, 10));
     assert_eq!(
         store.height(),
         Some(115),
@@ -353,12 +361,11 @@ fn a_switch_at_the_window_applying_more_than_it_undid_leaves_the_node_bounded() 
 
     let mut common = Branch::new(params);
     let shared = common.run(&miner, HELD_WINDOW + 8, TARGET);
-    // A full window moves the difficulty far more slowly than the twenty block
-    // chain above, because the retarget averages over ninety. So the two
-    // branches are pulled further apart to reach the same shape: ours comes
-    // four times too fast, and the rival is dated at six times the target,
-    // which is where `pow.rs` clamps a solve time and therefore the slowest a
-    // gap can be worth. Eight against sixteen is what that buys.
+    // The two branches are pulled apart to reach the same shape: ours comes
+    // four times too fast, so each of its blocks stands further ahead of the
+    // schedule and is asked a little more, and the rival is dated six targets
+    // apart, so each of its blocks is asked about a twentieth less than the
+    // last. Eight against sixteen is what that buys.
     let mut ours = common.fork();
     let ours_blocks = ours.run(&miner, 8, TARGET / 4);
     let mut theirs = common.fork();

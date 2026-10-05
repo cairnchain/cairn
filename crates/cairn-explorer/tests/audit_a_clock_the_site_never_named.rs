@@ -249,8 +249,7 @@ fn a_site_refusing_blocks_for_its_clock_says_so_in_its_status() {
          gap is read against"
     );
     assert!(
-        object.contains("\"ownFirstBlock\":false"),
-        "the status does not say whether the evidence came off the wire or out \
-         of the binary, which is the difference between a hint and a certainty"
+        behind.contains("\"opening\":null"),
+        "a site whose network is open says it awaits no opening"
     );
 }

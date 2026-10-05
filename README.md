@@ -32,44 +32,41 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-7` opened on 30 September 2026.
-Its money is worth nothing, is meant to be worth nothing, and the network
-will be reset.
+Pre-alpha, and running in public. `testnet-8` opens on 5 October 2026 at
+18:00 UTC: its first block is dated at that moment, because the difficulty's
+schedule starts at its timestamp, and a node installed before then says when
+the network opens and lays the block down itself. Its money is worth nothing, is
+meant to be worth nothing, and the network will be reset.
 
-It is the seventh because a place in the hot set was free to a miner, a block
-did not commit to its signatures, an address showed its key, and two hash
-domains were told apart only by the length of what they hashed. A transfer
-could take as many places in the hot set as it liked for the price of its
-bytes alone, and a miner packing its own blocks with them paid not even that;
-a header named its body by a root that left out every signature and proof, so
-a copy that changed only those still passed as the same block; a note's owner
-was the public key itself, decoded straight off the chain, so every unspent
-note stood exposed to whatever could someday break that key; and two domains
-each hashed two kinds of value apart only because every caller happened to
-keep their lengths fixed and different. All four change what a header commits
-to or what a note is.
+It is the eighth because a few minutes of hired hash rate could nearly stop
+the chain for 33 hours. On 2 October 2026 a stranger mined eighty blocks in
+two minutes and left. The difficulty was a moving average over ninety blocks
+that rose fast and fell slowly; it asked the first honest block after the
+burst for 768 times the difficulty before it, and the network's own miner
+needed 33 hours to work it back down. The difficulty now follows a schedule
+fixed at the first block, twice as hard for every hour a chain runs ahead of
+it and half as hard for every hour behind, so a burst that leaves holds the
+honest chain up for a time that grows with the logarithm of what it paid:
+for the same hired hash rate, ten to thirty times less than the moving
+average did, five and a half hours after five minutes of the stranger's rate
+and eleven after an hour of it. That changes the difficulty every block must
+carry.
 
-`testnet-6` is retired and nothing on it carries over: it opened on
-1 September 2026, because three audit passes in one day found three things,
-and the last of them was not a hole an attacker exploits but the central
-mechanism not working at all. A ledger whose grace window held a note
-somebody had spent could not be handed to a newcomer, and that window turns
-over in twelve blocks on a busy chain, so joining without reading every block
-was broken essentially always. Nothing complained, because nobody had yet
-tried to join a chain that had seen traffic. Alongside it: a block reward
-could be spent before its block was settled, so a two-block reorganisation
-could take back money somebody had already been paid; and the ledger could
-not state how much money existed, so a defect that minted a pebble would have
-been agreed by every node and noticed by none. All three changed what a
-header commits to.
+`testnet-7` is retired and nothing on it carries over: it opened on
+30 September 2026, because a place in the hot set was free to a miner, a
+block did not commit to its signatures, an address showed its key, and two
+hash domains were told apart only by the length of what they hashed. All four
+changed what a header commits to or what a note is. The six before it, and
+why each was retired, are a paragraph each in `crates/cairn-ledger/src/note.rs`.
 
 There is no mainnet. A network exists once its first block does, and that one
 will be mined in the open on the day it is announced.
 
 The protocol is complete and runs end to end: notes and transactions, the
 accumulator that replaces the state database, the two tiers, proof of work
-with a difficulty that answers a halving of hash rate in about two hours,
-the fork choice, atomic reorganisation, and syncing between nodes over TCP.
+with a difficulty that answers a halving of hash rate in about three hours
+and that a burst of hired hash rate holds up for hours rather than days, the fork
+choice, atomic reorganisation, and syncing between nodes over TCP.
 
 A node keeps its chain on disk and replays it on start, and finds its peers by
 asking the ones it already has, so it needs one address to join a network and
@@ -137,8 +134,8 @@ paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
-| `testnet-7` | `0000000cd9f0...` | 1790800858 | 60 s |
-| `devnet` | `000000414235...` | 1788276770 | 5 s |
+| `testnet-8` | `0000000f14fd...` | 1791223200 | 60 s |
+| `devnet` | `000001f6cdaa...` | 1791173655 | 5 s |
 | `mainnet` | not made yet | | |
 
 There is an explorer, which is a node that also serves a website: the chain in

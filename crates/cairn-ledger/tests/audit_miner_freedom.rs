@@ -22,7 +22,7 @@
 
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::pow::next_difficulty;
+use cairn_ledger::pow::{next_difficulty, Origin};
 use cairn_ledger::state::{GRACE_BLOCKS, GRACE_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer, MAX_COINBASE_EXTRA};
 use cairn_ledger::validation::{
@@ -599,121 +599,86 @@ fn assemble_block_hands_back_a_block_every_node_refuses() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. The repaired retarget, read from the other direction.
+// 5. The retarget, read from the other direction.
 // ---------------------------------------------------------------------------
 
 /// Post dating the tip is a gift to whoever mines next, and the giver pays.
 ///
-/// The repair made a timestamp thrown forward give itself back through the
-/// blocks that follow. The question left over is the opposite one: does the
-/// repair leave a miner better off for writing a late timestamp on the block
-/// it has just found? It buys one block at a discount, and the discount goes
-/// to whoever finds the next block, which is the post dater only in proportion
-/// to its share. Two blocks later the window has taken it back.
+/// The retarget reads the parent's timestamp against the network's schedule
+/// and nothing else, so a timestamp thrown forward is taken back by the next
+/// honest one in full. The question left over is the opposite one: does the
+/// rule leave a miner better off for writing a late timestamp on the block it
+/// has just found? It buys one block at a discount, and the discount goes to
+/// whoever finds the next block, which is the post dater only in proportion
+/// to its share. One block later the schedule has taken it back exactly.
 #[test]
 fn post_dating_the_tip_discounts_one_block_and_is_taken_back() {
     const TARGET: u64 = 60;
-    const CEILING: u64 = 6 * TARGET;
+    // Five targets late, which a reader takes: the most is ten.
+    const LATE: u64 = 5 * TARGET;
     let start = 1_000_000u64;
+    let origin = Origin {
+        timestamp: 1_000_000,
+        difficulty: start,
+    };
+    let honest = |height: u64, difficulty: u64| HeaderSummary {
+        height,
+        timestamp: 1_000_000 + height * TARGET,
+        difficulty,
+    };
+    let steady = next_difficulty(&honest(90, start), origin, TARGET);
+    assert_eq!(steady, start, "a chain on schedule is left where it is");
 
-    let honest: Vec<HeaderSummary> = (0..=90)
-        .map(|index| HeaderSummary {
-            height: index,
-            timestamp: 1_000_000 + index * TARGET,
-            difficulty: start,
-        })
-        .collect();
-    let steady = next_difficulty(&honest, TARGET);
-
-    // The tip, and only the tip, sits a full ceiling later than it should.
-    let mut lied = honest.clone();
-    lied[90].timestamp += CEILING - TARGET;
-    let discounted = next_difficulty(&lied, TARGET);
+    // The tip, and only the tip, sits later than it should.
+    let mut lied = honest(90, start);
+    lied.timestamp += LATE;
+    let discounted = next_difficulty(&lied, origin, TARGET);
     assert!(
         discounted < steady,
-        "a late tip should read as a slow block: {discounted} against {steady}"
+        "a late tip should read as a chain behind its schedule: {discounted} against {steady}"
     );
 
-    // And the honest block after it, dated by the wall clock, gives it back.
-    let mut after_honest = honest.clone();
-    after_honest.push(HeaderSummary {
-        height: 91,
-        timestamp: 1_000_000 + 91 * TARGET,
-        difficulty: steady,
-    });
-    let mut after_lie = lied.clone();
-    after_lie.push(HeaderSummary {
-        height: 91,
-        timestamp: 1_000_000 + 91 * TARGET,
-        difficulty: discounted,
-    });
-    let recovered = next_difficulty(&after_lie, TARGET);
-    let unlied = next_difficulty(&after_honest, TARGET);
+    // And the honest block after it, dated by the wall clock, gives it back:
+    // what it asks of the block after is what an honest chain is asked.
+    let recovered = next_difficulty(&honest(91, discounted), origin, TARGET);
+    let unlied = next_difficulty(&honest(91, steady), origin, TARGET);
 
     let discount = 100.0 * (1.0 - discounted as f64 / steady as f64);
     println!(
-        "\n  one ceiling on the tip drops the next block's difficulty by {discount:.1} per cent"
+        "\n  five targets on the tip drop the next block's difficulty by {discount:.1} per cent"
     );
     println!("  and the block after that comes back to {recovered} against {unlied} honest");
     assert!(
         discount > 5.0 && discount < 15.0,
         "the one block discount is {discount:.3}"
     );
-    // The give back is what stops it compounding: the window does not stay low.
-    assert!(
-        recovered as f64 >= unlied as f64 * 0.999,
-        "the window did not take the lie back: {recovered} against {unlied}"
+    assert_eq!(
+        recovered, unlied,
+        "the schedule did not take the lie back: {recovered} against {unlied}"
     );
 
-    // And now the whole account. The pair of blocks, the lie and the honest
-    // one that gives it back, sits at weights k and k+1 for every k as the
-    // window slides, and costs the same three hundred weighted seconds at
-    // every one of them. So the one block discount is followed by eighty nine
-    // blocks each priced a little above honest, and the sum decides whether
-    // the strategy pays.
+    // And now the whole account. Every block after the honest one is asked
+    // exactly what it would have been asked had the lie never been told, so
+    // the strategy is worth the one discount and nothing after it.
     let mut gained = 1.0 - discounted as f64 / steady as f64;
-    let mut window = lied.clone();
-    let mut honest_window = honest.clone();
-    let mut carried = discounted;
-    let mut carried_honest = steady;
     for step in 1..90u64 {
-        let stamp = 1_000_000 + (90 + step) * TARGET;
-        window.push(HeaderSummary {
-            height: 90 + step,
-            timestamp: stamp,
-            difficulty: carried,
-        });
-        honest_window.push(HeaderSummary {
-            height: 90 + step,
-            timestamp: stamp,
-            difficulty: carried_honest,
-        });
-        carried = next_difficulty(&window, TARGET);
-        carried_honest = next_difficulty(&honest_window, TARGET);
-        gained += 1.0 - carried as f64 / carried_honest as f64;
+        let after_lie = next_difficulty(&honest(91 + step, discounted), origin, TARGET);
+        let never = next_difficulty(&honest(91 + step, steady), origin, TARGET);
+        gained += 1.0 - after_lie as f64 / never as f64;
     }
-
     println!(
-        "  over the ninety blocks the window is wide, the lie is worth\n  \
+        "  over the next ninety blocks the lie is worth\n  \
          {gained:+.4} blocks of work against never having told it"
     );
-    // Measured rather than assumed. The give back is real but the `average`
-    // term in the retarget damps it: the discounted block drags the window's
-    // mean difficulty down with it, so the correction lands at about a tenth
-    // of the arithmetic on the weighted solve times alone. Ninety blocks give
-    // back roughly a tenth of what one late timestamp took.
     assert!(
-        gained > 0.0 && gained < 0.2,
-        "the one shot gain measured {gained:+.4}"
+        (gained - discount / 100.0).abs() < 1e-12,
+        "the lie was worth {gained:+.4}, not the one discount of {discount:.3} per cent"
     );
     println!(
-        "  and the correction is damped: the window's mean difficulty falls with\n  \
-         the discounted block, so ninety blocks give back about a tenth of it.\n  \
-         Sustained, the feedback loop removes it: `the_saw_no_longer_pays_for_\n  \
-         itself` measures the block time at the target and the difficulty at or\n  \
-         above where it started, at every share up to 45 per cent. The discount\n  \
-         also goes to whoever mines next, which is the post dater only in\n  \
-         proportion to its share. cairn-node's miner never post dates\n"
+        "  The discount goes to whoever mines next, which is the post dater only\n  \
+         in proportion to its share, and the moving average this replaced kept\n  \
+         about a tenth of it for ninety blocks. cairn-node's miner never post\n  \
+         dates.\n"
     );
 }
 

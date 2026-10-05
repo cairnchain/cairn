@@ -175,8 +175,8 @@
     "note": {
       "difficulty": {
         "plain": "Difficulty is how much work it takes to add a block. It moves on its own: when more machines join, it rises, and blocks keep arriving at roughly the rate they did before. Nobody sets it by hand.",
-        "curious": "Difficulty is the expected number of attempts a block costs. It is recalculated for every block from a sliding window of recent ones, so it follows the miners continuously rather than waiting for a fixed epoch to end.",
-        "technical": "Expected hash count for a block, recomputed per block over a sliding window and clamped against a sudden move in either direction. The figure above is parsed exactly; the line is plotted as a double, which is far beneath the resolution of two hundred units of height."
+        "curious": "Difficulty is the expected number of attempts a block costs. It is recalculated for every block against a schedule fixed at the network's first block, so it follows the miners continuously rather than waiting for a fixed epoch to end.",
+        "technical": "Expected hash count for a block, recomputed per block from how far the parent stands ahead of or behind a schedule fixed at the first block, and held within a factor of four of the parent's in either direction. The figure above is parsed exactly; the line is plotted as a double, which is far beneath the resolution of two hundred units of height."
       },
       "spacing": {
         "plain": "How long each block took after the one before it. These times are written by the miners themselves, not measured here, and a block only has to come after the middle of the recent ones. So a bar can sit at zero, or below it.",
@@ -335,7 +335,7 @@
     "blocks": {
       "plain": "A block is a page in the ledger. Roughly once a minute, someone finds a valid one, and everything in it becomes settled. Each page points back at the one before it, which is why nobody can quietly rewrite an old one.",
       "curious": "Blocks arrive about once a minute. The chain is chosen by accumulated work rather than by length, so the branch that took the most computing to build is the one every node follows.",
-      "technical": "Fork choice is by cumulative work. Ties keep the branch already followed, and a switch is applied atomically. Difficulty retargets over a 90 block LWMA window with clamped solve times and a factor of four per retarget cap."
+      "technical": "Fork choice is by cumulative work. Ties keep the branch already followed, and a switch is applied atomically. Difficulty follows a schedule fixed at the first block (ASERT, a one hour half life) with a factor of four per retarget cap."
     },
     "block": {
       "plain": "Everything below was fixed the moment this block was found. The long strings are fingerprints: change one letter anywhere in the block and every one of them changes completely.",
@@ -527,7 +527,7 @@
       "title": {
         "plain": "Who gets to write the next page",
         "curious": "Proof of work, and why it was chosen",
-        "technical": "Proof of work, LWMA retarget, median time past"
+        "technical": "Proof of work, ASERT retarget, median time past"
       },
       "body": {
         "plain": [
@@ -537,10 +537,10 @@
         ],
         "curious": [
           "Proof of work rather than proof of stake, and the reason is the start rather than the steady state. Proof of stake needs an initial distribution before it can work, which means founders deciding who holds power on day one. Proof of work needs nobody to decide anything: the network opens, and the first block goes to whoever mines it.",
-          "Difficulty adjusts every block over a 90 block window, with solve times clamped and a factor of four cap per retarget, so a large miner arriving or leaving does not strand the chain."
+          "Difficulty adjusts every block against a schedule fixed at the network's first block, doubling for every hour the chain runs ahead of it and halving for every hour behind, with a factor of four cap per retarget, so a large miner arriving or leaving does not strand the chain, and one that mines a burst and leaves holds it up for a time that grows with the logarithm of what it paid: hours, where the moving average took days."
         ],
         "technical": [
-          "LWMA over 90 blocks, clamped solve times, maximum 4x per retarget. Timestamps are validated against the median of the previous eleven blocks rather than against the parent, which removes the single-block manipulation that a later-than-parent rule permits.",
+          "ASERT (aserti3-2d) anchored at the first block, half life of 60 blocks, maximum 4x per retarget. Timestamps are validated against the median of the previous eleven blocks rather than against the parent, which removes the single-block manipulation that a later-than-parent rule permits.",
           "Fork choice is by cumulative work, not length. Ties keep the branch already followed. Reorganisations are applied atomically, with undo records per active-chain block."
         ]
       }
@@ -676,7 +676,7 @@
       "body": {
         "plain": ["This is how you get CAIRN on a test network. Your computer starts looking for blocks, and when it finds one the reward goes to your address. There is no other way to get any: nobody has a stock to hand out."],
         "curious": ["Mining inside the node, on every core but one, which is enough for a test network. Rewards go to the address you name, and the key behind it can live anywhere: the node is told an address and never sees the secret behind it."],
-        "technical": ["The opening difficulty of testnet-7 is 2^27, calibrated so the first block takes roughly the target block time on one ordinary core."]
+        "technical": ["The opening difficulty of testnet-8 is 2^28, calibrated so the first block takes roughly the target block time at the rate testnet-7 ended on, and the difficulty then follows a schedule that starts at that block."]
       }
     },
     "server": {
@@ -733,9 +733,9 @@
     },
     "disk": { "empty": "no block at all", "holds": "blocks up to {height}" },
     "clockBehind": {
-      "certain": "The clock of the computer behind this page is about {gap} behind the network's: it refused the first block of its own network as dated in the future. It cannot follow the chain until its clock is right, so nothing here is current. Whoever runs this site has to set the time on that machine.",
       "likely": "The clock of the computer behind this page looks about {gap} behind the network's: it refused {blocks} blocks from {peers} peers as dated in the future. A node on a slow clock refuses every honest block, so the height here may have stopped. Whoever runs this site should check the time on that machine."
     },
+    "opening": "This network opens on {at}, {when}. The computer behind this page runs the program that opens it, and is waiting for that moment: until then there is no chain, so there is nothing here to show yet. If that moment has already passed, it is the clock of that computer that is behind, and whoever runs this site should check the time on it.",
     "unread": "The disk under the node behind this page will not give back block {height}. Nothing has been deleted, but this site cannot show that block, and everything it says about who owns what stops at it until the disk reads it again. If it goes on, that disk is failing.",
     "unjudged": "The program behind this page looks too old for the chain it is on: it has met {blocks} blocks built under rules it does not have, from {peers} peers, the newest written for version {version} where it knows version {known}. Anyone can write a version number into a block, so this is a reason to look rather than a verdict. If the height here has also stopped moving, whoever runs this site has to install a newer version.",
     "unweighable": "Nobody the node behind this page has asked could show it which chain carries the most work: {showings} showings from {peers} peers would not weigh. It is reading the chain block by block instead, which takes hours, and until it is done this page shows a chain shorter than the real one.",

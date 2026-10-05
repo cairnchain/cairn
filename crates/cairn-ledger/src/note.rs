@@ -70,10 +70,11 @@ impl NetworkId {
     /// tip has to open the header it was built on, and the run of headers
     /// between a handed-over ledger and the tip has to travel with it and be
     /// checked block by block, so weight can no longer be borrowed from a
-    /// chain somebody else mined. And the retarget reads solve times as signed
-    /// values along a timeline of its own, so a miner dating its blocks ahead
-    /// no longer takes six minutes from the measurement and gives one second
-    /// back; past a sixth of the hash rate that had no equilibrium at all.
+    /// chain somebody else mined. And the retarget, a moving average then, came
+    /// to read solve times as signed values along a timeline of its own, so a
+    /// miner dating its blocks ahead no longer took six minutes from the
+    /// measurement and gave one second back; past a sixth of the hash rate
+    /// that had had no equilibrium at all.
     ///
     /// The second of those changes what difficulty every block must carry, so
     /// every block mined under the old rule is invalid under this one and the
@@ -133,16 +134,31 @@ impl NetworkId {
     /// note is, so every block mined under the old rules is invalid under
     /// these, and the network starts over.
     pub const TESTNET_7: Self = Self(0x4341_525A);
-    /// The eighth, named here before it exists.
+    /// The eighth, because a few minutes of hired hash rate could nearly stop
+    /// the chain for 33 hours.
     ///
-    /// A node reads a marker's name from its own build, so a name has to ship
-    /// ahead of the network it names: a node still on testnet-7 when the
-    /// network starts over then says which network its peers moved to rather
-    /// than printing a number. Nothing makes this a network yet, and
-    /// `ConsensusParams::for_network` does not answer to it.
+    /// The retarget was a moving average over the last ninety blocks, which
+    /// rose fast and fell slowly. On 2 October 2026 a stranger mined eighty
+    /// blocks in two minutes and left; the first honest block after them was
+    /// asked 768 times the difficulty before them, and the honest miner,
+    /// alone with it again, needed 33 hours to work it back down. Five
+    /// minutes of a miner that size held the next hundred honest blocks up
+    /// 71 hours, and an hour of it 298, so the cheapest way to stop the
+    /// network was to rent hash rate for a few minutes and leave.
+    ///
+    /// The difficulty now follows a schedule fixed at the first block: what a
+    /// block is asked depends on how far its parent stands ahead of or behind
+    /// the time the schedule gives its height, twice as much for every hour
+    /// ahead and half as much for every hour behind, and not on the path the
+    /// chain took to get there. A burst that leaves holds the honest chain up
+    /// for about as long as it ran ahead of the schedule, which grows with the
+    /// logarithm of what it paid: 5.6 hours after the same five minutes, 11.3
+    /// after the same hour. That changes the difficulty every block must
+    /// carry, so every block mined under the old rule is invalid under this
+    /// one, and the network starts over.
     pub const TESTNET_8: Self = Self(0x4341_525B);
     /// Kept as the name of whichever test network is current.
-    pub const TESTNET: Self = Self::TESTNET_7;
+    pub const TESTNET: Self = Self::TESTNET_8;
     /// The original throwaway network, retired alongside testnet-6.
     ///
     /// Decided after the audit that named testnet-7: a devnet directory or
@@ -153,14 +169,21 @@ impl NetworkId {
     /// so a node still on it is told which network that is rather than being
     /// read as the current one under its old name.
     pub const DEVNET_1: Self = Self(0x4341_5244);
+    /// The second throwaway network, retired alongside testnet-7.
+    ///
+    /// Renumbered for the reason the first was: a devnet chain mined under the
+    /// moving average is invalid under the schedule, and a directory or a peer
+    /// left over from before the restart is told which network it is on
+    /// rather than being read as the current one under its old name.
+    pub const DEVNET_2: Self = Self(0x4341_5245);
     /// A throwaway network with the same rules but a much shorter block time,
     /// for running the software on one machine.
     ///
-    /// Renumbered alongside testnet-7, for the same reason: a directory or a
-    /// peer still on the old marker is told plainly which network it is on,
-    /// the way every retired testnet already is, rather than being taken for
-    /// this one.
-    pub const DEVNET: Self = Self(0x4341_5245);
+    /// Renumbered alongside testnet-8, as it was alongside testnet-7: a
+    /// directory or a peer still on an old marker is told plainly which
+    /// network it is on, the way every retired testnet already is, rather
+    /// than being taken for this one.
+    pub const DEVNET: Self = Self(0x4341_5246);
 
     pub const fn new(value: u32) -> Self {
         Self(value)
@@ -196,6 +219,7 @@ impl NetworkId {
             Self::TESTNET_7 => Some("testnet-7"),
             Self::TESTNET_8 => Some("testnet-8"),
             Self::DEVNET_1 => Some("devnet-1"),
+            Self::DEVNET_2 => Some("devnet-2"),
             Self::DEVNET => Some("devnet"),
             _ => None,
         }
@@ -212,7 +236,7 @@ impl NetworkId {
     pub const fn address_prefix(self) -> &'static str {
         match self {
             Self::MAINNET => "cairn",
-            Self::DEVNET | Self::DEVNET_1 => "dcairn",
+            Self::DEVNET | Self::DEVNET_1 | Self::DEVNET_2 => "dcairn",
             _ => "tcairn",
         }
     }

@@ -140,24 +140,71 @@ class Difficulty(unittest.TestCase):
         verdict = watch.check_difficulty(blocks)
         self.assertEqual(verdict.state, OK)
 
-    def test_a_rise_past_eight_times_is_an_alarm(self):
+    def test_testnet_7s_widest_swing_is_calm_either_way(self):
+        rising = chain(60)
+        rising[-1] = rising[-1]._replace(difficulty=1300)
+        self.assertEqual(watch.check_difficulty(rising).state, OK)
+        falling = chain(60)
+        falling[-1] = falling[-1]._replace(difficulty=769)
+        self.assertEqual(watch.check_difficulty(falling).state, OK)
+
+    def test_the_schedules_noise_is_calm(self):
+        # Steady mining under the schedule: a log2 spread of about 0.11 per block,
+        # here as a walk up and down by that much over the hour.
         blocks = chain(60)
-        blocks[-1] = blocks[-1]._replace(difficulty=9001)
+        for i, block in enumerate(blocks):
+            blocks[i] = block._replace(difficulty=round(1000 * 2 ** (0.11 * ((i % 8) - 4) / 2)))
+        self.assertEqual(watch.check_difficulty(blocks).state, OK)
+
+    def test_a_rise_past_one_and_a_half_times_is_an_alarm(self):
+        # Three times the hash rate arriving raises the schedule about 1.6x within the
+        # hour; the 8x this replaced could not fire, since nothing valid rises past 2.24x.
+        blocks = chain(60)
+        blocks[-1] = blocks[-1]._replace(difficulty=1600)
         verdict = watch.check_difficulty(blocks)
         self.assertEqual(verdict.state, ALARM)
         self.assertIn("rose", verdict.detail)
 
-    def test_a_fall_past_eight_times_is_an_alarm_too(self):
+    def test_exactly_one_and_a_half_times_up_is_not(self):
         blocks = chain(60)
-        blocks[-1] = blocks[-1]._replace(difficulty=100)
+        blocks[-1] = blocks[-1]._replace(difficulty=1500)
+        self.assertEqual(watch.check_difficulty(blocks).state, OK)
+
+    def test_a_fall_past_two_times_is_an_alarm(self):
+        blocks = chain(60)
+        blocks[-1] = blocks[-1]._replace(difficulty=499)
         verdict = watch.check_difficulty(blocks)
         self.assertEqual(verdict.state, ALARM)
         self.assertIn("fell", verdict.detail)
 
-    def test_exactly_eight_times_is_not(self):
+    def test_exactly_two_times_down_is_not(self):
         blocks = chain(60)
-        blocks[-1] = blocks[-1]._replace(difficulty=8000)
+        blocks[-1] = blocks[-1]._replace(difficulty=500)
         self.assertEqual(watch.check_difficulty(blocks).state, OK)
+
+    def test_a_rise_is_found_behind_a_wider_fall(self):
+        # The widest swing of the window is the fall from 1600 to 900, under its
+        # threshold; the rise to 1600 before it is past its own.
+        blocks = chain(60)
+        blocks[30] = blocks[30]._replace(difficulty=1600)
+        blocks[-1] = blocks[-1]._replace(difficulty=900)
+        verdict = watch.check_difficulty(blocks)
+        self.assertEqual(verdict.state, ALARM)
+        self.assertIn("rose 1.60x", verdict.detail)
+
+    def test_a_fall_and_a_rise_each_under_its_threshold_are_calm(self):
+        blocks = chain(60)
+        blocks[20] = blocks[20]._replace(difficulty=1400)
+        blocks[40] = blocks[40]._replace(difficulty=750)
+        self.assertEqual(watch.check_difficulty(blocks).state, OK)
+
+    def test_the_one_further_past_its_threshold_is_reported(self):
+        blocks = chain(60)
+        blocks[20] = blocks[20]._replace(difficulty=1600)
+        blocks[40] = blocks[40]._replace(difficulty=400)
+        verdict = watch.check_difficulty(blocks)
+        self.assertIn("fell 4.00x", verdict.detail)
+        self.assertIn("1600 at height 21", verdict.facts)
 
     def test_only_the_last_sixty_blocks_are_judged(self):
         blocks = chain(100)
@@ -168,8 +215,8 @@ class Difficulty(unittest.TestCase):
 
     def test_the_level_rises_when_the_swing_doubles(self):
         small, large = chain(60), chain(60)
-        small[-1] = small[-1]._replace(difficulty=9000)
-        large[-1] = large[-1]._replace(difficulty=17000)
+        small[-1] = small[-1]._replace(difficulty=450)
+        large[-1] = large[-1]._replace(difficulty=200)
         self.assertLess(watch.check_difficulty(small).level, watch.check_difficulty(large).level)
 
     def test_one_block_has_nothing_to_compare(self):
@@ -313,6 +360,12 @@ class NodeHealth(unittest.TestCase):
         node = dict(self.node, writtenThrough=99)
         self.assertEqual(watch.check_node_health(node)[0].state, OK)
         self.assertEqual(watch.check_node_health(dict(self.node, writtenThrough=None))[0].state, OK)
+
+    def test_a_network_not_yet_open_is_a_reading_and_not_a_fault(self):
+        node = dict(self.node, opening={"at": 1791309600, "inSeconds": 3600, "drift": 600})
+        verdict, unknown = watch.check_node_health(node)
+        self.assertEqual(verdict.state, OK)
+        self.assertEqual(unknown, ())
 
     def test_fields_the_watcher_does_not_know_are_listed_and_not_judged(self):
         verdict, unknown = watch.check_node_health(dict(self.node, brandNew={"x": 1}))

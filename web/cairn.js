@@ -1842,7 +1842,7 @@ function unpack(build) {
 function download() {
   setTitle(t('nav.run'));
   clear(view);
-  const network = state.status && state.status.network ? state.status.network.name : 'testnet-7';
+  const network = state.status && state.status.network ? state.status.network.name : 'testnet-8';
   const here = thisMachine();
   const mine = BUILDS.find((build) => build.key === here) || null;
   const rest = BUILDS.filter((build) => build !== mine);
@@ -2146,7 +2146,13 @@ function trouble(status) {
       blocks: count(behind.blocks),
       peers: count(behind.peers),
     };
-    return behind.ownFirstBlock ? t('warn.clockBehind.certain', said) : t('warn.clockBehind.likely', said);
+    return t('warn.clockBehind.likely', said);
+  }
+  // A network released ahead of its opening, on a node installed early: no
+  // chain yet and nothing wrong. Below the clock, because blocks refused from
+  // peers say the network has opened and this machine is behind it.
+  if (node.opening) {
+    return t('warn.opening', { at: moment(node.opening.at), when: ago(node.opening.at) });
   }
   if (node.unwritten) {
     return t('warn.unwritten.behind', {

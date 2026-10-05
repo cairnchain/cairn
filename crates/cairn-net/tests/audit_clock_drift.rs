@@ -560,10 +560,6 @@ fn a_run_of_them_from_two_peers_tells_the_operator_about_the_clock() {
         "the gap reported was {} against a block sent {ahead} ahead",
         behind.seconds
     );
-    assert!(
-        !behind.own_first_block,
-        "these came off the wire, not out of the binary"
-    );
 }
 
 /// The same rule, applied to this node's own disk, which is worse.

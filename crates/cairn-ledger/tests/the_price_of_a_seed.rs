@@ -1,4 +1,4 @@
-//! What a fresh seed costs a forger on testnet-7 and on the devnet, and what
+//! What a fresh seed costs a forger on testnet-8 and on the devnet, and what
 //! the rule that prices it costs an honest chain that loses hash rate.
 //!
 //! Three readings of the run are measured side by side: no tie between the
@@ -47,7 +47,8 @@
 
 use cairn_ledger::block::HeaderSummary;
 use cairn_ledger::pow::{
-    median_time_past, next_difficulty, DIFFICULTY_WINDOW, MIN_DIFFICULTY, RECENT_HEADERS,
+    median_time_past, next_difficulty, Origin, HALF_LIFE_IN_BLOCKS, MAX_RETARGET_FACTOR,
+    MIN_DIFFICULTY, RECENT_HEADERS,
 };
 use cairn_ledger::sampling::{draw, levels_for, MOST_FALL, MOST_TAIL, SAMPLES};
 use cairn_ledger::validation::ConsensusParams;
@@ -62,33 +63,50 @@ const SECURITY: &str = include_str!("../../../SECURITY.md");
 const BLOCKS: u64 = 30 * 365 * 24 * 60;
 /// Seeds the draw is taken over, each standing for one tip.
 const SEEDS: u64 = 256;
-/// The clamp ceiling on a stated gap, in target block times.
-const LONGEST: u64 = 6;
 
 /// A run of headers as the rules see it, priced rather than mined.
+///
+/// The forger dates every header, and under the retarget that is the whole of
+/// its freedom: a header dated early leaves the chain ahead of its schedule
+/// and the next one dearer, a header dated late the reverse. So it can make
+/// the next header ask anything the bound allows, from a quarter of the last
+/// to four times it, and [`Walk::toward`] dates each header to come as near as
+/// it can to what the forger wants next. The headers below the pinned one are
+/// the forger's own and nothing judges them, so the run may start wherever on
+/// its schedule the forger likes, which [`Walk::at`] takes as an argument.
 #[derive(Clone)]
 struct Walk {
     target: u64,
+    origin: Origin,
     window: Vec<HeaderSummary>,
     blocks: u64,
     work: u128,
-    stated: u64,
+    /// Seconds from the window's last header to the run's, which a header
+    /// dated before its parent takes back.
+    stated: i64,
     hardest: u64,
 }
 
 impl Walk {
-    /// A window on schedule at one difficulty, which the retarget gives back
-    /// unchanged.
-    fn on_schedule_at(difficulty: u64, target: u64) -> Self {
-        let window = (0..RECENT_HEADERS as u64)
+    /// A window at one difficulty, `ahead` half lives ahead of its schedule
+    /// (behind it when negative), dated a target a block.
+    fn at(difficulty: u64, ahead: i64, target: u64) -> Self {
+        let start = 1u64 << 40;
+        let half_life = i64::try_from(target * HALF_LIFE_IN_BLOCKS).unwrap();
+        let window: Vec<HeaderSummary> = (0..RECENT_HEADERS as u64)
             .map(|height| HeaderSummary {
                 height,
-                timestamp: 1_000_000 + height * target,
+                timestamp: start + height * target,
                 difficulty,
             })
             .collect();
+        let origin = Origin {
+            timestamp: start.saturating_add_signed(-ahead * half_life),
+            difficulty,
+        };
         Self {
             target,
+            origin,
             window,
             blocks: 0,
             work: 0,
@@ -97,47 +115,91 @@ impl Walk {
         }
     }
 
-    fn demanded(&self) -> u64 {
-        next_difficulty(&self.window, self.target)
+    /// A window on schedule at one difficulty, which the retarget gives back
+    /// unchanged.
+    fn on_schedule_at(difficulty: u64, target: u64) -> Self {
+        Self::at(difficulty, 0, target)
     }
 
-    /// One header at the difficulty demanded of it, `gap` seconds after the
-    /// last, held to the median rule the run is held to.
-    fn step(&mut self, gap: u64) -> u64 {
+    fn demanded(&self) -> u64 {
+        next_difficulty(self.window.last().unwrap(), self.origin, self.target)
+    }
+
+    /// One header at the difficulty demanded of it, dated as early as the
+    /// median allows while the header after it is still asked no more than
+    /// `want`, so the next header asks as nearly `want` as the bound lets it.
+    fn toward(&mut self, want: u64) -> u64 {
         let last = *self.window.last().unwrap();
         let difficulty = self.demanded();
+        let earliest = median_time_past(&self.window).unwrap() + 1;
+        let asks = |timestamp: u64| {
+            let header = HeaderSummary {
+                height: last.height + 1,
+                timestamp,
+                difficulty,
+            };
+            next_difficulty(&header, self.origin, self.target)
+        };
+        // A target after the last is what holds a chain where it stands, and
+        // it is most of what a walk asks for, so it is tried before anything
+        // is searched.
+        let on_time = last.timestamp + self.target;
+        let low = if on_time >= earliest
+            && asks(on_time) == want
+            && (on_time == earliest || asks(on_time - 1) > want)
+        {
+            on_time
+        } else {
+            // The ask never rises with the timestamp, so the earliest
+            // timestamp asking no more than `want` is found by halving.
+            let (mut low, mut high) = (earliest, earliest + (1 << 44));
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if asks(middle) <= want {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            low
+        };
         let header = HeaderSummary {
             height: last.height + 1,
-            timestamp: last.timestamp + gap,
+            timestamp: low,
             difficulty,
         };
-        assert!(
-            median_time_past(&self.window).is_none_or(|median| header.timestamp > median),
-            "a forger's header broke the median rule"
-        );
         self.window.push(header);
-        if self.window.len() > DIFFICULTY_WINDOW + 1 {
+        if self.window.len() > RECENT_HEADERS {
             self.window.remove(0);
         }
         self.blocks += 1;
         self.work += u128::from(difficulty);
-        self.stated += gap;
+        self.stated += i64::try_from(low).unwrap() - i64::try_from(last.timestamp).unwrap();
         self.hardest = self.hardest.max(difficulty);
         difficulty
     }
 
-    /// Walks down at the clamp ceiling while the next header would still be
-    /// at or above `lowest`, and returns the last one, which is the tip.
-    ///
-    /// Not while the demand falls: near the floor a window of long gaps can
-    /// ask the same again for a block or two before it falls on.
+    /// A header that leaves the next one asked what this one was.
+    fn hold(&mut self) -> u64 {
+        let level = self.demanded();
+        self.toward(level)
+    }
+
+    /// Walks down by the whole bound a header, and by less for the last step
+    /// so as to land on `lowest` rather than past it, and returns the last
+    /// header, which is the tip.
     fn down_to(&mut self, lowest: u64) -> u64 {
-        let mut tip = self.step(LONGEST * self.target);
+        let fall = |level: u64| {
+            ((u128::from(level) / MAX_RETARGET_FACTOR) as u64)
+                .max(lowest)
+                .max(MIN_DIFFICULTY)
+        };
+        let mut tip = self.toward(fall(self.demanded()));
         for _ in 0..100_000 {
             if tip <= lowest || self.demanded() < lowest {
                 return tip;
             }
-            tip = self.step(LONGEST * self.target);
+            tip = self.toward(fall(self.demanded()));
         }
         panic!("the walk never reached {lowest}");
     }
@@ -149,7 +211,7 @@ struct Network {
 }
 
 fn networks() -> Vec<Network> {
-    ["testnet-7", "devnet"]
+    ["testnet-8", "devnet"]
         .into_iter()
         .map(|name| Network {
             name,
@@ -230,19 +292,22 @@ fn band_from(from: u64, band: u128, lowest: u64, target: u64) -> Option<Walk> {
     let mut best: Option<Walk> = None;
     for shift in 2..16 {
         let plateau = u64::try_from(band >> shift).ok()?.max(from);
-        let mut walk = Walk::on_schedule_at(from, target);
+        // Dated far ahead of its schedule below the pinned header, which
+        // nothing judges, so the climb is the bound's four a header.
+        let mut walk = Walk::at(from, 64, target);
         while walk.demanded() < plateau {
-            walk.step(1);
+            let level = walk.demanded();
+            walk.toward(level.saturating_mul(4));
         }
         for _ in 0..RECENT_HEADERS {
-            walk.step(target);
+            walk.hold();
         }
         let mut descent = walk.clone();
         descent.down_to(lowest);
         let short = band.saturating_sub(descent.work);
         let more = u64::try_from(short / u128::from(plateau)).ok()? + 1;
         for _ in 0..more {
-            walk.step(target);
+            walk.hold();
         }
         walk.down_to(lowest);
         if walk.work < band {
@@ -311,7 +376,7 @@ fn tied_to_the_run(network: &Network, fall: u64, gaps: &[u128]) -> Price {
         let short = band.saturating_sub(descent.work);
         let more = u64::try_from(short / u128::from(flat)).unwrap() + 1;
         for _ in 0..more {
-            walk.step(target);
+            walk.hold();
         }
         let tip = walk.down_to(lowest);
         assert!(tip * fall >= walk.hardest, "the walk passed the tie");
@@ -348,10 +413,29 @@ fn tied_to_the_run(network: &Network, fall: u64, gaps: &[u128]) -> Price {
 /// question that lands in its invented work, so a tip at the floor cost it
 /// about forty hashes, and nothing compared the tip with the run below it.
 /// Held to the pinned header alone, the forger makes the pinned header cheap
-/// and pays about a thousand; held to the hardest header of the run, it has
-/// to carry the band flat and pays a quarter of a million on testnet-7. The
+/// and pays about four thousand; held to the hardest header of the run, it
+/// has to carry the band flat and pays about half a million on testnet-8. The
 /// figures are pinned because the specification, `SAMPLES` and SECURITY.md
 /// quote them.
+///
+/// Measured again when the retarget became ASERT, because that rule lets a
+/// forger walk down faster: its headers are its own to date, a header dated
+/// late puts the chain behind its schedule, and from there every header may
+/// fall by the whole bound. The walk to the floor is fifteen headers from
+/// testnet-7's 2^27 and a day of stated time, where the moving average took
+/// hundreds of headers. It moves the price by a tenth of a halving, from 2^18.0
+/// to 2^17.9 on testnet-7 and from 2^14.0 to 2^13.9 on the devnet, because
+/// what the price rests on is not the walk: the run has to carry the band in
+/// at most [`MOST_TAIL`] headers and the tip has to stand within [`MOST_FALL`]
+/// of the hardest of them, which is the band over 2^18 whatever the rule
+/// between, and a faster walk only lets the forger come closer to it. The tie
+/// to the pinned header alone, which nobody applies, came out at 2^11.2 where
+/// it was 2^10.2, and nothing here rests on it.
+///
+/// And again at testnet-8's opening difficulty, 2^28 where testnet-7's was
+/// 2^27. The band is counted in blocks at the opening difficulty, so the price
+/// doubled with it, to 2^18.9, and the walk to the floor is still fifteen
+/// headers; the tie to the pinned header alone came out at 2^11.9.
 #[test]
 fn a_tip_held_to_the_hardest_header_of_its_run_costs_what_the_documents_state() {
     let mut measured = Vec::new();
@@ -409,7 +493,7 @@ fn a_tip_held_to_the_hardest_header_of_its_run_costs_what_the_documents_state() 
     }
     assert_eq!(
         measured,
-        vec![("testnet-7", 5.3, 10.2, 18.0), ("devnet", 5.3, 7.4, 14.0)],
+        vec![("testnet-8", 5.3, 11.9, 18.9), ("devnet", 5.3, 8.1, 13.9)],
         "the price of a seed moved, and the specification, SAMPLES and SECURITY.md quote it"
     );
 
@@ -473,7 +557,9 @@ fn honest_loss(network: &Network, loss: f64, fall: u64, seed: u64) -> Loss {
     let (history, levels, _) = chain(network);
     let questions = SAMPLES as u128 / u128::from(levels);
     let mut dice = Dice(seed);
-    let mut window: Vec<HeaderSummary> = Walk::on_schedule_at(difficulty, target).window;
+    let start = Walk::on_schedule_at(difficulty, target);
+    let origin = start.origin;
+    let mut window: Vec<HeaderSummary> = start.window;
     // Every header of the stretch: its timestamp, difficulty and total work.
     let mut headers: Vec<(u64, u64, u128)> = Vec::new();
     let mut total = history;
@@ -492,7 +578,7 @@ fn honest_loss(network: &Network, loss: f64, fall: u64, seed: u64) -> Loss {
         } else {
             difficulty as f64 / target as f64 / loss
         };
-        let asked = next_difficulty(&window, target);
+        let asked = next_difficulty(window.last().unwrap(), origin, target);
         let last = *window.last().unwrap();
         let median = median_time_past(&window).unwrap();
         let timestamp = (last.timestamp + dice.solve(asked, rate)).max(median + 1);
@@ -510,7 +596,7 @@ fn honest_loss(network: &Network, loss: f64, fall: u64, seed: u64) -> Loss {
             timestamp,
             difficulty: asked,
         });
-        if window.len() > DIFFICULTY_WINDOW + 1 {
+        if window.len() > RECENT_HEADERS {
             window.remove(0);
         }
         let before = total;
@@ -550,14 +636,16 @@ fn honest_loss(network: &Network, loss: f64, fall: u64, seed: u64) -> Loss {
     report
 }
 
-/// The tie refuses no honest chain that lost sixteen times its hash rate, and
-/// what it costs one that lost more is a stretch of days in which it is read
-/// rather than weighed.
+/// The tie refuses no honest chain that lost sixteen times its hash rate, nor
+/// on testnet-8 one that lost twenty, and what it costs one that lost more is
+/// a stretch of days in which it is read rather than weighed.
 ///
 /// The retarget follows a loss with noise of its own: on these chains, block
-/// times drawn at random, the run's hardest header stood up to about twice as
-/// far above the tip as the loss alone puts it, which is why the tie is twice
-/// the sixteen [`MOST_TAIL`] is written for. The figures are pinned because
+/// times drawn at random, the run's hardest header stood up to about 1.6 times
+/// as far above the tip as the loss alone puts it, which is why the tie is
+/// twice the sixteen [`MOST_TAIL`] is written for. Under the moving average
+/// it was twice, and the tie was set from that; the steadier rule leaves it
+/// room rather than asking it to move. The figures are pinned because
 /// `MOST_FALL` and the documents quote them.
 #[test]
 fn the_tie_refuses_no_honest_chain_that_lost_sixteen_times_its_hash_rate() {
@@ -602,19 +690,303 @@ fn the_tie_refuses_no_honest_chain_that_lost_sixteen_times_its_hash_rate() {
                     network.name
                 );
             }
-            if loss == 20 && network.name == "testnet-7" {
+            if loss == 20 && network.name == "testnet-8" {
+                assert_eq!(
+                    refused, 0,
+                    "testnet-8 refused a loss of twenty, which the documents say it does not"
+                );
+            }
+            if loss == 24 && network.name == "testnet-8" {
                 assert!(
-                    hours(tie) < 24.0,
-                    "a loss of twenty was refused for more than the day the documents say"
+                    hours(tie) < 36.0,
+                    "a loss of twenty four was refused for more than the day and a half the \
+                     documents say"
                 );
             }
             longest = longest.max(tie);
         }
-        if network.name == "testnet-7" {
+        if network.name == "testnet-8" {
             assert!(
                 longest < 6 * 24 * 3_600,
                 "a loss was refused for longer than the six days the documents say"
             );
+        }
+    }
+}
+
+/// What a newcomer meets after a burst of hash rate lifted an honest chain's
+/// difficulty `spike` times and left.
+struct Spike {
+    /// Blocks the burst mined, and its work in blocks of the honest
+    /// difficulty, which at the honest rate is that many targets of time.
+    blocks: u64,
+    paid: f64,
+    /// Seconds from the end of the burst to the last honest tip the tie
+    /// refuses, and the seconds of that stretch the tie refused.
+    until: u64,
+    refused: u64,
+    /// How many blocks past the burst's last one the pinned header stood
+    /// when the tie last refused a tip, and whether judging went on until
+    /// the deepest question was [`PAST_THE_BURST`] blocks past it.
+    pinned_at_the_last_refusal: usize,
+    judged_to_the_end: bool,
+}
+
+/// How old the honest chain is when the burst comes.
+#[derive(Clone, Copy)]
+enum Age {
+    /// The thirty year chain every published figure is for, whose band is
+    /// 481 blocks' work.
+    ThirtyYears,
+    /// A chain of this many blocks with nothing behind it, the shape of a
+    /// network hours or days after it opened, whose band is most of
+    /// everything.
+    Young(usize),
+}
+
+impl Age {
+    fn name(self) -> String {
+        match self {
+            Self::ThirtyYears => "thirty years".to_string(),
+            Self::Young(blocks) => format!("{blocks} blocks"),
+        }
+    }
+}
+
+/// How far past the burst's last block the deepest question has to be
+/// before judging stops, in blocks.
+///
+/// Judging used to stop as soon as the deepest question reached the burst's
+/// last block. At that moment that block is the pinned header, and the tie
+/// counts the pinned header in the run, and the honest blocks just after it
+/// still carry most of the burst's difficulty, falling by the bound a block:
+/// newcomers were still refused when the count stopped, and every figure it
+/// gave was short. The tie lets go once the pinned header is past those few
+/// blocks, so this margin is many times what it needs, and the test checks
+/// that the last refusal came well inside it.
+const PAST_THE_BURST: usize = 3_000;
+
+/// An honest chain on schedule, a miner of 1 260 times its rate dating every
+/// block at the median floor until the retarget asks `spike` times the
+/// opening difficulty, and the honest miner alone again, block by block until
+/// the deepest question lands [`PAST_THE_BURST`] blocks past the burst.
+///
+/// A young chain's halvings are counted as a reader counts them, off the
+/// tip's age by the clock or its height, whichever is less: a burst runs the
+/// height ahead of the clock, so after one the clock decides.
+fn honest_spike(network: &Network, spike: u64, age: Age, seed: u64) -> Spike {
+    let steady: usize = match age {
+        Age::ThirtyYears => 1_500,
+        Age::Young(blocks) => blocks,
+    };
+    let target = network.params.target_block_time;
+    let difficulty = network.params.genesis_difficulty;
+    let rate = difficulty as f64 / target as f64;
+    let (history, old_levels, _) = chain(network);
+    let mut dice = Dice(seed);
+    let start = Walk::on_schedule_at(difficulty, target);
+    let origin = start.origin;
+    let mut window: Vec<HeaderSummary> = start.window;
+    let mut headers: Vec<(u64, u64, u128)> = Vec::new();
+    let mut total = match age {
+        Age::ThirtyYears => history,
+        Age::Young(_) => 0,
+    };
+    let mut hardest: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut report = Spike {
+        blocks: 0,
+        paid: 0.0,
+        until: 0,
+        refused: 0,
+        pinned_at_the_last_refusal: 0,
+        judged_to_the_end: false,
+    };
+    let mut clock = window.last().unwrap().timestamp;
+    let mut burst_ended: Option<(u64, usize)> = None;
+    let mut refused_since: Option<u64> = None;
+    for index in 0..steady + 200_000 {
+        let asked = next_difficulty(window.last().unwrap(), origin, target);
+        let last = *window.last().unwrap();
+        let median = median_time_past(&window).unwrap();
+        let bursting = index >= steady && burst_ended.is_none();
+        let timestamp = if bursting {
+            if asked >= spike * difficulty {
+                burst_ended = Some((clock, index));
+                clock.max(median + 1)
+            } else {
+                report.blocks += 1;
+                report.paid += asked as f64 / difficulty as f64;
+                median + 1
+            }
+        } else {
+            clock += dice.solve(asked, rate);
+            clock.max(median + 1)
+        };
+        if bursting && burst_ended.is_none() {
+            // The burst's own time, a few seconds at its rate, which honest
+            // stamps after it read off the clock.
+            clock += dice.solve(asked, 1_260.0 * rate);
+        } else if let Some(since) = refused_since.take() {
+            report.refused += timestamp - since;
+        }
+        window.push(HeaderSummary {
+            height: last.height + 1,
+            timestamp,
+            difficulty: asked,
+        });
+        if window.len() > RECENT_HEADERS {
+            window.remove(0);
+        }
+        let before = total;
+        total += u128::from(asked);
+        headers.push((timestamp, asked, total));
+        while hardest.back().is_some_and(|at| headers[*at].1 <= asked) {
+            hardest.pop_back();
+        }
+        hardest.push_back(index);
+        let Some((ended, first_honest)) = burst_ended else {
+            continue;
+        };
+        let levels = match age {
+            Age::ThirtyYears => old_levels,
+            Age::Young(_) => {
+                let by_the_clock = (timestamp - origin.timestamp) / target;
+                levels_for(by_the_clock.min(last.height + 1))
+            }
+        };
+        let questions = SAMPLES as u128 / u128::from(levels);
+        let band = before >> levels;
+        let deepest = before - band - band / questions;
+        let pinned = headers.partition_point(|header| header.2 <= deepest);
+        if pinned >= first_honest + PAST_THE_BURST {
+            report.judged_to_the_end = true;
+            break;
+        }
+        while hardest.front().is_some_and(|at| *at < pinned) {
+            hardest.pop_front();
+        }
+        let top = headers[*hardest.front().unwrap()].1;
+        if asked * MOST_FALL < top {
+            report.until = timestamp - ended;
+            report.pinned_at_the_last_refusal = pinned.saturating_sub(first_honest);
+            refused_since = Some(timestamp);
+        }
+    }
+    report
+}
+
+/// A burst that lifts an honest chain past the tie locks newcomers out of
+/// weighing it for hours on a long chain and for days on a young one, and
+/// costs whoever causes it days of the honest rate or more.
+///
+/// The tie refuses a tip more than [`MOST_FALL`] times below the hardest
+/// header from the pinned one up, so once a burst has raised the difficulty
+/// further than that, the honest chain that falls back is refused to every
+/// newcomer until the deepest question lands past the burst and the few
+/// honest blocks after it that still carry most of its difficulty. Under the
+/// moving average that took three blocks of four times each, minutes of a
+/// rented machine. Here the retarget asks thirty two times only of a chain
+/// five half lives ahead of its schedule, three hundred blocks, and the burst
+/// pays for every one of them: about `32 tau / (T ln 2)` blocks of the honest
+/// rate, forty five hours.
+///
+/// Measured at sixteen seeds on each network, judged until the deepest
+/// question is [`PAST_THE_BURST`] blocks past the burst: after bursts of 33 to
+/// 128 times, a thirty year chain refuses newcomers for up to about 920 target
+/// times, fifteen hours on testnet-8, and a chain of 300 to 2 000 blocks for up
+/// to about 2 100, thirty five hours. A burst of 1 024 times, which costs
+/// 88 000 blocks of the honest work and which the 2 October intruder's rate
+/// buys in seventy minutes, locks newcomers out for up to about 1 930 target
+/// times on the thirty year chain and 6 000 to 7 500, 100 to 124 hours, on a
+/// chain of 300 to 2 000 blocks: testnet-8's first days. The young chain's
+/// band is most of its work, so the deepest question passes a burst only once
+/// the honest chain has added a share of the burst's own work after it. The
+/// newcomer reads the chain from a peer that keeps it meanwhile.
+#[test]
+fn a_burst_past_the_tie_locks_newcomers_out_for_hours_and_costs_days() {
+    let ages = [
+        Age::ThirtyYears,
+        Age::Young(2_000),
+        Age::Young(1_000),
+        Age::Young(300),
+    ];
+    for network in networks() {
+        let target = network.params.target_block_time;
+        for age in ages {
+            // The longest lockout after the bursts the documents first
+            // measured, 33 to 128 times, and after one of 1 024 times.
+            let mut measured_before = 0u64;
+            let mut thousand = 0u64;
+            for spike in [33u64, 64, 128, 1_024] {
+                let mut until = 0u64;
+                let mut paid = f64::INFINITY;
+                let mut blocks = u64::MAX;
+                let mut margin = 0usize;
+                for seed in 0..16 {
+                    let report = honest_spike(&network, spike, age, seed);
+                    assert!(
+                        report.judged_to_the_end,
+                        "{} {}: judging stopped before the deepest question passed the burst",
+                        network.name,
+                        age.name()
+                    );
+                    until = until.max(report.until);
+                    paid = paid.min(report.paid);
+                    blocks = blocks.min(report.blocks);
+                    margin = margin.max(report.pinned_at_the_last_refusal);
+                    assert!(report.refused <= report.until);
+                }
+                let hours = until as f64 / 3_600.0;
+                let out = until / target;
+                println!(
+                    "  {} {}: a burst of {blocks} blocks to {spike} times costs {paid:.0} \
+                     honest blocks, {:.0} h, and locks newcomers out for up to {hours:.1} h, \
+                     {out} targets; the last refusal had the pinned header {margin} blocks past \
+                     the burst",
+                    network.name,
+                    age.name(),
+                    paid * target as f64 / 3_600.0,
+                );
+                // What reaching the spike is worth: a half life of blocks for
+                // every doubling, each dearer than the last.
+                assert!(
+                    paid > 80.0 * (spike - 1) as f64,
+                    "a burst to {spike} times cost only {paid:.0} honest blocks"
+                );
+                // The margin judging runs to is many times what the tie needs.
+                assert!(
+                    margin < PAST_THE_BURST / 10,
+                    "{} {}: the tie still refused with the pinned header {margin} blocks past \
+                     the burst, too near the {PAST_THE_BURST} judging stops at",
+                    network.name,
+                    age.name()
+                );
+                if spike == 1_024 {
+                    thousand = out;
+                } else {
+                    measured_before = measured_before.max(out);
+                }
+            }
+            // The documents' figures, held from both sides. Judged only until
+            // the deepest question reached the burst's last block, the thirty
+            // year chain gave 676 targets at most and the two thousand block
+            // chain 1 932, which is what the documents said before.
+            let (before, after) = match age {
+                Age::ThirtyYears => ((850, 1_000), (1_800, 2_100)),
+                Age::Young(_) => ((1_950, 2_300), (5_500, 8_000)),
+            };
+            for (out, (least, most), bursts) in [
+                (measured_before, before, "33 to 128 times"),
+                (thousand, after, "1 024 times"),
+            ] {
+                assert!(
+                    (least..most).contains(&out),
+                    "{} {}: newcomers were locked out for up to {out} targets after bursts \
+                     of {bursts}, outside the {least} to {most} the documents rest on",
+                    network.name,
+                    age.name(),
+                );
+            }
         }
     }
 }

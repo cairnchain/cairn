@@ -13,7 +13,7 @@ use cairn_ledger::block::BLOCK_VERSION;
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::node::BAD_BLOCK_WINDOW;
 use cairn_net::node::{
-    Behind, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND,
+    Behind, Opening, Probation, Stranded, Unjudged, Unread, Unweighable, Unwritten, MAX_BEHIND,
 };
 use cairn_net::{
     seeds, Filling, Joined, Node, NodeError, Restored, TurnedAway, Unanswered, NAME_LOOKUP_PERIOD,
@@ -440,6 +440,16 @@ fn watch(node: &Node, options: &options::Options, running: &AtomicBool) -> Endin
                     node.total_work(),
                 )
             );
+            // A network that has not opened yet by this machine's clock: no
+            // chain, no height and nothing to follow, which is every node
+            // installed ahead of an announced opening, and which without this
+            // line read like a node that had lost its network. First, because
+            // before the opening it is the whole of why nothing moves.
+            if let Some(opening) = node.opening() {
+                for line in wrapped(&not_open_yet(&opening)) {
+                    say!("           {line}");
+                }
+            }
             say_what_the_numbers_do_not(node, &directory);
         }
         thread::sleep(TICK);
@@ -1140,24 +1150,13 @@ fn roughly(seconds: u64) -> String {
 /// material for that reading rather than the reading.
 fn clock_is_slow(behind: &Behind) -> String {
     let out_by = behind.seconds.saturating_sub(behind.drift);
-    let evidence = if behind.own_first_block {
-        "this node refused the first block of its own network, which is written into this \
-         build and which no peer sent it"
-            .to_owned()
-    } else {
-        format!(
-            "{} blocks from {} peers were refused for being dated ahead of it",
-            behind.blocks, behind.peers,
-        )
-    };
-    let cost = if behind.own_first_block {
-        "So this node has no chain and cannot get one: with nothing to start from it refuses \
-         every peer's chain in the same way, keeps nobody, and shows no height at all."
-    } else {
-        "Those blocks are not being followed, and the peers offering them are offering what \
-         the rest of the network has already taken, so a node in this state falls behind the \
-         chain while looking like one that simply has quiet peers."
-    };
+    let evidence = format!(
+        "{} blocks from {} peers were refused for being dated ahead of it",
+        behind.blocks, behind.peers,
+    );
+    let cost = "Those blocks are not being followed, and the peers offering them are offering \
+                what the rest of the network has already taken, so a node in this state falls \
+                behind the chain while looking like one that simply has quiet peers.";
     format!(
         "the clock on this machine looks at least {out_by} seconds behind the network's. A \
          block dated more than {} seconds ahead of the reading node's own clock is refused, \
@@ -1171,6 +1170,32 @@ fn clock_is_slow(behind: &Behind) -> String {
          written by whoever mined the block, so a run of fast miners would read the same \
          from here, and the clock on this machine settles which it is in a second.",
         behind.drift, behind.seconds,
+    )
+}
+
+/// What an operator is told while this node's network has not opened by this
+/// machine's clock.
+///
+/// A network is released and installed ahead of the opening its first block
+/// is dated at, so this is what every node started early prints, and it is
+/// not a fault: the node lays the first block down by itself and follows the
+/// network from there, and a miner started with it begins then. It used to
+/// read the same refusal as proof the clock was slow. The clock is still
+/// named, because a machine behind a network that has already opened reads
+/// exactly the same from here, and the date is what tells the two apart.
+fn not_open_yet(opening: &Opening) -> String {
+    format!(
+        "this network opens on {}, in about {} by this machine's clock: its first block, \
+         written into this build, is dated then, and no block is taken from more than {} \
+         seconds ahead of the clock reading it. Nothing needs doing. This node has no chain \
+         until then, lays the first block down by itself {} seconds before the opening and \
+         follows the network from there, and a miner started with it begins at the same \
+         moment. If that date has already passed, it is the clock on this machine that is \
+         behind, and the time on this machine is what to look at.",
+        cairn_ledger::genesis::when(opening.at),
+        roughly(opening.in_seconds),
+        opening.drift,
+        opening.drift,
     )
 }
 
@@ -1525,11 +1550,11 @@ mod said_out_loud {
     }
 
     use super::{
-        cannot_weigh, clock_is_slow, dropped_a_write, falling_behind, lost_the_disk, roughly,
-        rules_running_out, still_filling, too_old, what_the_chain_did, what_was_restored, wrapped,
-        Accepted, ConsensusParams, BLOCK_VERSION,
+        cannot_weigh, clock_is_slow, dropped_a_write, falling_behind, lost_the_disk, not_open_yet,
+        roughly, rules_running_out, still_filling, too_old, what_the_chain_did, what_was_restored,
+        wrapped, Accepted, ConsensusParams, BLOCK_VERSION,
     };
-    use cairn_net::node::{Behind, Restored, Unjudged, Unweighable, Unwritten, Writing};
+    use cairn_net::node::{Behind, Opening, Restored, Unjudged, Unweighable, Unwritten, Writing};
     use cairn_net::Filling;
 
     /// A stretch under a minute is said in seconds, the way `roughly` says
@@ -1647,7 +1672,6 @@ mod said_out_loud {
             drift: 7_200,
             blocks: 12,
             peers: 3,
-            own_first_block: false,
         });
         assert!(
             text.contains("300 seconds behind"),
@@ -1673,26 +1697,38 @@ mod said_out_loud {
             "a timestamp is written by whoever mined the block, so this is \
              evidence like every other line in this file: {text}"
         );
+    }
 
-        // The other half, which no peer sent and which settles it alone.
-        let own = clock_is_slow(&Behind {
-            seconds: 20_000,
-            drift: 7_200,
-            blocks: 1,
-            peers: 0,
-            own_first_block: true,
+    /// A node started before its network opens says when the network opens,
+    /// that it opens the chain by itself, and that the clock is the thing to
+    /// look at only if the date has passed.
+    ///
+    /// AUDIT, repaired (testnet-8, 01-F1). Every node installed ahead of an
+    /// announced opening refuses its first block for being dated ahead of its
+    /// clock, and this used to tell its operator the clock was behind, with
+    /// certainty, and that the node had no chain and could not get one.
+    #[test]
+    fn a_node_before_its_networks_opening_says_when_it_opens() {
+        let text = not_open_yet(&Opening {
+            at: 1_791_309_600,
+            in_seconds: 5 * 3_600 + 100,
+            drift: 600,
         });
         assert!(
-            own.contains("first block of its own network"),
-            "a node that cannot start needs the reason it cannot start: {own}"
+            text.contains("opens on 6 October 2026 at 18:00:00 UTC, in about 5 hours"),
+            "the opening, as a date and as a wait: {text}"
         );
         assert!(
-            own.contains("no chain and cannot get one"),
-            "and what that costs, which is everything: {own}"
+            text.contains("by itself 600 seconds before the opening"),
+            "and that nothing has to be done for the node to open: {text}"
         );
         assert!(
-            !own.contains("0 peers"),
-            "nobody sent it, so nobody is counted for it: {own}"
+            text.contains("If that date has already passed"),
+            "the clock is named only for a date in the past: {text}"
+        );
+        assert!(
+            !text.contains("cannot get one") && !text.contains("looks at least"),
+            "a node waiting for an opening is not told its clock is slow: {text}"
         );
     }
 

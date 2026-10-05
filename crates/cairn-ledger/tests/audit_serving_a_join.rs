@@ -37,7 +37,7 @@ use std::cell::Cell;
 use cairn_accumulator::{Forest, ForestProof};
 use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::NetworkId;
-use cairn_ledger::pow::DIFFICULTY_WINDOW;
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{open_start, MOST_TAIL, SAMPLES};
 use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
@@ -154,7 +154,7 @@ fn serve() -> Served {
 #[test]
 fn the_run_this_chain_asks_for_is_far_past_what_a_sampling_carries() {
     let tip = header_at(BLOCKS - 1).unwrap();
-    let window = u64::try_from(DIFFICULTY_WINDOW).unwrap();
+    let window = BELOW_THE_PINNED;
 
     // Worked out the way `open_start` works it out, from the draw itself.
     let drawn = cairn_ledger::sampling::draw(

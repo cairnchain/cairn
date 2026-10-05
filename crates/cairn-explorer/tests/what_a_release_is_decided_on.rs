@@ -183,3 +183,39 @@ fn release_decision_sees_every_file_a_program_is_built_from() {
          the release decision does not look at it"
     );
 }
+
+/// A release refuses a first block still marked provisional, in the job every
+/// release passes through, and reads the two files `remint` lists such lines
+/// in.
+///
+/// AUDIT, repaired (testnet-8, 03-F3). `release.yml` released any push to
+/// `main` whose version had no tag, so merging a restart before its first
+/// block was minted for the opening published a network that would never
+/// open, and nothing said so.
+#[test]
+fn a_release_refuses_a_first_block_still_marked_provisional() {
+    let (decide, _) = RELEASE
+        .split_once("\n  verify:")
+        .expect("the release has a job deciding it before the checks");
+    let step = decide
+        .split_once("- name: Refuse a first block still marked provisional")
+        .map(|(_, step)| step)
+        .expect("the deciding job refuses a provisional first block");
+    assert!(
+        step.contains("if: steps.look.outputs.release == 'true'"),
+        "the refusal is not asked of every release: {step}"
+    );
+    assert!(
+        step.contains("grep -n -i provisional crates/cairn-ledger/src/genesis.rs README.md")
+            && step.contains("exit 1"),
+        "the refusal does not stop on the word in both files: {step}"
+    );
+    for job in ["verify:", "build:"] {
+        let (_, rest) = RELEASE.split_once(&format!("\n  {job}")).unwrap();
+        let needs = rest.lines().find(|line| line.contains("needs:")).unwrap();
+        assert!(
+            needs.contains("decide"),
+            "`{job}` does not wait for the job that refuses: {needs}"
+        );
+    }
+}

@@ -8,7 +8,7 @@ strap:
   carried in sixty four hashes.
 byline: Draft, 31 August 2026
 byline: [github.com/cairnchain/cairn](https://github.com/cairnchain/cairn)
-byline: testnet-7, no mainnet exists
+byline: testnet-8, no mainnet exists
 abstract: Abstract
 footer: Cairn · draft whitepaper · 29 August 2026
 footer: Nothing here is investment advice
@@ -345,26 +345,105 @@ privileged, the opening is exactly where that claim is tested.
 
 ### Difficulty and timestamps
 
-Difficulty retargets every block over a linearly weighted moving average
-of the previous 90, with solve times clamped at six times the target in
-either direction and a maximum factor of four per retarget. A large miner
-arriving or leaving changes the rate without stranding the chain.
+Difficulty retargets every block against a schedule fixed at the
+network's first block. The rule is ASERT, which Bitcoin Cash has run since
+2020: a chain one half life ahead of its schedule is asked for twice the
+difficulty its first block carried and one half life behind for half, the
+half life is sixty blocks, an hour on the public networks, and no single
+retarget moves the difficulty by more than a factor of four either way.
+What a block is asked depends on where its chain stands, not on the path it
+took there, so a large miner arriving or leaving changes the rate without
+stranding the chain.
 
-In either direction is the load-bearing part, and it was not there at
-first. A solve time was read as the gap from the parent, floored at one
-second, which made lying about time asymmetric: a miner dating its own
-blocks six minutes ahead took six minutes out of the measurement, and the
-honest block that followed put one second back. The retarget then read a
-chain running far slower than it was and answered by lowering the
-difficulty, and since the arithmetic does not depend on the difficulty
-there was no level at which it settled. Past roughly a sixth of the hash
-rate the difficulty fell to its floor within the hour, at which point
-cumulative work stops measuring electricity and the fork choice stops
-meaning anything. The measurement now runs along a timeline of its own
-that moves only by what it counted, so a spike is repaid in full by the
-blocks after it and a window telescopes to the distance between its own
-ends however its middle was stamped. Simulated against every share up to
-a half, the fastest a liar can now make the chain run is the target.
+It replaced a moving average over ninety blocks, and the reason is worth
+stating because the testnet found it. On 2 October 2026 a stranger with
+about twelve hundred times the honest hash rate mined eighty blocks in two
+minutes and left. The moving average rose by its whole bound a block while
+the burst lasted and fell back only as the burst's blocks left its window,
+ninety slow blocks later: the next block was asked 768 times what the one
+before the burst carried, and the network nearly stopped for 33 hours. The
+schedule reads the same eighty blocks as a chain 4 656 seconds ahead of
+itself and asks the next block for 2.45 times the difficulty, and the
+honest miner walks back onto the schedule on its own.
+
+What a departing miner leaves behind grows with the logarithm of what it
+paid rather than with what it paid. Reaching a difficulty `X` times the
+honest one takes a branch `log2(X)` half lives ahead of its schedule, about
+`X` times the honest rate for `tau / ln 2`; the next honest block waits
+about `X` target times, and the honest chain gives back the branch's lead,
+`log2(X)` half lives, in all. Both rules, measured on one basis:
+
+<div class="scroll">
+  <table>
+    <caption>The honest miner's next hundred blocks after a burst that leaves: how late they come, against the hours of the honest rate the burst paid</caption>
+    <thead>
+      <tr>
+        <th>Burst</th>
+        <th class="n">Moving average</th>
+        <th class="n">Delay over cost</th>
+        <th class="n">Schedule</th>
+        <th class="n">Delay over cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>The 2 October burst, eighty blocks as stamped</td>
+        <td class="n">45 h for 51 h</td>
+        <td class="n">0.89</td>
+        <td class="n">1.0 h for 1.9 h</td>
+        <td class="n">0.52</td>
+      </tr>
+      <tr>
+        <td>1 260 times the honest rate for five minutes</td>
+        <td class="n">71 h for 117 h</td>
+        <td class="n">0.61</td>
+        <td class="n">5.6 h for 106 h</td>
+        <td class="n">0.053</td>
+      </tr>
+      <tr>
+        <td>1 260 times the honest rate for an hour</td>
+        <td class="n">298 h for 1 177 h</td>
+        <td class="n">0.25</td>
+        <td class="n">11.3 h for 1 259 h</td>
+        <td class="n">0.009</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="fig-note">
+  The plan's simulator, re-run with both rules exactly as the code computes
+  them, the schedule's bound of four included: random block times, the
+  honest miner's clock on its blocks, the median of six seeds. The 2 October
+  rows start from the real chain's last ninety blocks before the burst. The
+  real chain's next hundred blocks came 31 hours late, the first of them
+  luckier than the median; the schedule's figures are held by the tests in
+  <code>tests/the_difficulty_follows_the_clock.rs</code>.
+</p>
+
+For the same effort the honest chain is held up thirteen to twenty six
+times less than under the moving average, and each further hour of delay
+costs more than the last. A burst as small as the 2 October one still
+costs the honest chain about half of what it paid: the schedule keeps it
+small, an hour, rather than cheap.
+
+Lying about time buys little under it, and that was not always true. The
+moving average's first version read a solve time as the gap from the
+parent, floored at one second, so a miner dating its own blocks six minutes
+ahead took six minutes out of the measurement and the honest block after it
+put one second back; past roughly a sixth of the hash rate the difficulty
+fell to its floor within the hour. Under the schedule only the parent's
+timestamp is read, so a block dated as late as a reader accepts lowers the
+next difficulty by about eleven per cent and the next honest timestamp takes
+all of it back. Simulated against every share up to a half, the fastest a
+liar can make the chain run is the target.
+
+The schedule starts at the first block, which makes that block's date a rule
+for good. A network opened long after its first block is dated stands behind
+its schedule from the start, and every block until it has caught up is asked
+the floor: nearly free, and about half a million of them for a devnet opened
+four weeks late. So a public network's first block is minted the day it
+opens.
 
 Timestamps are validated against the median of the previous 11 blocks
 rather than against the parent. A miner writes its own timestamp but holds
@@ -372,9 +451,10 @@ one vote in a median, which removes the single-block manipulation that a
 later-than-parent rule permits. A block may not be dated more than ten
 blocks ahead of the receiving node's clock, ten minutes on the public
 networks, nor before the moment the network opened. The allowance is
-counted in blocks because the retarget's clamp is: at two hours, which is
-what it was, a minority dating its blocks at the allowance held the median
-in the future and made the chain run half again as slowly as its target.
+counted in blocks because the retarget's half life is, and ten is a sixth
+of it on every network: at two hours, which is what it was, a minority
+dating its blocks at the allowance held the median in the future and made
+the chain run half again as slowly as its target.
 
 ### Fork choice
 
@@ -587,18 +667,21 @@ handed is then one of its headers, with whatever ledger it likes.
 What was missing is that the top of a chain was tied to no difficulty
 anybody could check. So the run from the deepest header the draw
 actually landed on, up to the tip, travels with the weighing and is
-walked under the retarget: each header carries the difficulty its window
-demands, dates after that window's median, and adds its own work. The
+walked under the retarget: each header carries the difficulty its parent
+demands against the network's schedule, dates after the median of the
+window below it, and adds its own work. The
 window below the pinned header comes along too and is honest by
 construction, because those headers have to chain into it, and swapping
 them would mean having mined the pinned header on top of one's own.
 
 The tip's timestamp is then measured against the reader's own clock,
 which is what turns the whole thing into a cost. Blocks at the
-difficulty floor have to average about half the target or the retarget
-demands more of them, so the thousand cheap blocks a forger needs span
-more than eight hours of stated time, and they cannot be backdated
-because they have to date after the honest window they descend from.
+difficulty floor have to stand behind their schedule, and past the half
+life of slack the floor's edge gives they average the target or the
+retarget demands more of them, so the thousand cheap blocks a forger
+needs span more than sixteen hours of stated time, and they cannot be
+backdated because they have to date after the honest window they descend
+from.
 More than ten blocks ahead of the reader is refused. What the attack
 costs is therefore real waiting, and the honest chain out-mines it while
 it waits.
@@ -641,12 +724,21 @@ forger that dislikes its questions buys another tip, and the retarget would
 let it walk its run down to the difficulty floor, where a tip costs one
 hash. So a newcomer refuses a tip more than 32 times below the hardest
 header of its run. That puts a tip at no less than a thousandth of an
-average block on a chain that ran to schedule, measured at 2^18 hashes at
+average block on a chain that ran to schedule, measured at 2^18.9 hashes at
 the public test network's opening difficulty, and it costs an honest chain
 what the cap does: one
-that loses more than about sixteen times its hash rate is read rather than
+that loses more than about twenty times its hash rate is read rather than
 weighed, on the test network from about eight hours after the loss and for
-under six days beyond what the cap already refuses.
+under five and a half days beyond what the cap already refuses. A burst
+that lifts the difficulty more than 32 times and leaves does the same: after
+bursts to 128 times, for up to fifteen hours on an old chain and thirty five
+on a young one, and after a burst to 1 024 times, for 100 to 124 hours on a
+chain a few days old. It costs whoever causes it about two days of the
+honest rate for every thirty two times: sixty days of it for the larger
+burst, which the 2 October intruder's rate pays in seventy minutes. A
+newcomer refused this way holds it against nobody and reads the chain block
+by block from a peer that kept it, which on a young chain every node does
+unless told otherwise.
 
 The count follows from the assumption the chain already makes. A forger
 cannot mine what it did not mine, so a chain heavier than the honest one,
@@ -867,7 +959,7 @@ estimated, on one core of an ordinary machine.
   <div><span class="k">Cold set carried by a node</span><span class="v">64 hashes, 2 kB</span></div>
   <div><span class="k">Grace window</span><span class="v">64 blocks, 8 192 notes</span></div>
   <div><span class="k">Place price, destroyed</span><span class="v">6 000 pebbles</span></div>
-  <div><span class="k">Difficulty window</span><span class="v">90 blocks, LWMA</span></div>
+  <div><span class="k">Difficulty retarget</span><span class="v">ASERT, half life 60 blocks</span></div>
   <div><span class="k">Median time past</span><span class="v">11 blocks</span></div>
   <div><span class="k">Maximum retarget</span><span class="v">factor 4</span></div>
   <div><span class="k">Maximum reorganisation depth</span><span class="v">1 024 blocks</span></div>
@@ -1068,7 +1160,7 @@ failures have in common.
 
 **A rule changes at a height, and a node that has not updated by
 then is on another chain.** Renumbering the network, which is what
-the test networks did six times, throws every balance away with the
+the test networks did seven times, throws every balance away with the
 chain; on a network carrying value that is not a mechanism but a loss. So
 a rule that changes names the height it takes effect at, and blocks below
 it go on being judged by the rule that judged them: nothing already mined

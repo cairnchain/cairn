@@ -62,9 +62,10 @@ use std::collections::HashMap;
 use cairn_accumulator::forest::ForestProof;
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
-use cairn_ledger::block::{BlockHeader, HeaderSummary};
+use cairn_ledger::block::BlockHeader;
 use cairn_ledger::note::Note;
-use cairn_ledger::pow::{meets_target, next_difficulty, work_of, DIFFICULTY_WINDOW};
+use cairn_ledger::pow::{meets_target, next_difficulty, work_of};
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start_with_count, covering, draw, levels_of, seed_of, work_before, Sample, SampledStart,
     StartError, MOST_FALL, SAMPLES, SHALLOWEST,
@@ -570,7 +571,6 @@ fn forge(
     let last = honest.len().saturating_sub(1);
     let mut shown: Vec<BlockHeader> = Vec::with_capacity(honest.len());
     let mut before_tip = Archive::new();
-    let mut window: Vec<HeaderSummary> = Vec::with_capacity(DIFFICULTY_WINDOW + 1);
 
     for (index, header) in honest.iter().enumerate() {
         let mut copy = *header;
@@ -583,7 +583,8 @@ fn forge(
                 copy.timestamp = header
                     .timestamp
                     .saturating_add(stretch.saturating_mul(steps));
-                copy.difficulty = next_difficulty(&window, params.target_block_time);
+                copy.difficulty =
+                    next_difficulty(&below.summary(), params.origin(), params.target_block_time);
             }
             copy.total_work = below.total_work.saturating_add(work_of(copy.difficulty));
             if u64::try_from(index).unwrap() == fork + 1 {
@@ -597,14 +598,6 @@ fn forge(
             copy = mine_block(block, ATTEMPTS)
                 .expect("a nonce exists for a header this cheap")
                 .header;
-        }
-        window.push(HeaderSummary {
-            height: copy.height,
-            timestamp: copy.timestamp,
-            difficulty: copy.difficulty,
-        });
-        if window.len() > DIFFICULTY_WINDOW + 1 {
-            window.remove(0);
         }
         shown.push(copy);
         // Every header but the tip, since the tip is not in its own history.
@@ -652,7 +645,7 @@ impl Forgery {
             .map(|sample: &Sample| sample.header.height)
             .max()
             .unwrap_or(0);
-        let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+        let from = usize::try_from(deepest.saturating_sub(BELOW_THE_PINNED)).unwrap();
         let mut tail = self.shown[from..last].to_vec();
         tail.push(tip);
 

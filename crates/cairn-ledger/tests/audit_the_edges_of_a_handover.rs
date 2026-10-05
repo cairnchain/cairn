@@ -51,6 +51,10 @@ const CLOCK: u64 = 1_000;
 fn params() -> ConsensusParams {
     let mut params = ConsensusParams::testnet().with_burial(BURIAL);
     params.genesis_difficulty = OPENING;
+    // The network opens when its first block is dated, as every published
+    // one does, so the retarget's schedule starts at that block and moving
+    // the opening to the earliest header below moves nothing else.
+    params.opens_at = CLOCK;
     params
 }
 

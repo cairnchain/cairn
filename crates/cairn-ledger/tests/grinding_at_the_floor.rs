@@ -5,10 +5,10 @@
 //! its questions finds another tip and asks again. The documents used to say a
 //! tip costs the tip's own work, which made grinding a cost measured in the
 //! chain's difficulty. The run up to the tip is held to the difficulty the
-//! retarget demands, and the retarget lets a run whose stated gaps are long
-//! walk that demand down to the floor, where every nonce is a valid tip. So
-//! for a while the price of a seed was the walk, paid once, and then the
-//! hashes of the draw each tip seeds.
+//! retarget demands, and the retarget lets a run dated behind its schedule
+//! walk that demand down to the floor, a quarter a header, where every nonce
+//! is a valid tip. So for a while the price of a seed was the walk, paid once,
+//! and then the hashes of the draw each tip seeds.
 //!
 //! A newcomer now refuses a tip standing more than [`MOST_FALL`] times below
 //! the hardest header of its run, from the pinned header up. These tests hold
@@ -17,7 +17,7 @@
 //! deepest question lands, so that the pinned header is cheap too, is refused
 //! all the same; an honest chain that lost sixteen times its hash rate is still
 //! weighed, and one that lost forty eight is not until its run has passed the
-//! loss. What the rule is worth in hashes, on testnet-7 and the devnet, is
+//! loss. What the rule is worth in hashes, on testnet-8 and the devnet, is
 //! measured in `the_price_of_a_seed.rs`. The walk and the budget the
 //! documents quote are held here too.
 
@@ -34,8 +34,9 @@ use cairn_accumulator::forest::ForestProof;
 use cairn_accumulator::Archive;
 use cairn_ledger::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
 use cairn_ledger::pow::{
-    meets_target, next_difficulty, DIFFICULTY_WINDOW, MIN_DIFFICULTY, RECENT_HEADERS,
+    meets_target, next_difficulty, HALF_LIFE_IN_BLOCKS, MIN_DIFFICULTY, RECENT_HEADERS,
 };
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start, draw, levels_of, seed_of, work_before, Sample, SampledStart, StartError,
     MOST_FALL, SAMPLES,
@@ -46,23 +47,28 @@ use cairn_primitives::Hash32;
 
 const ATTEMPTS: u64 = 1 << 24;
 const START: u64 = 1_000_000;
-/// Blocks stated a second apart, which the retarget answers with the
-/// steepest climb it allows.
-const CLIMB: usize = 6;
-/// Blocks on schedule, over which the difficulty settles.
+/// Blocks on schedule, which hold the difficulty where it opened.
 const PLATEAU: usize = 100;
-/// Where the chains below that do not start at the floor open, and sit until
-/// something moves them.
+/// Where the chains below open, and sit until something moves them.
 const OPENING: u64 = 4_096;
 
+/// A network that opened when these chains' first blocks are dated, at the
+/// difficulty they carry, so the retarget's schedule starts there.
 fn params() -> ConsensusParams {
-    ConsensusParams::testnet()
+    ConsensusParams {
+        opens_at: START,
+        genesis_difficulty: OPENING,
+        ..ConsensusParams::testnet()
+    }
 }
 
-/// The gap the retarget clamps a solve time to, six targets. Stating it on
-/// every block walks the demand down as fast as the rule allows.
+/// Two half lives and a target past the last block, after which the schedule
+/// asks for a quarter of the difficulty, the most the bound lets one header
+/// fall. Stating it on every block walks the demand down as fast as the rule
+/// allows.
 fn descent_gap() -> u64 {
-    6 * params().target_block_time
+    let target = params().target_block_time;
+    2 * HALF_LIFE_IN_BLOCKS * target + target + 1
 }
 
 /// A chain of headers, and the forest of everything below its tip.
@@ -90,8 +96,18 @@ fn next(previous: &BlockHeader, history: Hash32, timestamp: u64, difficulty: u64
 }
 
 fn window(headers: &[BlockHeader]) -> Vec<HeaderSummary> {
-    let from = headers.len().saturating_sub(DIFFICULTY_WINDOW + 1);
+    let from = headers.len().saturating_sub(RECENT_HEADERS);
     headers[from..].iter().map(BlockHeader::summary).collect()
+}
+
+/// What the retarget asks of the header after the last of `recent`.
+fn asked_after(recent: &[HeaderSummary]) -> u64 {
+    let params = params();
+    next_difficulty(
+        recent.last().unwrap(),
+        params.origin(),
+        params.target_block_time,
+    )
 }
 
 /// Mines a chain header by header, each at exactly the difficulty the
@@ -102,8 +118,9 @@ struct Miner {
 }
 
 impl Miner {
-    fn opened_at(difficulty: u64) -> Self {
+    fn opened() -> Self {
         let params = params();
+        let difficulty = params.genesis_difficulty;
         let mut archive = Archive::new();
         let genesis = mine_header(
             BlockHeader {
@@ -130,7 +147,7 @@ impl Miner {
     }
 
     fn demanded(&self) -> u64 {
-        next_difficulty(&window(&self.below), params().target_block_time)
+        asked_after(&window(&self.below))
     }
 
     fn header(&self, gap: u64) -> BlockHeader {
@@ -177,7 +194,7 @@ struct Sketch {
 
 impl Sketch {
     fn demanded(&self) -> u64 {
-        next_difficulty(&self.recent, params().target_block_time)
+        asked_after(&self.recent)
     }
 
     fn step(&mut self, gap: u64) {
@@ -188,7 +205,7 @@ impl Sketch {
             timestamp: last.timestamp + gap,
             difficulty,
         });
-        if self.recent.len() > DIFFICULTY_WINDOW + 1 {
+        if self.recent.len() > RECENT_HEADERS {
             self.recent.remove(0);
         }
         self.work += u128::from(difficulty);
@@ -210,13 +227,10 @@ impl Sketch {
     }
 }
 
-/// Climbs, holds, and then walks the retarget's demand down to the floor,
-/// every header carrying exactly the difficulty the rules demand of it.
+/// Holds, and then walks the retarget's demand down to the floor, every
+/// header carrying exactly the difficulty the rules demand of it.
 fn a_chain_that_ends_at_the_floor() -> Chain {
-    let mut miner = Miner::opened_at(MIN_DIFFICULTY);
-    for _ in 0..CLIMB {
-        miner.push(1);
-    }
+    let mut miner = Miner::opened();
     for _ in 0..PLATEAU {
         miner.push(params().target_block_time);
     }
@@ -246,7 +260,7 @@ const WALKED_TO: u64 = 8;
 /// to, falls inside the cheap stretch.
 fn a_chain_cheap_where_the_deepest_question_lands() -> Chain {
     let target = params().target_block_time;
-    let mut miner = Miner::opened_at(OPENING);
+    let mut miner = Miner::opened();
     for _ in 0..PLATEAU {
         miner.push(target);
     }
@@ -300,7 +314,7 @@ fn a_chain_cheap_where_the_deepest_question_lands() -> Chain {
 /// asks of the rate that remains, until the retarget has answered.
 fn a_chain_that_lost(loss: u64) -> Chain {
     let target = params().target_block_time;
-    let mut miner = Miner::opened_at(OPENING);
+    let mut miner = Miner::opened();
     for _ in 0..200 {
         miner.push(target);
     }
@@ -337,7 +351,7 @@ fn weighing(chain: &Chain, tip: BlockHeader) -> (SampledStart, Vec<u128>) {
         })
         .collect();
     let pinned = samples.iter().map(|s| s.header.height).max().unwrap();
-    let from = usize::try_from(pinned.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+    let from = usize::try_from(pinned.saturating_sub(BELOW_THE_PINNED)).unwrap();
     let parent = tip.height - 1;
     let mut tail = chain.below[from..].to_vec();
     tail.push(tip);
@@ -369,8 +383,8 @@ fn pinned_of(start: &SampledStart) -> BlockHeader {
 /// other nonce of it.
 ///
 /// The documents priced a fresh seed at the tip's own work, and the rules let
-/// a tip cost one hash: this chain ran at over a thousand and walked the
-/// demand down to the floor inside the retarget, and its tip was weighed; so
+/// a tip cost one hash: this chain ran at four thousand and walked the demand
+/// down to the floor inside the retarget, and its tip was weighed; so
 /// were eight more, each a nonce and nothing else, each with a draw of its
 /// own. Nothing compared the tip with the run it stands on, so a forger paid
 /// for the walk once and then asked for new questions at the price of a
@@ -393,10 +407,13 @@ fn a_tip_walked_down_to_the_floor_is_refused_and_so_is_every_nonce_of_it() {
         );
         let (start, questions) = weighing(&chain, tip);
         let pinned = pinned_of(&start);
+        // The walk down is six headers of a quarter each, so the deepest
+        // question lands in it more often than not; what matters is that it
+        // lands on a header more than the fall above the floor.
         assert!(
-            pinned.difficulty > 1_000,
-            "the draw pinned a header at difficulty {}, so the chain never ran above the floor \
-             and this shows nothing about a descent",
+            pinned.difficulty > MOST_FALL,
+            "the draw pinned a header at difficulty {}, within the fall of the floor, so this \
+             shows nothing about a descent",
             pinned.difficulty
         );
         let refused = check_start(&start, now, &params);
@@ -426,7 +443,7 @@ fn a_tip_walked_down_to_the_floor_is_refused_and_so_is_every_nonce_of_it() {
 /// where the deepest question lands, climbs out of it to carry the rest of
 /// the work, and walks back down to a tip within the fall of the cheap
 /// header. Tied to the pinned header, that tip was weighed; measured at
-/// testnet-7's difficulty in `the_price_of_a_seed.rs`, it costs a forger a
+/// testnet-8's difficulty in `the_price_of_a_seed.rs`, it costs a forger two
 /// thousand hashes rather than a quarter of a million. Held to the hardest
 /// header of the run it is refused, and the draw is ground until it pins the
 /// cheap stretch so that the case is the one the rule has to answer.
@@ -518,14 +535,18 @@ fn a_chain_that_lost_sixteen_times_its_hash_rate_is_weighed_and_one_that_lost_fo
 }
 
 /// The walk to the floor, from a real difficulty, is paid once and in stated
-/// time: hundreds of blocks and days of timestamps at the clamp ceiling.
+/// time: a handful of headers, each falling by the whole bound, and a half
+/// life of timestamps for every halving.
 ///
 /// The figures the documents quote for it, measured on the shipped retarget
 /// from a window on schedule at each difficulty. The work of the walk is a
-/// few blocks' worth at the difficulty it starts from, and the time is what a
-/// forger who forked deep has anyway. The walk is still there to be made; the
-/// tip it ends on is what a newcomer now refuses, which the first test above
-/// holds.
+/// block and a third at the difficulty it starts from, the first header and a
+/// quarter of each before it, and the time is what a forger who forked deep
+/// has anyway. Under the moving average this replaced it was 611 and 826
+/// headers, 61 and 82 hours, and up to twenty one blocks' work: the new rule
+/// walks down faster and asks less stated time, and neither is what the price
+/// of a seed rests on. The walk is still there to be made; the tip it ends on
+/// is what a newcomer now refuses, which the first test above holds.
 #[test]
 fn the_walk_to_the_floor_is_paid_once_in_hours_of_stated_time() {
     let target = params().target_block_time;
@@ -539,11 +560,15 @@ fn the_walk_to_the_floor_is_paid_once_in_hours_of_stated_time() {
                 difficulty: start,
             })
             .collect();
+        let origin = cairn_ledger::pow::Origin {
+            timestamp: START,
+            difficulty: start,
+        };
         let opened = recent.last().unwrap().timestamp;
         let mut blocks = 0u64;
         let mut work: u128 = 0;
         loop {
-            let demanded = next_difficulty(&recent, target);
+            let demanded = next_difficulty(recent.last().unwrap(), origin, target);
             if demanded == MIN_DIFFICULTY {
                 break;
             }
@@ -570,14 +595,14 @@ fn the_walk_to_the_floor_is_paid_once_in_hours_of_stated_time() {
             .iter()
             .map(|(bits, blocks, hours, _)| (*bits, *blocks, *hours))
             .collect::<Vec<_>>(),
-        vec![(30, 611, 61), (40, 826, 82)],
+        vec![(30, 15, 30), (40, 20, 40)],
         "the walk to the floor moved, and the specification and `SAMPLES` quote it"
     );
     for (bits, _, _, worth) in measured {
         assert!(
-            worth < 30.0,
-            "from 2^{bits} the walk cost {worth:.1} blocks' work, which is not the few the \
-             documents say"
+            worth < 1.5,
+            "from 2^{bits} the walk cost {worth:.1} blocks' work, which is not the block and a \
+             third the documents say"
         );
     }
 }

@@ -62,7 +62,7 @@ use cairn_crypto::{PublicKey, SecretKey, Signature};
 use cairn_ledger::block::{BlockHeader, HeaderSummary};
 use cairn_ledger::note::{Address, NetworkId, Note, NoteId};
 use cairn_ledger::pow::{
-    median_time_past, meets_target, next_difficulty, target_for, work_of, MIN_DIFFICULTY,
+    median_time_past, meets_target, next_difficulty, target_for, work_of, Origin, MIN_DIFFICULTY,
 };
 use cairn_ledger::sampling::{
     covering, draw, levels_of, seed_of, work_before, Sample, SAMPLES, SHALLOWEST,
@@ -990,193 +990,278 @@ fn the_work_a_block_contributes_is_its_difficulty_unchanged() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. The difficulty retarget, as the fourteen numbered steps.
+// 4. The difficulty retarget, as the ten numbered steps.
 // ---------------------------------------------------------------------------
 
-/// Steps 2 to 14. Step 1 is not reachable through this function: it names the
-/// network's genesis difficulty, which `next_difficulty` is not given.
-fn spec_next_difficulty(run: &[HeaderSummary], target_block_time: u64) -> u64 {
-    let m = run.len();
-    assert!(
-        m > 0,
-        "step 1 is asked of the network, not of this function"
-    );
-    let last = run[m - 1];
-    let n = usize::min(m - 1, 90);
-    if n == 0 || target_block_time == 0 {
-        return last.difficulty.max(1);
+/// Steps 2 to 10, from the document's words. Step 1 is not reachable through
+/// this function: it is the branch with no blocks, which has no parent, and
+/// `expected_difficulty` answers it.
+///
+/// Written with the widths the document's *Width* paragraph allows: 128 bits,
+/// saturating where a value does not fit, which it says changes no answer.
+/// The names are the document's, one letter each, so that the steps can be
+/// read against it line by line.
+#[allow(clippy::many_single_char_names)]
+fn spec_next_difficulty(parent: HeaderSummary, origin: (u64, u64), target_block_time: u64) -> u64 {
+    let (t0, d0) = origin;
+    // Step 2.
+    if target_block_time == 0 {
+        return parent.difficulty.max(1);
     }
-    let window = &run[m - 1 - n..];
-    let ceiling = i128::from(target_block_time) * 6;
-    let mut counted = i128::from(window[0].timestamp);
-    let mut weighted: i128 = 0;
-    let mut sum_of_difficulty: u128 = 0;
-    for (i, summary) in window.iter().enumerate().skip(1) {
-        let gap = (i128::from(summary.timestamp) - counted).clamp(-ceiling, ceiling);
-        counted += gap;
-        weighted += (i as i128) * gap;
-        sum_of_difficulty += u128::from(summary.difficulty);
+    // Step 3.
+    let d = u128::from(d0.max(1));
+    let q = u128::from(parent.difficulty.max(1));
+    let tau = i128::from(target_block_time) * 60;
+    // Step 4.
+    let n = (i128::from(target_block_time).saturating_mul(i128::from(parent.height)))
+        .saturating_sub(i128::from(parent.timestamp) - i128::from(t0));
+    // Step 5, rounding toward negative infinity.
+    let scaled = n.saturating_mul(65_536);
+    let mut e = scaled / tau;
+    if scaled % tau != 0 && scaled < 0 {
+        e -= 1;
     }
-    let previous = last.difficulty.max(1);
-    if weighted <= 0 {
-        return previous.saturating_mul(4);
+    // Step 6.
+    let mut s = e / 65_536;
+    if e % 65_536 != 0 && e < 0 {
+        s -= 1;
     }
-    let n_wide = n as u128;
-    let expected = n_wide * (n_wide + 1) / 2 * u128::from(target_block_time);
-    let average = (sum_of_difficulty / n_wide).max(1);
-    let next = average.saturating_mul(expected) / (weighted as u128);
-    let low = u128::from((previous / 4).max(1));
-    let high = u128::from(previous.saturating_mul(4));
-    u64::try_from(next.clamp(low, high))
-        .unwrap_or(u64::MAX)
-        .max(1)
+    let f = (e - 65_536 * s) as u128;
+    assert!(f < 65_536);
+    // Step 7.
+    let factor = 65_536
+        + ((195_766_423_245_049 * f + 971_821_376 * f * f + 5_127 * f * f * f + (1 << 47)) >> 48);
+    // Step 8.
+    let product = d * factor;
+    let r = if s >= 16 {
+        let shift = s - 16;
+        if shift >= 128 || product.leading_zeros() as i128 <= shift {
+            u128::MAX
+        } else {
+            product << shift
+        }
+    } else {
+        let shift = 16 - s;
+        if shift >= 128 {
+            0
+        } else {
+            product >> shift
+        }
+    };
+    // Steps 9 and 10.
+    let low = (q / 4).max(1);
+    let high = (q * 4).min(u128::from(u64::MAX));
+    u64::try_from(r.clamp(low, high)).unwrap()
 }
 
-/// A run of `count` summaries at one difficulty, evenly spaced.
-fn even_run(count: usize, spacing: u64, difficulty: u64) -> Vec<HeaderSummary> {
-    (0..count as u64)
-        .map(|height| HeaderSummary {
-            height,
-            timestamp: 1_000_000 + height * spacing,
-            difficulty,
+/// The vector table the document prints, read off the document: target block
+/// time, opening moment, genesis difficulty, parent height, timestamp and
+/// difficulty, and the answer.
+fn spec_vectors() -> Vec<([u64; 7], String)> {
+    let marker = "These are vectors from an independent reference";
+    let after = SPECIFICATION
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("the specification no longer says `{marker}`"))
+        .1;
+    let body = after
+        .split_once("<tbody>")
+        .and_then(|(_, rest)| rest.split_once("</tbody>"))
+        .expect("a table after the sentence")
+        .0;
+    body.lines()
+        .filter_map(|line| {
+            let cells: Vec<&str> = line
+                .split("<td")
+                .skip(1)
+                .filter_map(|cell| cell.split_once('>')?.1.split_once("</td>"))
+                .map(|(inside, _)| inside)
+                .collect();
+            let [numbers @ .., name] = cells.as_slice() else {
+                return None;
+            };
+            let values: Vec<u64> = numbers.iter().map(|cell| cell.parse().unwrap()).collect();
+            Some((values.try_into().ok()?, (*name).to_owned()))
         })
         .collect()
 }
 
 #[test]
+fn the_retarget_reproduces_the_documents_vector_table() {
+    let vectors = spec_vectors();
+    assert!(vectors.len() >= 20, "only {} vectors read", vectors.len());
+    for ([target, t0, d0, height, timestamp, difficulty, answer], name) in &vectors {
+        let parent = HeaderSummary {
+            height: *height,
+            timestamp: *timestamp,
+            difficulty: *difficulty,
+        };
+        let origin = Origin {
+            timestamp: *t0,
+            difficulty: *d0,
+        };
+        assert_eq!(
+            next_difficulty(&parent, origin, *target),
+            *answer,
+            "the code, on `{name}`"
+        );
+        assert_eq!(
+            spec_next_difficulty(parent, (*t0, *d0), *target),
+            *answer,
+            "the document's steps, on `{name}`"
+        );
+    }
+}
+
+#[test]
 fn the_retarget_answers_what_the_documents_worked_figures_say() {
     let target = 60u64;
-
-    // A full window warmed exactly on schedule at a million, with the last
-    // block arriving at the clamp ceiling. The document says 900 990.
-    let mut window = even_run(91, target, 1_000_000);
-    window[90].timestamp = window[89].timestamp + 6 * target;
-    assert_eq!(next_difficulty(&window, target), 900_990);
-    assert_eq!(spec_next_difficulty(&window, target), 900_990);
-
-    // A hundred times the target late is the same block, because the clamp
-    // makes it the same block.
-    let mut far = even_run(91, target, 1_000_000);
-    far[90].timestamp = far[89].timestamp + 100 * target;
-    assert_eq!(next_difficulty(&far, target), 900_990);
-    assert_eq!(spec_next_difficulty(&far, target), 900_990);
-
-    // On schedule, the difficulty does not move.
-    let steady = even_run(91, target, 1_000_000);
-    assert_eq!(next_difficulty(&steady, target), 1_000_000);
-    assert_eq!(spec_next_difficulty(&steady, target), 1_000_000);
-}
-
-#[test]
-fn the_floor_is_held_from_thirty_one_seconds_and_not_from_sixty() {
-    let target = 60u64;
-    let published = [
-        (1u64, 4u64),
-        (15, 4),
-        (20, 3),
-        (30, 2),
-        (31, 1),
-        (60, 1),
-        (600, 1),
-    ];
-    for (spacing, want) in published {
-        let window = even_run(91, spacing, MIN_DIFFICULTY);
+    let origin = Origin {
+        timestamp: 1_000_000,
+        difficulty: 1_000_000,
+    };
+    let at = |offset: i64| HeaderSummary {
+        height: 1_000,
+        timestamp: (1_000_000 + 60_000u64).saturating_add_signed(offset),
+        difficulty: 1_000_000,
+    };
+    let both = |parent: HeaderSummary| {
+        let code = next_difficulty(&parent, origin, target);
         assert_eq!(
-            next_difficulty(&window, target),
-            want,
-            "the floor at {spacing} seconds a block"
+            code,
+            spec_next_difficulty(parent, (1_000_000, 1_000_000), target)
         );
-        assert_eq!(spec_next_difficulty(&window, target), want);
-    }
+        code
+    };
+
+    // "A parent standing exactly on its schedule is asked `D`", and a half
+    // life either side is exactly twice or half.
+    assert_eq!(both(at(0)), 1_000_000);
+    assert_eq!(both(at(-3_600)), 2_000_000);
+    assert_eq!(both(at(3_600)), 500_000);
+
+    // "A block dated at the drift allowance, ten target block times late,
+    // lowers the difficulty of the one block after it by `2^(-10/60)`."
+    assert_eq!(both(at(600)), 890_991);
+
+    // "the same eighty blocks stand 4 656 seconds ahead of the schedule, and
+    // the next block is asked 2.45 times what it was."
+    let asked = both(at(-4_656));
+    assert!((2_450_000..2_455_000).contains(&asked), "{asked}");
+
+    // "e is then -19 at a sixty second block, not the -18 a truncating
+    // division gives": one second late is below `D`, one early above it.
+    assert!(both(at(1)) < 1_000_000);
+    assert!(both(at(-1)) > 1_000_000);
 }
 
 #[test]
-fn a_span_of_zero_or_a_span_running_backwards_is_the_steepest_rise_allowed() {
+fn the_floor_is_a_place_behind_the_schedule_and_not_a_spacing() {
     let target = 60u64;
-
-    let flat: Vec<HeaderSummary> = (0..91u64)
-        .map(|height| HeaderSummary {
-            height,
-            timestamp: 1_000_000,
-            difficulty: 1_000,
+    // "Spaced evenly from there, 1 024 blocks hold the floor at 57 seconds a
+    // block and not at 56."
+    let held = |gap: u64| {
+        (0..1_024u64).all(|height| {
+            let parent = HeaderSummary {
+                height,
+                timestamp: 1_000_000 + height * gap,
+                difficulty: MIN_DIFFICULTY,
+            };
+            let code = next_difficulty(
+                &parent,
+                Origin {
+                    timestamp: 1_000_000,
+                    difficulty: MIN_DIFFICULTY,
+                },
+                target,
+            );
+            assert_eq!(
+                code,
+                spec_next_difficulty(parent, (1_000_000, MIN_DIFFICULTY), target)
+            );
+            code == MIN_DIFFICULTY
         })
-        .collect();
-    assert_eq!(next_difficulty(&flat, target), 4_000);
-    assert_eq!(spec_next_difficulty(&flat, target), 4_000);
-
-    let backwards: Vec<HeaderSummary> = (0..91u64)
-        .map(|height| HeaderSummary {
-            height,
-            timestamp: 1_000_000 - height * 10,
-            difficulty: 1_000,
-        })
-        .collect();
-    assert_eq!(next_difficulty(&backwards, target), 4_000);
-    assert_eq!(spec_next_difficulty(&backwards, target), 4_000);
-
-    // Saturation rather than a wrap, at the top.
-    let huge: Vec<HeaderSummary> = (0..91u64)
-        .map(|height| HeaderSummary {
-            height,
-            timestamp: 1_000_000,
-            difficulty: u64::MAX,
-        })
-        .collect();
-    assert_eq!(next_difficulty(&huge, target), u64::MAX);
-    assert_eq!(spec_next_difficulty(&huge, target), u64::MAX);
+    };
+    assert!(held(57));
+    assert!(!held(56));
+    assert!(held(60), "at the target the floor holds for good");
 }
 
 #[test]
-fn a_chain_shorter_than_the_window_runs_the_same_formula() {
+fn the_bound_holds_both_ways_and_saturates_at_the_top() {
     let target = 60u64;
-
-    // One summary: n is 0, so the block at height 1 carries the genesis
-    // difficulty unchanged.
-    let one = even_run(1, target, 12_345);
-    assert_eq!(next_difficulty(&one, target), 12_345);
-    assert_eq!(spec_next_difficulty(&one, target), 12_345);
-
-    // Two summaries: the first retarget, off a single gap.
-    for spacing in [1u64, 30, 59, 60, 61, 120, 360, 100_000] {
-        let two = even_run(2, spacing, 1_000_000);
-        assert_eq!(
-            next_difficulty(&two, target),
-            spec_next_difficulty(&two, target),
-            "the first retarget at {spacing} seconds"
+    let origin = (1_000_000u64, 1_000u64);
+    let parent = |timestamp: u64, difficulty: u64| HeaderSummary {
+        height: 90,
+        timestamp,
+        difficulty,
+    };
+    let on_time = 1_000_000 + 90 * 60;
+    let both = |parent: HeaderSummary, origin: (u64, u64)| {
+        let code = next_difficulty(
+            &parent,
+            Origin {
+                timestamp: origin.0,
+                difficulty: origin.1,
+            },
+            target,
         );
-    }
-
-    // Every length from one to a hundred, so that both the short case and the
-    // "use only the last 91" cut are covered.
-    for count in 1..=100usize {
-        let run = even_run(count, 45, 500_000);
-        assert_eq!(
-            next_difficulty(&run, target),
-            spec_next_difficulty(&run, target),
-            "a run of {count} summaries"
-        );
-    }
-}
-
-#[test]
-fn a_node_given_a_longer_run_uses_only_the_last_ninety_one() {
-    let target = 60u64;
-    let long = even_run(400, 45, 500_000);
-    let cut = &long[long.len() - 91..];
+        assert_eq!(code, spec_next_difficulty(parent, origin, target));
+        code
+    };
+    // Two half lives either side is the bound exactly, and past it nothing.
+    assert_eq!(both(parent(on_time - 7_200, 1_000), origin), 4_000);
+    assert_eq!(both(parent(0, 1_000), origin), 4_000);
+    assert_eq!(both(parent(on_time + 7_200, 1_000), origin), 250);
+    assert_eq!(both(parent(u64::MAX, 1_000), origin), 250);
+    // The floor, and a parent stating none.
+    assert_eq!(both(parent(u64::MAX, 2), origin), 1);
+    assert_eq!(both(parent(u64::MAX, 0), origin), 1);
+    // The top: a parent at the ceiling asked to rise stays there.
     assert_eq!(
-        next_difficulty(&long, target),
-        next_difficulty(cut, target),
-        "history beyond 91 summaries must not change the answer"
+        both(parent(on_time - 3_600, u64::MAX), (1_000_000, u64::MAX)),
+        u64::MAX
+    );
+    // No schedule: the parent stands.
+    assert_eq!(
+        next_difficulty(
+            &parent(on_time, 12_345),
+            Origin {
+                timestamp: 1_000_000,
+                difficulty: 1_000
+            },
+            0
+        ),
+        12_345
     );
     assert_eq!(
-        spec_next_difficulty(&long, target),
-        next_difficulty(cut, target)
+        spec_next_difficulty(parent(on_time, 12_345), origin, 0),
+        12_345
     );
 }
 
+/// "Every network that pins a first block dates it at its opening moment,
+/// which makes `n` nought, `factor` 65 536 and the answer `D`: the second
+/// block carries the genesis difficulty, as the first does." Asked of the
+/// pinned first block itself, applied as a node applies it.
 #[test]
-fn the_retarget_agrees_over_a_sweep_of_awkward_windows() {
-    let target = 60u64;
+fn the_block_after_the_first_carries_the_genesis_difficulty() {
+    for name in ["testnet-8", "devnet"] {
+        let params = ConsensusParams::for_network(name).unwrap();
+        let first = cairn_ledger::genesis::block(params.network).unwrap();
+        assert_eq!(first.header.timestamp, params.opens_at, "{name}");
+        assert_eq!(first.header.difficulty, params.genesis_difficulty, "{name}");
+        let mut state = LedgerState::new();
+        connect_block(&mut state, &first, &params, first.header.timestamp).unwrap();
+        assert_eq!(
+            expected_difficulty(&state, &params),
+            params.genesis_difficulty,
+            "{name}: the second block"
+        );
+    }
+}
+
+#[test]
+fn the_retarget_agrees_over_a_sweep_of_awkward_parents() {
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut next = move || {
         seed ^= seed << 13;
@@ -1184,36 +1269,42 @@ fn the_retarget_agrees_over_a_sweep_of_awkward_windows() {
         seed ^= seed << 17;
         seed
     };
-    let mut checked = 0u32;
-    for case in 0..600u32 {
-        let count = 1 + (next() % 120) as usize;
-        let mut timestamp = 1_000_000i128;
-        let mut run = Vec::with_capacity(count);
-        for height in 0..count as u64 {
-            // Steps well past the clamp in both directions, so the timeline
-            // the retarget keeps for itself is exercised rather than assumed.
-            let step = (next() % 1_500) as i128 - 500;
-            timestamp = (timestamp + step).max(0);
-            let difficulty = match case % 4 {
-                0 => 1,
-                1 => 1 + next() % 8,
-                2 => 1 + next() % 4_000_000,
-                _ => u64::MAX / (1 + next() % 3),
-            };
-            run.push(HeaderSummary {
-                height,
-                timestamp: timestamp as u64,
-                difficulty,
-            });
-        }
+    for case in 0..20_000u32 {
+        let target = [1u64, 5, 60, 600, u64::MAX][(next() % 5) as usize];
+        let t0 = next() % (1 << 41);
+        let d0 = match case % 4 {
+            0 => 1,
+            1 => 1 + next() % 8,
+            2 => 1 + next() % 4_000_000_000,
+            _ => u64::MAX / (1 + next() % 3),
+        };
+        let height = match case % 3 {
+            0 => next() % 100_000,
+            1 => next() % (1 << 40),
+            _ => next(),
+        };
+        let on_time = t0.saturating_add(target.saturating_mul(height));
+        let timestamp = on_time
+            .saturating_sub(next() % 100_000)
+            .saturating_add(next() % 100_000);
+        let parent = HeaderSummary {
+            height,
+            timestamp,
+            difficulty: next() >> (next() % 64),
+        };
         assert_eq!(
-            next_difficulty(&run, target),
-            spec_next_difficulty(&run, target),
-            "case {case}, {count} summaries"
+            next_difficulty(
+                &parent,
+                Origin {
+                    timestamp: t0,
+                    difficulty: d0
+                },
+                target
+            ),
+            spec_next_difficulty(parent, (t0, d0), target),
+            "case {case}"
         );
-        checked += 1;
     }
-    assert_eq!(checked, 600);
 }
 
 #[test]
@@ -2076,14 +2167,14 @@ fn the_state_root_is_the_eight_fields_folded_in_that_order() {
 
 #[test]
 fn the_published_network_parameters_are_what_the_networks_carry() {
-    let public = ConsensusParams::for_network("testnet-7").expect("the network the draft names");
+    let public = ConsensusParams::for_network("testnet-8").expect("the network the draft names");
     assert_eq!(public.hot_capacity, 131_072);
     assert_eq!(public.max_evictions_per_block, 1_024);
     assert_eq!(public.place_price.as_pebbles(), 6_000);
     assert_eq!(public.coinbase_maturity, 1_024);
     assert_eq!(public.burial, 1_024);
     assert_eq!(public.target_block_time, 60);
-    assert_eq!(public.genesis_difficulty, 1 << 27);
+    assert_eq!(public.genesis_difficulty, 1 << 28);
     assert_eq!(public.max_timestamp_drift, 600);
     assert_eq!(public.halving_interval, 1_051_200);
     assert_eq!(public.initial_reward.as_pebbles(), 5_000_000_000);
@@ -2610,14 +2701,18 @@ fn the_constants_the_document_publishes_are_the_ones_the_build_carries() {
     use cairn_ledger::block::MOST_TRANSFERS;
     use cairn_ledger::handover::MOST_BURIED;
     use cairn_ledger::pow::{
-        DIFFICULTY_WINDOW, MAX_RETARGET_FACTOR, MEDIAN_TIME_WINDOW, RECENT_HEADERS,
+        HALF_LIFE_IN_BLOCKS, MAX_RETARGET_FACTOR, MEDIAN_TIME_WINDOW, RECENT_HEADERS,
     };
-    use cairn_ledger::sampling::MOST_TAIL;
+    use cairn_ledger::sampling::{BELOW_THE_PINNED, MOST_TAIL};
     use cairn_ledger::state::{GRACE_BLOCKS, GRACE_NOTES};
     use cairn_primitives::codec::MAX_SEQUENCE_LEN;
 
-    assert_eq!(DIFFICULTY_WINDOW, 90, "gaps the answer is weighed over");
-    assert_eq!(RECENT_HEADERS, 91, "summaries a node must hold");
+    assert_eq!(HALF_LIFE_IN_BLOCKS, 60, "target block times to a doubling");
+    assert_eq!(RECENT_HEADERS, 91, "summaries a node holds");
+    assert_eq!(
+        BELOW_THE_PINNED, 90,
+        "headers the run carries below the pinned one"
+    );
     assert_eq!(MEDIAN_TIME_WINDOW, 11);
     assert_eq!(MAX_RETARGET_FACTOR, 4);
     assert_eq!(MIN_DIFFICULTY, 1);
@@ -2629,7 +2724,7 @@ fn the_constants_the_document_publishes_are_the_ones_the_build_carries() {
     assert_eq!(
         MOST_TAIL,
         16 * 512 + 90,
-        "sixteen times the unresolved band plus one retarget window"
+        "sixteen times the unresolved band plus the ninety headers below the pinned one"
     );
     assert_eq!(MOST_TAIL, 8_282);
 
@@ -2653,7 +2748,7 @@ fn the_limits_the_document_names_without_numbering_are_recorded_here() {
         MAX_COINBASE_EXTRA, MOST_COINBASE_OUTPUTS, MOST_INPUTS, MOST_OUTPUTS,
     };
 
-    let params = ConsensusParams::for_network("testnet-7").unwrap();
+    let params = ConsensusParams::for_network("testnet-8").unwrap();
     assert_eq!(params.max_inputs_per_transfer, 256);
     assert_eq!(params.max_outputs_per_transfer, 256);
     assert_eq!(params.max_coinbase_outputs, 16);

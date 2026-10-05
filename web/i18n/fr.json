@@ -175,8 +175,8 @@
     "note": {
       "difficulty": {
         "plain": "La difficulté, c'est le travail qu'il faut fournir pour ajouter un bloc. Elle bouge toute seule : quand des machines arrivent, elle monte, et les blocs continuent d'arriver à peu près au même rythme qu'avant. Personne ne la règle à la main.",
-        "curious": "La difficulté est le nombre de tentatives qu'un bloc coûte en moyenne. Elle est recalculée à chaque bloc sur une fenêtre glissante des blocs récents, donc elle suit les mineurs en continu au lieu d'attendre la fin d'une période fixe.",
-        "technical": "Nombre de hachages attendu pour un bloc, recalculé bloc par bloc sur une fenêtre glissante et borné contre un saut brutal dans un sens comme dans l'autre. Le chiffre au-dessus est lu exactement ; la courbe est tracée en flottant double, ce qui reste très en deçà de la résolution de deux cents unités de hauteur."
+        "curious": "La difficulté est le nombre de tentatives qu'un bloc coûte en moyenne. Elle est recalculée à chaque bloc d'après un calendrier fixé au premier bloc du réseau, donc elle suit les mineurs en continu au lieu d'attendre la fin d'une période fixe.",
+        "technical": "Nombre de hachages attendu pour un bloc, recalculé bloc par bloc d'après l'avance ou le retard du parent sur un calendrier fixé au premier bloc, et tenu à un facteur quatre de celui du parent dans un sens comme dans l'autre. Le chiffre au-dessus est lu exactement ; la courbe est tracée en flottant double, ce qui reste très en deçà de la résolution de deux cents unités de hauteur."
       },
       "spacing": {
         "plain": "Le temps qu'a mis chaque bloc après le précédent. Ces heures sont écrites par les mineurs eux-mêmes, elles ne sont pas mesurées ici, et un bloc doit seulement venir après le milieu des blocs récents. Une barre peut donc valoir zéro, ou passer en dessous.",
@@ -335,7 +335,7 @@
     "blocks": {
       "plain": "Un bloc est une page du registre. Environ une fois par minute, quelqu'un en trouve une valide, et tout ce qu'elle contient devient définitif. Chaque page renvoie à la précédente, ce qui empêche de réécrire discrètement une page ancienne.",
       "curious": "Les blocs arrivent environ toutes les minutes. La chaîne est choisie sur le travail accumulé et non sur la longueur, donc la branche qui a demandé le plus de calcul est celle que suit chaque nœud.",
-      "technical": "Le choix de branche se fait au travail cumulé. En cas d'égalité, la branche déjà suivie est conservée, et un basculement s'applique de façon atomique. La difficulté est recalculée sur une fenêtre LWMA de 90 blocs, avec des temps de résolution bornés et un facteur quatre au maximum par recalcul."
+      "technical": "Le choix de branche se fait au travail cumulé. En cas d'égalité, la branche déjà suivie est conservée, et un basculement s'applique de façon atomique. La difficulté suit un calendrier fixé au premier bloc (ASERT, demi-vie d'une heure), avec un facteur quatre au maximum par recalcul."
     },
     "block": {
       "plain": "Tout ce qui suit a été figé au moment où ce bloc a été trouvé. Les longues chaînes de caractères sont des empreintes : changez une seule lettre n'importe où dans le bloc et chacune d'elles change entièrement.",
@@ -527,7 +527,7 @@
       "title": {
         "plain": "Qui écrit la page suivante",
         "curious": "La preuve de travail, et pourquoi elle a été choisie",
-        "technical": "Preuve de travail, LWMA, médiane des horodatages"
+        "technical": "Preuve de travail, ASERT, médiane des horodatages"
       },
       "body": {
         "plain": [
@@ -537,10 +537,10 @@
         ],
         "curious": [
           "Preuve de travail plutôt que preuve d'enjeu, et la raison tient au départ plus qu'au régime de croisière. La preuve d'enjeu exige une distribution initiale pour fonctionner, ce qui veut dire que des fondateurs décident qui détient le pouvoir au premier jour. La preuve de travail n'exige que personne ne décide quoi que ce soit : le réseau ouvre, et le premier bloc va à qui le mine.",
-          "La difficulté s'ajuste à chaque bloc sur une fenêtre de 90 blocs, avec des temps de résolution bornés et un facteur quatre au maximum par recalcul, de sorte que l'arrivée ou le départ d'un gros mineur ne bloque pas la chaîne."
+          "La difficulté s'ajuste à chaque bloc d'après un calendrier fixé au premier bloc du réseau : elle double pour chaque heure d'avance de la chaîne sur ce calendrier et se divise par deux pour chaque heure de retard, avec un facteur quatre au maximum par recalcul, de sorte que l'arrivée ou le départ d'un gros mineur ne bloque pas la chaîne, et qu'un mineur qui mine une rafale puis s'en va ne la retient qu'un temps qui grandit comme le logarithme de ce qu'il a payé : des heures, là où la moyenne mobile prenait des jours."
         ],
         "technical": [
-          "LWMA sur 90 blocs, temps de résolution bornés, facteur 4 au maximum par recalcul. Les horodatages sont validés contre la médiane des onze blocs précédents plutôt que contre le parent, ce qui supprime la manipulation sur un bloc que permet une règle du type postérieur au parent.",
+          "ASERT (aserti3-2d) ancré au premier bloc, demi-vie de 60 blocs, facteur 4 au maximum par recalcul. Les horodatages sont validés contre la médiane des onze blocs précédents plutôt que contre le parent, ce qui supprime la manipulation sur un bloc que permet une règle du type postérieur au parent.",
           "Le choix de branche se fait au travail cumulé, pas à la longueur. En cas d'égalité, la branche déjà suivie est conservée. Les réorganisations s'appliquent de façon atomique, avec un enregistrement d'annulation par bloc de la chaîne active."
         ]
       }
@@ -676,7 +676,7 @@
       "body": {
         "plain": ["C'est ainsi qu'on obtient des CAIRN sur un réseau de test. Votre ordinateur se met à chercher des blocs, et quand il en trouve un, la récompense va à votre adresse. Il n'y a aucun autre moyen d'en obtenir : personne n'a de stock à distribuer."],
         "curious": ["Minage dans le nœud, sur tous les cœurs sauf un, ce qui suffit pour un réseau de test. Les récompenses vont à l'adresse que vous indiquez, et la clé qui est derrière peut vivre n'importe où : le nœud reçoit une adresse et ne voit jamais le secret qui est derrière."],
-        "technical": ["La difficulté d'ouverture de testnet-7 est 2^27, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé sur un cœur ordinaire."]
+        "technical": ["La difficulté d'ouverture de testnet-8 est 2^28, calibrée pour que le premier bloc prenne à peu près le temps de bloc visé au rythme sur lequel testnet-7 s'est terminé, et la difficulté suit ensuite un calendrier qui part de ce bloc."]
       }
     },
     "server": {
@@ -733,9 +733,9 @@
     },
     "disk": { "empty": "aucun bloc", "holds": "les blocs jusqu'au {height}" },
     "clockBehind": {
-      "certain": "L'horloge de l'ordinateur derrière cette page retarde d'environ {gap} sur celle du réseau : il a refusé le premier bloc de son propre réseau comme daté dans le futur. Il ne peut pas suivre la chaîne tant que son horloge n'est pas juste, donc rien ici n'est à jour. La personne qui tient ce site doit régler l'heure de cette machine.",
       "likely": "L'horloge de l'ordinateur derrière cette page semble retarder d'environ {gap} sur celle du réseau : il a refusé {blocks} blocs venant de {peers} pairs comme datés dans le futur. Un nœud dont l'horloge retarde refuse tous les blocs honnêtes, donc la hauteur affichée s'est peut-être arrêtée. La personne qui tient ce site devrait vérifier l'heure de cette machine."
     },
+    "opening": "Ce réseau ouvre le {at}, {when}. L'ordinateur derrière cette page fait tourner le programme qui l'ouvre, et attend ce moment : d'ici là il n'y a pas de chaîne, donc rien à montrer ici pour l'instant. Si ce moment est déjà passé, c'est l'horloge de cet ordinateur qui retarde, et la personne qui tient ce site doit en vérifier l'heure.",
     "unread": "Le disque sous le nœud derrière cette page ne rend plus le bloc {height}. Rien n'a été effacé, mais ce site ne peut pas montrer ce bloc, et tout ce qu'il dit de qui possède quoi s'arrête à ce bloc tant que le disque ne le relit pas. Si cela continue, ce disque est en train de lâcher.",
     "unjudged": "Le programme derrière cette page semble trop ancien pour la chaîne qu'il suit : il a reçu {blocks} blocs construits selon des règles qu'il n'a pas, venant de {peers} pairs, le plus récent écrit pour la version {version} alors qu'il connaît la version {known}. N'importe qui peut écrire un numéro de version dans un bloc : c'est une raison de regarder, pas un verdict. Si la hauteur affichée a aussi cessé d'avancer, la personne qui tient ce site doit installer une version plus récente.",
     "unweighable": "Personne parmi ceux que le nœud derrière cette page a interrogés n'a pu lui montrer quelle chaîne porte le plus de travail : {showings} présentations venant de {peers} pairs n'ont pas pu être pesées. Il lit donc la chaîne bloc par bloc, ce qui prend des heures, et d'ici là cette page montre une chaîne plus courte que la vraie.",

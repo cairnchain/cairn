@@ -15,6 +15,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use cairn_crypto::PublicKey;
+use cairn_ledger::genesis;
 use cairn_ledger::note::{Address, NetworkId};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::{seeds, KEEP_BLOCK_BYTES};
@@ -83,7 +84,7 @@ cairnd, a Cairn node
                          one, the addresses written into the program for
                          this network are used, which is why a node that
                          was just downloaded finds the network on its own
-  --network <name>       testnet-7 or devnet (default: testnet-7)
+  --network <name>       testnet-8 or devnet (default: testnet-8)
                          devnet has the same rules with a five second block
                          time and a tiny hot set, for one machine.
                          mainnet does not exist yet: a network exists once
@@ -244,7 +245,7 @@ impl Given {
     /// and on a chain that means following a different one. It was applied to
     /// a name this node does not know and not to a name it knows given twice,
     /// where exactly the same thing happens and the example in that sentence
-    /// is the one it happens to: `--network devnet --network testnet-7` ran on
+    /// is the one it happens to: `--network devnet --network testnet-8` ran on
     /// devnet and said nothing about the other.
     ///
     /// Given twice with the same value, nothing is dropped and nothing is
@@ -422,7 +423,7 @@ pub(crate) fn resolve_options(arguments: &[String]) -> Result<Option<Options>, S
             if name == "mainnet" {
                 "mainnet does not exist yet: its first block has not been mined".to_owned()
             } else {
-                format!("unknown network `{name}`, try testnet-7 or devnet")
+                format!("unknown network `{name}`, try testnet-8 or devnet")
             }
         })
         .map_err(misread)?;
@@ -618,7 +619,10 @@ pub(crate) fn describe(options: &Options) -> String {
     );
     if let Some(genesis) = options.params.genesis {
         let _ = writeln!(text, "starts from  {genesis}");
-        let _ = writeln!(text, "opened at    {}", options.params.opens_at);
+        // The date beside the number: a network is installed ahead of its
+        // opening, and this is where an operator reads when that is.
+        let opens = options.params.opens_at;
+        let _ = writeln!(text, "opens at     {opens}, {}", genesis::when(opens));
     }
     let _ = writeln!(text, "data         {}", options.data.display());
     let _ = writeln!(text, "listen       {}", options.listen);
@@ -783,7 +787,7 @@ mod tests {
         let options = resolve_options(&[]).unwrap().unwrap();
         assert_eq!(options.data, PathBuf::from(DEFAULT_DATA));
         assert_eq!(options.listen.port(), 9_944);
-        assert_eq!(options.params.network_name(), "testnet-7");
+        assert_eq!(options.params.network_name(), "testnet-8");
         assert_eq!(options.params.target_block_time, 60);
         assert!(options.mine_to.is_none());
         // A program somebody just downloaded finds the network on its own,
@@ -1044,6 +1048,16 @@ mod tests {
             "and a node with no deadline says so, rather than leaving a reader to \
              notice a missing line: {summary}"
         );
+        // A network is installed ahead of its opening, and the settings say
+        // when that is as a date, not only as a count of seconds.
+        let opens = quiet.params.opens_at;
+        assert!(
+            summary.contains(&format!(
+                "opens at     {opens}, {}",
+                cairn_ledger::genesis::when(opens)
+            )),
+            "the settings do not say when the network opens: {summary}"
+        );
     }
 
     /// Asking for mainnet is told that mainnet does not exist yet, and asking
@@ -1279,12 +1293,12 @@ mod tests {
         assert_eq!(options.seeds.len(), 1);
         assert_eq!(options.status_period, 3);
 
-        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-7"]))
+        let options = resolve_options(&args(&["--data", &data, "--network", "testnet-8"]))
             .unwrap()
             .unwrap();
         assert_eq!(
             options.params.network_name(),
-            "testnet-7",
+            "testnet-8",
             "the command line wins"
         );
     }

@@ -63,7 +63,7 @@ Network options
                        when they do not bring it two peers within five
                        seconds: a seed learns that a wallet runs at your
                        address, and when
-  --network <name>     testnet-7 or devnet (default: testnet-7); it has to
+  --network <name>     testnet-8 or devnet (default: testnet-8); it has to
                        be the same network the node is on
   --wait <seconds>     how long to spend catching up (default: 30)
   --fee <cairn>        what to pay to be carried. Without one, the least
@@ -1048,12 +1048,12 @@ fn data_directory(flags: &Flags) -> PathBuf {
 }
 
 fn rules_of(flags: &Flags) -> Result<ConsensusParams, String> {
-    let name = flags.value("network").unwrap_or("testnet-7");
+    let name = flags.value("network").unwrap_or("testnet-8");
     ConsensusParams::for_network(name).ok_or_else(|| {
         if name == "mainnet" {
             "mainnet does not exist yet: its first block has not been mined".to_owned()
         } else {
-            format!("unknown network `{name}`, try testnet-7 or devnet")
+            format!("unknown network `{name}`, try testnet-8 or devnet")
         }
     })
 }

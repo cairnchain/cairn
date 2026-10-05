@@ -197,12 +197,59 @@ directory, with the same `cairn.conf`. A chain from one network is of no use
 to a node on another, and starting on it either discards it block by block or
 does not start at all. Delete the old directory once nobody wants it.
 
+The same happens when the network keeps its name and its first block changes,
+which is what minting it again at its opening does (below): the chain from the
+old first block is moved aside to `/var/lib/cairn.<network>-<the first twelve
+characters of that block>`. A node of one minting refuses a directory of the
+other and changes nothing on it, so this is what lets it start.
+
 A node killed outright, or a server that loses power, comes back on its own:
 the data directory lock is held by the kernel on an open file and is released
 when the process dies, however it dies. Nothing has to be cleaned up by hand.
 A node that cannot start is tried five times, thirty seconds apart, which is
 long enough for a name server that is slow to answer after a reboot, and then
 left stopped; `journalctl -u cairnd` says why.
+
+## Opening a network
+
+A network's first block is written into the program, and its timestamp is
+where the difficulty's schedule starts: every minute a network opens after
+that timestamp is a block asked less than the network's real rate, down to
+nearly nothing, for whoever mines first. No server can run the block before a
+build carrying it is merged and installed. So the block is dated at an opening
+announced ahead and minted before it, and every node opens the chain by itself
+at that moment. In order:
+
+1. **Choose the opening**, in UTC, far enough ahead for everything below: the
+   review of the pull request and its checks, the merge, the release's own
+   checks and build, which take about two hours from the merge, and an
+   install on every server. Half a day is comfortable. Announce it.
+2. **Mint the first blocks**, on the branch that ships the network, from the
+   repository:
+
+   ```
+   cargo run --release -p cairn-ledger --example remint -- --opens-at 2026-10-06T18:00:00Z
+   ```
+
+   It refuses a time already past, says how far ahead the opening is, dates
+   the test network's first block at it, and writes it into every place that
+   pins it. Then settle by hand the lines it lists as still calling a block
+   provisional: the paragraph above `TESTNET_8` in
+   `crates/cairn-ledger/src/genesis.rs` and the status in `README.md`. A
+   release refuses to go out while either still says provisional.
+3. **Merge** the pull request into `main` once its checks pass. That is what
+   releases: the version in `Cargo.toml` has no release yet, so `release.yml`
+   checks, builds and publishes that commit.
+4. **Install on every server**, the seeds and the miner, with `install.sh`, and
+   `explorer.sh` where the explorer runs, as soon as the merge is on `main`.
+   They build from source and need not wait for the release. A directory of
+   the network's previous first block is set aside as above. Each node starts
+   with no chain and says when the network opens, in `journalctl -u cairnd`.
+5. **The network opens by itself** at the announced time. Each node lays the
+   first block down ten target times before it, which is as far ahead of its
+   clock as any block may stand, and a node installed with `MINE` mines from
+   then on. Nothing has to be done on the day. A server installed after the
+   opening joins as any node does.
 
 ## Putting the explorer on a public address
 
@@ -228,7 +275,8 @@ at and wrong for publishing.
 them and every other argument on its unit's command line: running it again for
 a new build leaves the certificate where it is, and `DOMAIN=` is what takes a
 site back to plain HTTP. A change of network moves the old chain and index
-aside to `/var/lib/cairn-explorer.<old network>` the same way.
+aside to `/var/lib/cairn-explorer.<old network>` the same way, and so does a
+network minted again.
 
 No seed has to be named: the addresses a node starts from are written into
 the program.
@@ -240,6 +288,6 @@ program everybody runs.
 
 ## What this network is
 
-`testnet-7` is a test network. Its money is worth nothing, it is meant to be
+`testnet-8` is a test network. Its money is worth nothing, it is meant to be
 worth nothing, and the network will be reset. When it is, every balance on it
 disappears and nothing carries over. Say so to anyone you invite.

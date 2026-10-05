@@ -106,6 +106,7 @@ fn in_french(value: usize) -> &'static str {
     match value {
         5 => "cinq",
         6 => "six",
+        7 => "sept",
         8 => "huit",
         64 => "soixante-quatre",
         other => panic!(
@@ -810,7 +811,7 @@ fn the_ledger_a_newcomer_is_handed_is_the_size_the_paper_gives() {
 ///
 /// The whitepaper's limitations said the test networks were renumbered three
 /// times and the design paper said the same twice, while `note.rs` carries
-/// seven test networks, each taken because a rule changed. Three was true at
+/// eight test networks, each taken because a rule changed. Three was true at
 /// testnet-4. A count of how often something happened is a figure like any
 /// other, and the identifiers are where it is written down.
 #[test]
@@ -957,6 +958,36 @@ fn the_papers_price_an_archivist_at_what_an_archive_holds() {
         assert!(
             QUESTIONS.contains(&row),
             "the open questions paper's table has no row `{row}` for a chain {share} per cent full"
+        );
+    }
+}
+
+/// The README's table of networks gives each first block and opening this
+/// build pins.
+///
+/// A first block is minted again at a network's opening, and the README is
+/// where somebody about to join reads which block that was. Nothing compared
+/// the two, so a block replaced without its row would have sent a reader to
+/// check a chain against an identifier no node starts from.
+/// `cargo run --release -p cairn-ledger --example remint` rewrites both, and
+/// this holds that it did.
+#[test]
+fn the_readme_names_the_first_blocks_this_build_pins() {
+    for name in ["testnet", "devnet"] {
+        let params = cairn_ledger::validation::ConsensusParams::for_network(name).unwrap();
+        let identifier = params
+            .genesis
+            .expect("a published network pins its first block");
+        let row = format!(
+            "| `{}` | `{}...` | {} | {} s |",
+            params.network_name(),
+            &identifier.to_string()[..12],
+            params.opens_at,
+            params.target_block_time
+        );
+        assert!(
+            README.contains(&row),
+            "the README's table does not have the row this build pins: {row}"
         );
     }
 }
@@ -1180,7 +1211,7 @@ fn the_papers_weighing_is_the_size_this_build_encodes() {
     // And the run up to the tip, which the paper prices on its own. It said
     // 200 kB, the figure from when the draw stopped a thousand and twenty four
     // blocks from the tip; the draw stops at `SHALLOWEST` now, and the run is
-    // the headers from a retarget window below the deepest pinned draw.
+    // the headers from a node's window below the deepest pinned draw.
     let run = start.tail.encode().len();
     println!(
         "the run up to the tip is {} headers, {run} bytes",
@@ -1505,8 +1536,9 @@ const A_YEAR: u64 = 365 * 24 * 60;
 /// blocks, and materialising one per point of the sweep below is minutes.
 ///
 /// The step is instant here and is not on a real chain: the retarget moves by
-/// at most a factor of four a block and lags by a window, so a fall of five
-/// hundred takes a handful of blocks to arrive. Against the tens of thousands
+/// at most a factor of four a block and halves for every half life the chain
+/// falls behind, so a fall of five hundred takes some hours and a few hundred
+/// blocks to arrive. Against the tens of thousands
 /// of blocks the answer is measured in, that is nothing, and it errs towards
 /// the chain being weighable rather than away from it.
 struct Fallen {
@@ -1546,10 +1578,11 @@ impl Fallen {
         }
     }
 
-    /// The run of headers `check_the_tail` demands of this chain: a full
-    /// retarget window below the deepest header the draw pinned, up to the tip.
+    /// The run of headers `check_the_tail` demands of this chain: from
+    /// `BELOW_THE_PINNED` below the deepest header the draw pinned, up to the
+    /// tip.
     fn run_wanted(&self, seed: u8) -> u64 {
-        let window = u64::try_from(cairn_ledger::pow::DIFFICULTY_WINDOW).unwrap();
+        let window = cairn_ledger::sampling::BELOW_THE_PINNED;
         let tip = self.blocks - 1;
         let difficulty = if tip < self.before {
             self.high
@@ -1826,6 +1859,7 @@ fn spelled(value: u64) -> &'static str {
     match value {
         5 => "five",
         6 => "six",
+        7 => "seven",
         11 => "eleven",
         15 => "fifteen",
         16 => "sixteen",

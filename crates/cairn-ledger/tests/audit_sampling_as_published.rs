@@ -16,7 +16,7 @@
 )]
 
 use cairn_ledger::block::HeaderSummary;
-use cairn_ledger::pow::{next_difficulty, DIFFICULTY_WINDOW, MIN_DIFFICULTY};
+use cairn_ledger::pow::{next_difficulty, Origin, MIN_DIFFICULTY};
 use cairn_ledger::sampling::{draw, levels_for, SAMPLES, SHALLOWEST};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_primitives::Hash32;
@@ -31,27 +31,36 @@ const THIRTY_YEARS: u64 = 30 * 365 * 24 * 60;
 /// at the difficulty floor, spaced as tightly as the retarget still allows.
 const CHEAP_BLOCKS: u64 = 1_000;
 
-/// The tightest even spacing that leaves a chain at the difficulty floor, read
-/// off the rule rather than written down.
+/// The tightest even spacing that keeps a run of [`CHEAP_BLOCKS`] at the
+/// difficulty floor, read off the rule rather than written down.
 ///
-/// The prose used to say the target, and that is what the argument below used
-/// to be priced at. At the floor the retarget answers `floor(target / gap)`,
-/// which reaches one as soon as the gap passes half the target, so for an
-/// evenly spaced run the answer is 31 seconds and the run costs half the chain
-/// time the papers claimed for it. `tests/retarget_timewarp.rs` pins the same
-/// boundary against a chain that was mined rather than a window written by
-/// hand, and the tightest unevenly spaced run beside it.
+/// The retarget asks the floor of a chain only while it stands far enough
+/// behind its schedule, and every block spaced closer than the target brings
+/// it nearer. So no spacing below the target holds the floor for good: the
+/// run can only spend slack it banked before, at most a half life of it from
+/// the edge of the floor, after which the difficulty doubles. Started at that
+/// edge, a thousand blocks hold it from 57 seconds a block, since 999 gaps
+/// three seconds short of the target are under an hour.
+///
+/// Under the moving average this was 31 seconds, because that rule answered
+/// `floor(target / gap)` at the floor and reached one as soon as the gap
+/// passed half the target: a thousand cheap blocks then cost half the chain
+/// time they cost now.
 fn cheapest_spacing_at_the_floor(target: u64) -> u64 {
+    let origin = Origin {
+        timestamp: 1_000_000,
+        difficulty: MIN_DIFFICULTY,
+    };
     (1..=target)
         .find(|gap| {
-            let window: Vec<HeaderSummary> = (0..=DIFFICULTY_WINDOW as u64)
-                .map(|height| HeaderSummary {
+            (0..CHEAP_BLOCKS).all(|height| {
+                let parent = HeaderSummary {
                     height,
-                    timestamp: 1_000_000 + height * gap,
+                    timestamp: origin.timestamp + height * gap,
                     difficulty: MIN_DIFFICULTY,
-                })
-                .collect();
-            next_difficulty(&window, target) == MIN_DIFFICULTY
+                };
+                next_difficulty(&parent, origin, target) == MIN_DIFFICULTY
+            })
         })
         .unwrap_or(target)
 }
@@ -71,7 +80,7 @@ fn cheapest_spacing_at_the_floor(target: u64) -> u64 {
 /// own blocks now, and the prose has to say that rather than the hours.
 #[test]
 fn the_drift_the_joining_argument_rests_on_is_ten_blocks() {
-    for network in ["testnet", "testnet-7", "devnet"] {
+    for network in ["testnet", "testnet-8", "devnet"] {
         let params = ConsensusParams::for_network(network).unwrap();
         assert_eq!(
             params.max_timestamp_drift,
@@ -105,18 +114,18 @@ fn the_drift_the_joining_argument_rests_on_is_ten_blocks() {
     // span a good deal more stated time than the reader will accept in
     // advance, or a forger waits out nothing.
     //
-    // Priced at the even spacing the rule permits. An uneven run does about
-    // five percent better, which `retarget_timewarp.rs` pins, and that moves
-    // nothing here. This used to multiply by the target, which is what the
-    // prose said and what no rule demands.
+    // Priced at the even spacing the rule permits a thousand blocks. However
+    // they are spaced, they cannot state less than a thousand targets less the
+    // half life of slack the floor's edge gives them, which
+    // `retarget_timewarp.rs` pins on a chain that was mined.
     let spacing = cheapest_spacing_at_the_floor(params.target_block_time);
     assert_eq!(
-        spacing, 31,
-        "evenly spaced, the floor holds from {spacing} s a block"
+        spacing, 57,
+        "evenly spaced, the floor holds a thousand blocks from {spacing} s a block"
     );
     assert!(
-        spacing > params.target_block_time / 2,
-        "half the target exactly would still ask for twice the floor"
+        spacing < params.target_block_time,
+        "a run spaced at the target holds the floor for good"
     );
 
     let stated = CHEAP_BLOCKS * spacing;

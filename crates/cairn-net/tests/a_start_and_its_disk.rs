@@ -169,9 +169,14 @@ fn refusal(opened: Result<(Node, Restored), NodeError>) -> String {
 
 /// A node that has run, written its own ledger down, and stopped.
 fn a_node_that_wrote_its_ledger(name: &str) -> PathBuf {
+    a_node_that_wrote_its_ledger_under(name, &params())
+}
+
+/// The same, under `rules`.
+fn a_node_that_wrote_its_ledger_under(name: &str, rules: &ConsensusParams) -> PathBuf {
     let directory = scratch(name);
-    let (node, _) = Node::open(params(), loopback(), &directory).unwrap();
-    for block in &chain(&params(), 40) {
+    let (node, _) = Node::open(*rules, loopback(), &directory).unwrap();
+    for block in &chain(rules, 40) {
         node.submit_block(block.clone()).unwrap();
     }
     assert!(node.write_ledger(), "the node wrote its ledger down");
@@ -243,41 +248,170 @@ fn a_log_of_another_network_stops_the_start_and_keeps_every_block() {
         said.contains(&params().network.to_string()),
         "the refusal does not name the network the directory belongs to: {said}"
     );
+    assert!(
+        said.contains("start this node for it") && !said.contains("retired"),
+        "a network this build runs is not offered as the one to start for: {said}"
+    );
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-/// A node started for devnet, on a directory devnet-1's build wrote, stops
-/// and names the retired network by name rather than by its bare marker.
+/// A node started for devnet, on a directory a retired devnet's build wrote,
+/// stops and names the retired network by name rather than by its bare
+/// marker.
 ///
 /// Nothing asked this before devnet was renumbered alongside testnet-7: the
 /// generic case above proves a mismatched marker is refused and named, but a
 /// marker nobody had named printed as hexadecimal, `0x43415244`. Devnet-1 is
-/// named in `NetworkId::name` for exactly this, so a directory left over
-/// from before the restart is refused with the word "devnet-1" rather than a
-/// number nobody can look up.
+/// named in `NetworkId::name` for exactly this, and devnet-2 since devnet was
+/// renumbered again alongside testnet-8, so a directory left over from before
+/// either restart is refused with the network's word rather than a number
+/// nobody can look up.
+///
+/// And says the network is retired. The refusal advised "start this node
+/// for it", which a build without that network's rules cannot do: every
+/// testnet-7 wallet started under a testnet-8 build was told to (audit
+/// testnet-8, 03-F7).
 #[test]
-fn a_devnet_1_log_stops_a_devnet_start_and_names_the_network() {
-    let directory = scratch("devnet-1");
-    let old = ConsensusParams {
-        network: NetworkId::DEVNET_1,
-        ..params()
-    };
-    write_log(&directory, &chain(&old, 8));
-    let before = bytes_of(&directory, BLOCK_LOG);
-    let current = ConsensusParams {
-        network: NetworkId::DEVNET,
-        ..params()
-    };
+fn a_retired_devnet_log_stops_a_devnet_start_and_names_the_network() {
+    for (retired, name, current) in [
+        (NetworkId::DEVNET_1, "devnet-1", NetworkId::DEVNET),
+        (NetworkId::DEVNET_2, "devnet-2", NetworkId::DEVNET),
+        (NetworkId::TESTNET_7, "testnet-7", NetworkId::TESTNET_8),
+    ] {
+        let directory = scratch(name);
+        let old = ConsensusParams {
+            network: retired,
+            ..params()
+        };
+        write_log(&directory, &chain(&old, 8));
+        let before = bytes_of(&directory, BLOCK_LOG);
+        let current = ConsensusParams {
+            network: current,
+            ..params()
+        };
 
-    let said = refusal(Node::open(current, loopback(), &directory));
+        let said = refusal(Node::open(current, loopback(), &directory));
+
+        assert!(
+            bytes_of(&directory, BLOCK_LOG) == before,
+            "a start under {}'s name changed {name}'s block log",
+            current.network
+        );
+        assert!(
+            said.contains(name),
+            "the refusal did not name {name} by name: {said}"
+        );
+        assert!(
+            said.contains("retired") && !said.contains("start this node for it"),
+            "a node that cannot run {name} was told to start for it: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+}
+
+/// A first block of this network, dated `first_at`, and `count` blocks on it.
+fn minted_at(first_at: u64, key: u8, count: usize) -> Vec<Block> {
+    let rules = params();
+    let miner = SecretKey::from_bytes(&[key; 32]);
+    let mut state = LedgerState::new();
+    let mut clock = first_at;
+    (0..count)
+        .map(|_| {
+            let height = state.next_height().unwrap();
+            let coinbase = CoinbaseTransaction::new(
+                height,
+                vec![Note::new(rules.initial_reward, miner.public_key())],
+            );
+            let block =
+                assemble_block(&state, coinbase, Vec::<Transfer>::new(), &rules, clock, 0).unwrap();
+            let block = mine_block(block, ATTEMPTS).expect("a nonce exists");
+            connect_block(&mut state, &block, &rules, NOW).unwrap();
+            clock += 600;
+            block
+        })
+        .collect()
+}
+
+/// The rules of a build that carries `first` as its network's first block,
+/// the way `for_network` reads them off `genesis.rs`.
+fn pinning(first: &Block) -> ConsensusParams {
+    ConsensusParams {
+        genesis: Some(first.id()),
+        opens_at: first.header.timestamp,
+        ..params()
+    }
+}
+
+/// A build pinning one first block of a network, started on a directory a
+/// build of a later minting of the same network wrote, stops and cuts
+/// nothing, and says it is the same network minted again.
+///
+/// AUDIT, repaired (testnet-8, 03-F2). A network is minted again under the
+/// same marker when a restart's provisional first block is replaced at the
+/// opening. The first record was refused as another first block, which was
+/// not taken to be about the reader, and the log was cut to nothing and the
+/// build's own first block laid in its place: a machine moved back to a
+/// build carrying the provisional block lost its chain without a word.
+#[test]
+fn a_log_from_another_minting_of_the_network_stops_the_start_and_keeps_every_block() {
+    let provisional = minted_at(1_000, 3, 1);
+    let opened = minted_at(5_000, 4, 8);
+    let directory = scratch("later-minting");
+    write_log(&directory, &opened);
+    let before = bytes_of(&directory, BLOCK_LOG);
+
+    let said = refusal(Node::open(pinning(&provisional[0]), loopback(), &directory));
 
     assert!(
         bytes_of(&directory, BLOCK_LOG) == before,
-        "a start under devnet's name changed devnet-1's block log"
+        "a start by a build of another minting of the network changed the block log"
+    );
+    assert_eq!(
+        records_in(&directory),
+        8,
+        "and the log still holds every record"
     );
     assert!(
-        said.contains("devnet-1"),
-        "the refusal did not name the retired network by name: {said}"
+        said.contains(&params().network.to_string()) && said.contains("minted again"),
+        "the refusal does not say it is the same network minted again: {said}"
+    );
+    assert!(
+        said.contains(&opened[0].id().to_string())
+            && said.contains(&provisional[0].id().to_string()),
+        "the refusal does not name both first blocks: {said}"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The other direction: a build pinning a later minting, on a directory of
+/// an earlier one, stops and cuts nothing, and does not call its own
+/// network another network's chain.
+///
+/// AUDIT, repaired (testnet-8, 03-F2). It stopped, and said the directory
+/// held "another network's chain", about the network it was.
+#[test]
+fn a_log_from_before_the_network_was_minted_again_is_said_to_be_this_network() {
+    let provisional = minted_at(1_000, 3, 8);
+    let opened = minted_at(5_000, 4, 1);
+    let directory = scratch("earlier-minting");
+    write_log(&directory, &provisional);
+    let before = bytes_of(&directory, BLOCK_LOG);
+
+    let said = refusal(Node::open(pinning(&opened[0]), loopback(), &directory));
+
+    assert!(
+        bytes_of(&directory, BLOCK_LOG) == before,
+        "a start by a build of a later minting changed the block log"
+    );
+    assert!(
+        !said.contains("another network"),
+        "the network this node runs was called another network: {said}"
+    );
+    assert!(
+        said.contains(&params().network.to_string())
+            && said.contains("minted again")
+            && said.contains("dated 1000, before 5000"),
+        "the refusal does not say it is this network from before it was minted again: {said}"
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
@@ -335,6 +469,36 @@ fn a_ledger_of_another_network_is_answered_with_the_network() {
     assert!(
         said.contains(&params().network.to_string()),
         "and it is not told which network the directory belongs to: {said}"
+    );
+    assert!(
+        said.contains("start this node for it") && !said.contains("retired"),
+        "a network this build runs is not offered as the one to start for: {said}"
+    );
+    assert_eq!(records_in(&directory), held, "and the blocks are all there");
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A ledger of a retired network is answered as retired, not with advice to
+/// start this node for a network this build has no rules for (audit
+/// testnet-8, 03-F7).
+#[test]
+fn a_ledger_of_a_retired_network_is_answered_as_retired() {
+    let old = ConsensusParams {
+        network: NetworkId::TESTNET_7,
+        ..params()
+    };
+    let directory = a_node_that_wrote_its_ledger_under("ledger-retired", &old);
+    let held = records_in(&directory);
+
+    let said = refusal(Node::open(params(), loopback(), &directory));
+
+    assert!(
+        said.contains("testnet-7") && said.contains("retired"),
+        "a ledger of testnet-7 is not said to be a retired network's: {said}"
+    );
+    assert!(
+        !said.contains("start this node for it"),
+        "and it is told to start this node for a network this build cannot run: {said}"
     );
     assert_eq!(records_in(&directory), held, "and the blocks are all there");
     let _ = std::fs::remove_dir_all(&directory);
@@ -580,13 +744,17 @@ fn a_log_past_a_version_this_build_has_never_heard_of_stops_the_start() {
 }
 
 /// A ledger dated before the network this node was started for opened is
-/// another network's ledger, not a damaged file.
+/// this network from before it was minted again, not a damaged file.
 ///
-/// Nothing asked this, so it was told to delete the file: a directory kept
-/// from an earlier run of a network under the same name.
+/// Nothing asked this, so it was told to delete the file "which costs the
+/// stored blocks": a directory kept from an earlier run of a network under the
+/// same name. It was then told it held another network's chain, about the
+/// network it was (audit testnet-8, 03-F2): a test network is minted again
+/// under the same name at every opening.
 #[test]
 fn a_ledger_from_before_this_network_opened_is_answered_with_the_network() {
     let directory = a_node_that_wrote_its_ledger("ledger-before");
+    let held = records_in(&directory);
     let later = ConsensusParams {
         opens_at: NOW,
         ..params()
@@ -595,10 +763,17 @@ fn a_ledger_from_before_this_network_opened_is_answered_with_the_network() {
     let said = refusal(Node::open(later, loopback(), &directory));
 
     assert!(
-        !said.contains("delete it") && said.contains("another network"),
-        "a ledger from before this network opened is not told it holds another network's \
-         chain: {said}"
+        !said.contains("costs the stored blocks") && !said.contains("another network"),
+        "a ledger from before this network opened is answered as damage, or as another \
+         network's: {said}"
     );
+    assert!(
+        said.contains("testnet-8")
+            && said.contains("minted again")
+            && said.contains(&format!("before {NOW}")),
+        "the refusal does not say it is this network from before it was minted again: {said}"
+    );
+    assert_eq!(records_in(&directory), held, "and the blocks are all there");
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -631,6 +806,37 @@ fn a_record_of_another_network_further_up_the_log_is_cut_and_the_start_goes_on()
         (5, 0, Some(5)),
         "the start did not go on from the five blocks before the changed record, leaving it \
          and the records after it on the disk"
+    );
+}
+
+/// The last record naming another network is a record that changed too, and
+/// is cut like one: the start goes on from the blocks before it.
+///
+/// The record before it names only its parent, so nothing on the disk speaks
+/// against the last record, and the store takes it at its word. That makes it
+/// the one record past the first that reaches the question of whose
+/// directory this is, and only the first record decides that. Nothing held
+/// it, so a start that stopped as on another network's directory over one
+/// changed last record passed.
+#[test]
+fn a_last_record_of_another_network_is_cut_and_the_start_goes_on() {
+    let directory = scratch("changed-last");
+    let mut blocks = chain(&params(), 8);
+    let mut changed = blocks[7].clone();
+    changed.header.network = NetworkId::new(0x00ab_cdef);
+    blocks[7] = mine_block(changed, ATTEMPTS).unwrap();
+    write_log(&directory, &blocks);
+
+    let (node, restored) = Node::open(params(), loopback(), &directory)
+        .unwrap_or_else(|error| panic!("a last record that changed stopped the start: {error}"));
+    node.shutdown();
+    drop(node);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert_eq!(
+        (restored.blocks, restored.refused),
+        (7, 1),
+        "the start did not go on from the seven blocks before the changed last record"
     );
 }
 

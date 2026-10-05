@@ -27,7 +27,7 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader, HeaderSummary, BLOCK_VERSION};
 use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::{NetworkId, Note, NoteId};
-use cairn_ledger::pow::{meets_target, next_difficulty, RECENT_HEADERS};
+use cairn_ledger::pow::{meets_target, next_difficulty, Origin, RECENT_HEADERS};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
 use cairn_ledger::LedgerState;
@@ -263,7 +263,7 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     let header = pinned_header();
     assert_eq!(
         hex::encode(&header.encode()),
-        "01005a5241437766554433221100\
+        "01005b5241437766554433221100\
          a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\
          b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2\
          c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3\
@@ -276,7 +276,7 @@ fn the_encodings_two_builds_share_still_produce_the_bytes_they_did() {
     );
     assert_eq!(
         header.id().to_string(),
-        "cb0e19a1f54ae138fc02d426e4fb3e45da98694c8c36013fe8177b2c4c5dd84d"
+        "6630db19acd1ad255ca6c07dab423f0d766ec386f28e2eb17216c171bf5965df"
     );
     assert_eq!(
         header.encode().len(),
@@ -344,7 +344,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
     );
     assert_eq!(
         state.history_root().to_string(),
-        "cd89989bf63556c9dba7de3bc60cc11c05304afc5890272fc8631012e1ce593c"
+        "15e4a894914908484e155dcae13a61b7d28e5501bf330696d7579564eb015c89"
     );
     assert_eq!(
         state.supply().as_pebbles(),
@@ -358,7 +358,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
     );
     assert_eq!(
         state.tip().unwrap().id.to_string(),
-        "a2a72094864ba91c39ca94ed132a5546163ad0df05134a5a550d974c94c478bb"
+        "b3fe1475bdc566594f53b788bb41d790a9333862d5234a61cc00853328be10cf"
     );
 }
 
@@ -379,7 +379,7 @@ fn twenty_blocks_still_come_to_what_they_came_to() {
 /// or not whoever adds it remembers the constant assertion.
 #[test]
 fn every_network_this_build_ships_has_a_schedule_read_the_way_it_is_written() {
-    for name in ["testnet", "testnet-7", "devnet"] {
+    for name in ["testnet", "testnet-8", "devnet"] {
         let params = ConsensusParams::for_network(name).expect("a network this build ships");
         let schedule = params.activations;
         let opening = schedule.first().expect("a schedule is never empty");
@@ -409,70 +409,93 @@ fn every_network_this_build_ships_has_a_schedule_read_the_way_it_is_written() {
 ///
 /// The twenty blocks are mined at the floor, so the retarget answers the floor
 /// at every step and none of its arithmetic is inside that vector. It is the
-/// place the classic disagreements live: it clamps, saturates, weights and
-/// divides in `i128`, and every one of those is a number two builds have to
-/// reach identically or they demand different difficulties of the same block
-/// and part company on the next one.
+/// place the classic disagreements live: it floors a signed division, splits
+/// an exponent into a shift and a fraction, evaluates a cubic, shifts both
+/// ways, saturates and clamps, and every one of those is a number two builds
+/// have to reach identically or they demand different difficulties of the
+/// same block and part company on the next one.
 ///
-/// Nine windows, each reaching a different arm: nothing to weigh, one header,
-/// a network that never retargets, blocks found instantly, blocks found exactly
-/// on time, a stall that lands on the descent bound, a chain already at the
-/// floor, uneven solve times so the linear weighting is inside the answer, and
-/// a stall short enough that the solvetime ceiling itself is.
+/// Ten parents, each reaching a different arm: the first block's child, a
+/// network with no block time, blocks found as fast as the median allows,
+/// blocks exactly on time, a stall that lands on the descent bound, a chain
+/// already at the floor, a parent early by a fraction of a half life, one late
+/// by a second and by a fraction, and a difficulty at the ceiling asked to
+/// rise. `tests/asert_vectors.txt` holds fifty more, from an independent
+/// reference.
 #[test]
 fn the_retarget_still_answers_what_it_answered() {
-    fn window(count: usize, difficulty: u64, spacing: u64) -> Vec<HeaderSummary> {
-        (0..count)
-            .map(|index| HeaderSummary {
-                height: index as u64,
-                timestamp: 1_000 + index as u64 * spacing,
-                difficulty,
-            })
-            .collect()
-    }
+    let origin = Origin {
+        timestamp: 1_000,
+        difficulty: 4_096,
+    };
+    let parent = |height: u64, timestamp: u64, difficulty: u64| HeaderSummary {
+        height,
+        timestamp,
+        difficulty,
+    };
+    let on_time = 1_000 + 90 * 60;
 
-    assert_eq!(next_difficulty(&[], 60), 1, "nothing to weigh is the floor");
     assert_eq!(
-        next_difficulty(&window(1, 4_096, 60), 60),
+        next_difficulty(&parent(0, 1_000, 4_096), origin, 60),
         4_096,
-        "one header is no solve time, so the difficulty stands"
+        "the first block's child carries the first block's difficulty"
     );
     assert_eq!(
-        next_difficulty(&window(1, 4_096, 60), 0),
+        next_difficulty(&parent(90, on_time, 4_096), origin, 0),
         4_096,
-        "and a network with no target block time never retargets"
+        "a network with no target block time never retargets"
     );
 
-    // Blocks arriving as fast as they can be made, which is what the climb
-    // ceiling exists for, against blocks arriving exactly on time.
-    assert_eq!(next_difficulty(&window(91, 4_096, 1), 60), 16_384);
-    assert_eq!(next_difficulty(&window(91, 4_096, 60), 60), 4_096);
+    // Ninety blocks a second apart, an hour and a half ahead of the schedule,
+    // against ninety exactly on time.
+    assert_eq!(
+        next_difficulty(&parent(90, 1_090, 4_096), origin, 60),
+        11_385
+    );
+    assert_eq!(
+        next_difficulty(&parent(90, on_time, 4_096), origin, 60),
+        4_096
+    );
 
-    // A stall far past the solvetime ceiling: what comes back is the descent
-    // the clamp allows and not the one the clock asks for.
-    assert_eq!(next_difficulty(&window(91, 4_096, 100_000), 60), 1_024);
+    // A stall far past two half lives: what comes back is the descent the
+    // bound allows and not the one the clock asks for.
+    assert_eq!(
+        next_difficulty(&parent(90, 1_000 + 90 * 100_000, 4_096), origin, 60),
+        1_024
+    );
 
     // And the floor holds the bottom, whatever the clock says.
-    assert_eq!(next_difficulty(&window(91, 1, 100_000), 60), 1);
+    let floor = Origin {
+        timestamp: 1_000,
+        difficulty: 1,
+    };
+    assert_eq!(
+        next_difficulty(&parent(90, 1_000 + 90 * 100_000, 1), floor, 60),
+        1
+    );
 
-    // A window whose solve times are not all the same, so the linear weighting
-    // is inside the answer rather than cancelling out.
-    let mut uneven = window(91, 4_096, 60);
-    for (index, summary) in uneven.iter_mut().enumerate() {
-        summary.timestamp = 1_000 + (index as u64) * 60 + (index as u64 % 7) * 45;
-    }
-    assert_eq!(next_difficulty(&uneven, 60), 3_900);
+    // A fraction of a half life either side, so the cubic is inside the
+    // answer, and one second late, so the floored division is.
+    assert_eq!(
+        next_difficulty(&parent(90, on_time - 1_234, 4_096), origin, 60),
+        5_194
+    );
+    assert_eq!(
+        next_difficulty(&parent(90, on_time + 1, 4_096), origin, 60),
+        4_095
+    );
+    assert_eq!(
+        next_difficulty(&parent(90, on_time + 777, 4_096), origin, 60),
+        3_527
+    );
 
-    // Mostly on time with a stall every tenth block long enough to be cut by
-    // the solvetime ceiling, and not so long that the answer reaches the
-    // descent bound. This is the only shape where the ceiling itself is inside
-    // the number: a chain stalled all the way through lands on the bound, and
-    // the bound would answer the same whatever the ceiling was.
-    let mut stalling = window(91, 4_096, 60);
-    let mut clock = 1_000u64;
-    for (index, summary) in stalling.iter_mut().enumerate() {
-        summary.timestamp = clock;
-        clock += if index % 10 == 9 { 500 } else { 60 };
-    }
-    assert_eq!(next_difficulty(&stalling, 60), 2_328);
+    // A difficulty at the ceiling asked to double stays at the ceiling.
+    let top = Origin {
+        timestamp: 1_000,
+        difficulty: u64::MAX,
+    };
+    assert_eq!(
+        next_difficulty(&parent(90, on_time - 3_600, u64::MAX), top, 60),
+        u64::MAX
+    );
 }

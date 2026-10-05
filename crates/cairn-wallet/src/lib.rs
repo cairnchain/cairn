@@ -35,7 +35,7 @@ use cairn_ledger::note::{Address, NetworkId, Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::{ConsensusParams, TransferError};
 use cairn_net::node::{
-    Behind, Probation, Refused, Stranded, Unjudged, Unread, Unweighable, Unwritten,
+    Behind, Opening, Probation, Refused, Stranded, Unjudged, Unread, Unweighable, Unwritten,
 };
 use cairn_net::{Joined, Node, MAX_PROVEN};
 use cairn_primitives::codec::Encode;
@@ -863,8 +863,7 @@ pub struct Progress {
     /// is not going to read, next to a height that keeps climbing, for ever.
     pub unread: Option<Unread>,
     /// Whether the blocks the node is refusing say this machine's clock is
-    /// behind the network's, if enough of them came from enough peers, or if
-    /// the one it refused was the network's first.
+    /// behind the network's, if enough of them came from enough peers.
     ///
     /// A block dated too far past the reading machine's clock is refused, so
     /// a wallet on a slow clock refuses every honest block from the moment the
@@ -873,6 +872,14 @@ pub struct Progress {
     /// owner never arrive. `cairnd` has named this since the node learned to
     /// count it, and the wallet, where the balance is read, did not.
     pub clock_behind: Option<Behind>,
+    /// When this wallet's network opens, while that is still ahead of this
+    /// machine's clock and there is no chain to read a balance from.
+    ///
+    /// A network is released ahead of the opening its first block is dated
+    /// at, so a wallet installed for it early has no chain at all, and used to
+    /// tell its owner the machine's clock was behind the day the network
+    /// opened.
+    pub opening: Option<Opening>,
     /// Blocks the node met that this build has no rules to judge, if enough of
     /// them came from enough peers to mean anything.
     pub unjudged: Option<Unjudged>,
@@ -922,16 +929,6 @@ pub struct Progress {
 /// have gone quiet, and the two are mended in different places.
 fn clock_is_slow(behind: &Behind) -> String {
     let out_by = behind.seconds.saturating_sub(behind.drift);
-    if behind.own_first_block {
-        return format!(
-            "The clock on this machine is behind the day this network opened, by at least \
-             {out_by} seconds: this wallet refused the network's first block, which is \
-             written into this program and which nobody sent it. Until the clock is right it \
-             cannot follow the chain at all, so there is no balance to show. Set the time on \
-             this machine and start the wallet again. Nothing is lost and the key file is not \
-             touched."
-        );
-    }
     format!(
         "The clock on this machine looks at least {out_by} seconds slow. {} blocks from {} \
          different peers were refused for being dated ahead of it, the furthest by {} \
@@ -941,6 +938,30 @@ fn clock_is_slow(behind: &Behind) -> String {
          into a block, so this is a reason to look at the clock rather than a verdict. \
          Nothing is lost and the key file is not touched.",
         behind.blocks, behind.peers, behind.seconds, behind.drift,
+    )
+}
+
+/// The line for a wallet whose network has not opened by this machine's
+/// clock.
+///
+/// Not a fault: there is no chain yet, and the wallet takes the network's
+/// first block by itself at the opening. The clock is named only for a date
+/// already past, since a machine behind a network that has opened reads the
+/// same from here.
+fn not_open_yet(opening: &Opening) -> String {
+    let wait = match opening.in_seconds {
+        s if s >= 2 * 86_400 => format!("about {} days", s / 86_400),
+        s if s >= 2 * 3_600 => format!("about {} hours", s / 3_600),
+        s if s >= 2 * 60 => format!("about {} minutes", s / 60),
+        _ => "a minute or two".to_owned(),
+    };
+    format!(
+        "This network opens on {}, in {wait} by this machine's clock. Until then there is no \
+         chain, so there is no balance to show and nothing can be paid; this wallet takes the \
+         network's first block by itself at the opening and follows the chain from there. If \
+         that date has already passed, the clock on this machine is behind: set the time on \
+         this machine. Nothing is lost and the key file is not touched.",
+        cairn_ledger::genesis::when(opening.at),
     )
 }
 
@@ -1116,6 +1137,11 @@ impl Progress {
         // stands.
         if let Some(behind) = &self.clock_behind {
             return Some(clock_is_slow(behind));
+        }
+        // Below the clock: blocks refused from peers say the network has
+        // opened and this machine is behind it, which is the line to act on.
+        if let Some(opening) = &self.opening {
+            return Some(not_open_yet(opening));
         }
         if let Some(unwritten) = &self.unwritten {
             let kept = unwritten.written_through.map_or_else(
@@ -1873,6 +1899,7 @@ impl Wallet {
             unwritten: self.node.unwritten(),
             unread: self.node.unread(),
             clock_behind: self.node.clock_behind(),
+            opening: self.node.opening(),
             unjudged: self.node.unjudged(),
             unweighable: self.node.unweighable(),
             keeping_its_account: *self
@@ -4236,10 +4263,10 @@ fn wait_until(patience: Duration, ready: impl Fn() -> bool) -> bool {
 )]
 mod tests {
     use super::{
-        asking, ceiling, crowded, first_as_made, held_back_because, margin_of, offer_due, offering,
-        one_question, ran_out, read_every_block_since, said_plainly, select, settled, shuffle,
-        still_outstanding, too_old_for_this_chain, Covered, Held, NoDraft, Outdated, Progress,
-        Recovery, Waited, MAX_PROVEN, OFFER_PAUSE, SETTLED_FOR,
+        asking, ceiling, crowded, first_as_made, held_back_because, margin_of, not_open_yet,
+        offer_due, offering, one_question, ran_out, read_every_block_since, said_plainly, select,
+        settled, shuffle, still_outstanding, too_old_for_this_chain, Covered, Held, NoDraft,
+        Outdated, Progress, Recovery, Waited, MAX_PROVEN, OFFER_PAUSE, SETTLED_FOR,
     };
 
     /// How many blocks an account has not read, when it has not read some.
@@ -4409,7 +4436,7 @@ mod tests {
     use cairn_ledger::note::{Note, NoteId};
     use cairn_ledger::validation::TransferError;
     use cairn_net::node::{
-        Behind, Probation, Reading, Refused, Unread, Unweighable, Unwritten, Writing,
+        Behind, Opening, Probation, Reading, Refused, Unread, Unweighable, Unwritten, Writing,
     };
     use cairn_net::Joined;
     use cairn_primitives::{Amount, Hash32};
@@ -5273,6 +5300,7 @@ mod tests {
             unwritten: None,
             unread: None,
             clock_behind: None,
+            opening: None,
             unjudged: None,
             unweighable: None,
             height: Some(10),
@@ -5742,7 +5770,7 @@ mod tests {
     }
 
     /// A slow clock is told in numbers, above the lines that call the balance
-    /// right, and a refused first block is told as the certainty it is.
+    /// right, and a network that has not opened is told when it opens.
     ///
     /// Nothing read `Node::clock_behind` here, so a wallet refusing honest
     /// blocks for its clock said nothing at all, and with a full disk beside
@@ -5754,7 +5782,6 @@ mod tests {
             drift: 7_200,
             blocks: 8,
             peers: 2,
-            own_first_block: false,
         };
         let slow = Progress {
             clock_behind: Some(behind),
@@ -5792,22 +5819,60 @@ mod tests {
              right for the chain as it stands, which a slow clock makes untrue"
         );
 
+        // AUDIT, repaired (testnet-8, 01-F1): a wallet installed ahead of an
+        // announced opening was told its clock was behind the day the network
+        // opened, and to start the wallet again once it was set.
+        let opening = Opening {
+            at: 1_791_309_600,
+            in_seconds: 3 * 86_400 + 5,
+            drift: 600,
+        };
         let before_the_opening = Progress {
-            clock_behind: Some(Behind {
-                own_first_block: true,
-                ..behind
-            }),
+            opening: Some(opening),
+            height: None,
             ..healthy()
         };
         let said = before_the_opening.warning().expect("a person is told");
         assert!(
-            said.contains("behind the day this network opened"),
-            "a refused first block is told as a slow clock rather than as the \
-             certainty it is"
+            said.contains("opens on 6 October 2026 at 18:00:00 UTC, in about 3 days"),
+            "the opening is not said as a date and a wait: {said}"
         );
         assert!(
-            !said.contains("reason to look"),
-            "a certainty is hedged as a reason to look"
+            said.contains("by itself at the opening"),
+            "the wallet does not say it opens by itself: {said}"
+        );
+        assert!(
+            !said.contains("slow") && !said.contains("start the wallet again"),
+            "a wallet waiting for an opening is told its clock is slow: {said}"
+        );
+        for (in_seconds, wait) in [
+            (2 * 86_400, "in about 2 days"),
+            (36 * 3_600, "in about 36 hours"),
+            (5 * 3_600, "in about 5 hours"),
+            (2 * 3_600, "in about 2 hours"),
+            (90 * 60, "in about 90 minutes"),
+            (10 * 60, "in about 10 minutes"),
+            (2 * 60, "in about 2 minutes"),
+            (90, "in a minute or two"),
+        ] {
+            let said = not_open_yet(&Opening {
+                in_seconds,
+                ..opening
+            });
+            assert!(said.contains(wait), "{in_seconds} s is not {wait}: {said}");
+        }
+
+        let and_peers_ahead_of_the_clock = Progress {
+            clock_behind: Some(behind),
+            ..before_the_opening
+        };
+        let said = and_peers_ahead_of_the_clock
+            .warning()
+            .expect("a person is told");
+        assert!(
+            said.contains("slow"),
+            "blocks from peers ahead of the clock say the network opened and this \
+             machine is behind it, and that is not what was said: {said}"
         );
     }
 

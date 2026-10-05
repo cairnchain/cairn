@@ -22,7 +22,7 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::Note;
-use cairn_ledger::pow::DIFFICULTY_WINDOW;
+use cairn_ledger::sampling::BELOW_THE_PINNED;
 use cairn_ledger::sampling::{
     check_start, draw, seed_of, work_before, Sample, SampledStart, StartError, SAMPLES,
 };
@@ -105,7 +105,7 @@ fn best_run(shown: &[BlockHeader], samples: &[Sample], tip: BlockHeader) -> Vec<
         .map(|sample| sample.header.height)
         .max()
         .unwrap_or(0);
-    let from = usize::try_from(deepest.saturating_sub(DIFFICULTY_WINDOW as u64)).unwrap();
+    let from = usize::try_from(deepest.saturating_sub(BELOW_THE_PINNED)).unwrap();
     let mut run: Vec<BlockHeader> = shown[from..].to_vec();
     if run.last().map(BlockHeader::id) != Some(tip.id()) {
         run.push(tip);
