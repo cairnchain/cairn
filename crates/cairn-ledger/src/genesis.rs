@@ -25,16 +25,16 @@ use crate::note::NetworkId;
 /// network started over for: the difficulty follows the clock, so a few
 /// minutes of hired hash rate no longer stop the chain for 33 hours.
 ///
-/// Provisional. Minted by `cargo run --release -p cairn-ledger --example
-/// remint`, which mints this block and the devnet's together and writes both
-/// into every place that pins them, and dated 4 October 2026 at 13:25:06 UTC.
-/// Its timestamp is `opens_at`, and the retarget's schedule starts there:
-/// every target time a network opens after its first block is dated is a
-/// block asked less than the network's real rate, down to the floor. So it is
-/// minted again before the release, dated at the opening announced for the
-/// network (`-- --opens-at`), and a node started before that moment waits for
-/// it. A release is refused until the first word of this paragraph is gone.
-const TESTNET_8: &str = "01005b524143000000000000000000000000000000000000000000000000000000000000000000000000000000006f3cc73c214804e789694adf801aa8db60858b3067698961f1d554b05e1c360c0b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e2b253c26a0000000000000010000000000000001000000000000000000000000026d5490900000000010000000000000000000000000032000000436169726e20746573746e65742d382e2054686520646966666963756c747920666f6c6c6f77732074686520636c6f636b2e00000000";
+/// Minted on the morning of 5 October 2026 by `cargo run --release -p
+/// cairn-ledger --example remint -- --opens-at 2026-10-05T18:00:00Z`, which
+/// mints this block and the devnet's together and writes both into every
+/// place that pins them, and dated 5 October 2026 at 18:00:00 UTC, the
+/// opening announced for the network. Its timestamp is `opens_at`, and the
+/// retarget's schedule starts there: every target time a network opens after
+/// its first block is dated is a block asked less than the network's real
+/// rate, down to the floor. So it is dated at the opening and published
+/// before it, and a node started before that moment waits for it.
+const TESTNET_8: &str = "01005b524143000000000000000000000000000000000000000000000000000000000000000000000000000000006f3cc73c214804e789694adf801aa8db60858b3067698961f1d554b05e1c360c0b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e2a0e5c36a000000000000001000000000000000100000000000000000000000003f0adb0d00000000010000000000000000000000000032000000436169726e20746573746e65742d382e2054686520646966666963756c747920666f6c6c6f77732074686520636c6f636b2e00000000";
 
 /// How long before it was minted the devnet's first block is dated.
 ///
@@ -70,7 +70,7 @@ pub const DEVNET_DATED_EARLY: u64 = 9_000;
 /// day: `tests/the_difficulty_follows_the_clock.rs` measures a month. So it is
 /// minted again with every restart, and a devnet is best opened on the build
 /// that carries a fresh one.
-const DEVNET: &str = "01004652414300000000000000000000000000000000000000000000000000000000000000000000000000000000dfe46a6f2e26f175ffa4d4a6b2522ca93a3fa73c7a1ef971637289623c5d03270b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e28a30c26a000000000000800000000000000080000000000000000000000000007616420000000000010000000000000000000000000022000000436169726e206465766e65742e205468726f77617761792062792064657369676e2e00000000";
+const DEVNET: &str = "01004652414300000000000000000000000000000000000000000000000000000000000000000000000000000000dfe46a6f2e26f175ffa4d4a6b2522ca93a3fa73c7a1ef971637289623c5d03270b45c2ae07948141b7940f870815f8cd4831185355bd578d7409ae5d61cdcf732b8a7f4949a18c612a530d7dc3aa53b75b7fa4163daff6c2742422bdae5a12e21724c36a00000000000080000000000000008000000000000000000000000000918c2f0000000000010000000000000000000000000022000000436169726e206465766e65742e205468726f77617761792062792064657369676e2e00000000";
 
 fn encoded(network: NetworkId) -> Option<&'static str> {
     let text = match network {
@@ -212,13 +212,13 @@ mod tests {
         for (network, identifier, opened) in [
             (
                 NetworkId::TESTNET_8,
-                "0000000270eb96cd530f6a3e8c0b3e3a6509b47f4d3393bb6a14d919bf565817",
-                1_791_120_306,
+                "0000000f14fdc30e1cd088c9a8fca0090a380d49168e79fd8ca65ed4dfeda6b8",
+                1_791_223_200,
             ),
             (
                 NetworkId::DEVNET,
-                "000000e13c0c16303f63e4bfd5e8e503acfe8102a559679964d7685903b6d8d6",
-                1_791_111_306,
+                "000001f6cdaa3b417640663564894f4140974e7fc4a9de316761ec1bb70433bf",
+                1_791_173_655,
             ),
         ] {
             let first = block(network).unwrap();

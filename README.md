@@ -32,11 +32,10 @@ what it borrows and what limit it accepts.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-8` opens on the day this restart
-ships (the network table below carries a provisional first block, minted
-while the restart was written; the real one is minted at the opening, with
-`cargo run --release -p cairn-ledger --example remint`, because the
-difficulty's schedule starts at its timestamp). Its money is worth nothing, is
+Pre-alpha, and running in public. `testnet-8` opens on 5 October 2026 at
+18:00 UTC: its first block is dated at that moment, because the difficulty's
+schedule starts at its timestamp, and a node installed before then says when
+the network opens and lays the block down itself. Its money is worth nothing, is
 meant to be worth nothing, and the network will be reset.
 
 It is the eighth because a few minutes of hired hash rate could nearly stop
@@ -135,8 +134,8 @@ paid in a minute.
 
 | Network | Starts from | Opens at | Block time |
 | --- | --- | --- | --- |
-| `testnet-8` | `0000000270eb...` | 1791120306 | 60 s |
-| `devnet` | `000000e13c0c...` | 1791111306 | 5 s |
+| `testnet-8` | `0000000f14fd...` | 1791223200 | 60 s |
+| `devnet` | `000001f6cdaa...` | 1791173655 | 5 s |
 | `mainnet` | not made yet | | |
 
 There is an explorer, which is a node that also serves a website: the chain in
