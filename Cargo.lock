@@ -58,6 +58,7 @@ version = "0.12.0"
 dependencies = [
  "cairn-accumulator",
  "cairn-crypto",
+ "cairn-fuzz",
  "cairn-ledger",
  "cairn-primitives",
  "thiserror",

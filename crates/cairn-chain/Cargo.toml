@@ -20,6 +20,8 @@ thiserror.workspace = true
 # the floor rate it was measured at.
 cairn-accumulator.workspace = true
 cairn-crypto.workspace = true
+# For the campaign that hands the block store random sequences.
+cairn-fuzz.workspace = true
 # For the relay-cost test in `tests/pool.rs`, which counts bytes hashed rather
 # than timing anything. Only the test build asks for it.
 cairn-primitives = { workspace = true, features = ["count-hashing"] }
