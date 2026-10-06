@@ -23,6 +23,15 @@ use crate::message::PeerAddress;
 /// The name the address book takes inside a node's directory.
 pub const PEER_FILE: &str = "peers.txt";
 
+/// The name the anchors take inside a node's directory: the peers it went out
+/// to and was talking to, which the next start dials before anybody else.
+///
+/// A file of its own rather than a column in the book, because a build that
+/// reads the book refuses a line with a column it does not know and sets the
+/// whole file aside, and a node taken back one release would then start
+/// without its book. A build that does not know this file leaves it alone.
+pub const ANCHOR_FILE: &str = "anchors.txt";
+
 /// Addresses held before new ones are ignored.
 ///
 /// The book is filled by strangers, so it needs a ceiling. Seeds are outside
@@ -223,6 +232,12 @@ pub struct AddressBook {
     /// Addresses dialled this run and never written to the file: see
     /// [`Self::keep_off_the_file`].
     unwritten: BTreeSet<SocketAddr>,
+    /// The peers this node went out to and was talking to, as read back from
+    /// [`ANCHOR_FILE`] or as last told: see [`Self::anchor`].
+    anchors: BTreeSet<SocketAddr>,
+    /// How many times they have been told something new, so that a caller
+    /// can tell anchors written down from anchors that have moved since.
+    anchor_changes: u64,
 }
 
 /// Where one address sits in the order it is dialled and handed on.
@@ -266,6 +281,8 @@ impl Default for AddressBook {
             set_aside: None,
             held_back: false,
             unwritten: BTreeSet::new(),
+            anchors: BTreeSet::new(),
+            anchor_changes: 0,
         }
     }
 }
@@ -580,6 +597,47 @@ impl AddressBook {
     /// every session the wallet said it had spared it.
     pub(crate) fn keep_off_the_file(&mut self, address: SocketAddr) {
         self.unwritten.insert(canonical(address));
+    }
+
+    /// Tells the book which peers this node went out to and is talking to,
+    /// which are its anchors from now on.
+    ///
+    /// A node holding nobody it went out to tells it nothing new. It has
+    /// nobody to vouch for, and the anchors it had are still the best guess
+    /// it has at where to start from. Taken as news, a node whose network went
+    /// for a minute, or one killed between its first dial at a start and the
+    /// answer to it, would write down that it should start from nobody, and
+    /// the next start would dial the book in its order, which is the order an
+    /// attacker who filled the book chose.
+    pub(crate) fn anchor(&mut self, outbound: impl IntoIterator<Item = SocketAddr>) {
+        let told: BTreeSet<SocketAddr> = outbound.into_iter().map(canonical).collect();
+        if told.is_empty() || told == self.anchors {
+            return;
+        }
+        self.anchors = told;
+        self.anchor_changes = self.anchor_changes.saturating_add(1);
+    }
+
+    /// The peers a node dials before anybody else: see [`Self::anchor`].
+    pub(crate) fn anchors(&self) -> &BTreeSet<SocketAddr> {
+        &self.anchors
+    }
+
+    /// How many times the anchors have changed, for a caller deciding whether
+    /// writing them again would say anything new.
+    pub(crate) fn anchor_changes(&self) -> u64 {
+        self.anchor_changes
+    }
+
+    /// The anchors as [`ANCHOR_FILE`] holds them: all of them but the
+    /// addresses kept off every file, for the reason
+    /// [`Self::keep_off_the_file`] gives.
+    pub(crate) fn anchors_to_write(&self) -> Vec<SocketAddr> {
+        self.anchors
+            .iter()
+            .filter(|address| !self.unwritten.contains(address))
+            .copied()
+            .collect()
     }
 
     /// Records an address the operator gave, which is never dropped.
@@ -941,16 +999,26 @@ impl AddressBook {
     /// read as text was an empty book, a line that did not parse was skipped,
     /// and an operator who typed a name into the file, or whose disk garbled
     /// it, lost what was there without a word.
+    ///
+    /// The anchors are read after it, from their own file: see
+    /// [`Self::recall_anchors`].
     pub fn load(directory: impl AsRef<Path>) -> Self {
-        let path = directory.as_ref().join(PEER_FILE);
+        let directory = directory.as_ref();
+        let mut book = Self::load_peers(&directory.join(PEER_FILE));
+        book.recall_anchors(directory);
+        book
+    }
+
+    /// The book as the file of peers at `path` holds it: see [`Self::load`].
+    fn load_peers(path: &Path) -> Self {
         let mut book = Self::new();
-        let contents = match std::fs::read_to_string(&path) {
+        let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
             // No file at all, or something other than a file, which no save
             // writes over either: it is refused, and the refusal is said.
             Err(_) if !path.is_file() => return book,
             Err(_) => {
-                book.put_aside(&path);
+                book.put_aside(path);
                 return book;
             }
         };
@@ -966,9 +1034,37 @@ impl AddressBook {
             }
         }
         if !all_read {
-            book.put_aside(&path);
+            book.put_aside(path);
         }
         book
+    }
+
+    /// Reads back the anchors [`save_anchors`] wrote to `directory`, putting
+    /// each one in the book if it is not there already.
+    ///
+    /// Put in rather than looked for, because the two files are written at
+    /// different moments and the book can have lost a peer the anchors kept.
+    /// An anchor is a peer this node went out to and held, not a name
+    /// somebody passed on, and a start dials it first whatever the book says.
+    ///
+    /// A line that does not read is passed over rather than set aside, as the
+    /// book's would be. This file is the node's own note of who it was
+    /// talking to and is written over at the next change; it is not a list an
+    /// operator keeps, and the seeds an operator names are in the book.
+    fn recall_anchors(&mut self, directory: &Path) {
+        let Ok(contents) = std::fs::read_to_string(directory.join(ANCHOR_FILE)) else {
+            return;
+        };
+        for line in contents.lines() {
+            let Ok(address) = line.trim().parse::<SocketAddr>() else {
+                continue;
+            };
+            let address = canonical(address);
+            self.insert(address);
+            if self.contains(&address) {
+                self.anchors.insert(address);
+            }
+        }
     }
 
     /// Moves the file at `path` out of the way of the next save, or holds the
@@ -1055,6 +1151,19 @@ impl AddressBook {
         }
         write_beside_and_move(&directory.join(PEER_FILE), contents.as_bytes())
     }
+}
+
+/// Writes `anchors` to `directory`, one address a line, beside the file and
+/// moved onto it as the book is, so a machine that stops partway leaves the
+/// anchors that were there: see [`AddressBook::save`].
+pub(crate) fn save_anchors(directory: &Path, anchors: &[SocketAddr]) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory)?;
+    let mut contents = String::new();
+    for address in anchors {
+        contents.push_str(&address.to_string());
+        contents.push('\n');
+    }
+    write_beside_and_move(&directory.join(ANCHOR_FILE), contents.as_bytes())
 }
 
 /// One line of the file of peers: nothing, for a blank line; an address and
@@ -2555,6 +2664,122 @@ mod tests {
         .unwrap();
         let book = AddressBook::load(&directory);
         assert_eq!(book.len(), 1, "the readable lines are kept");
+    }
+
+    /// The anchors written down are the anchors read back, and a start finds
+    /// every one of them in the book, whatever the book's own file kept.
+    ///
+    /// A node killed outright never wrote its anchors, so a restart dialled
+    /// the book in the order a stranger had moved it to by answering dials.
+    /// The file of anchors is what survives a kill: see `node::keep_anchors`.
+    #[test]
+    fn the_anchors_written_down_are_the_anchors_read_back() {
+        let directory = scratch("anchors");
+        let held = [address(1, 9000), address(2, 9000)];
+        save_anchors(&directory, &held).unwrap();
+        // A book whose own file lost the second of them.
+        let mut book = AddressBook::new();
+        book.insert(address(1, 9000));
+        book.insert(address(3, 9000));
+        book.save(&directory).unwrap();
+        let read_back = AddressBook::load(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let anchors: Vec<SocketAddr> = read_back.anchors().iter().copied().collect();
+        assert_eq!(
+            anchors,
+            held.to_vec(),
+            "the anchors read back are not the ones written down"
+        );
+        assert!(
+            read_back.contains(&address(2, 9000)),
+            "an anchor the book had lost was not put back in it, so nothing would dial it"
+        );
+        assert_eq!(
+            read_back.anchor_changes(),
+            0,
+            "anchors read back were counted as news, to be written over the file they came from"
+        );
+    }
+
+    /// A line of the anchors that does not read, or names nothing a node can
+    /// dial, is passed over, and the lines around it are kept.
+    #[test]
+    fn an_anchor_that_does_not_read_is_passed_over() {
+        let directory = scratch("anchors-garbled");
+        let nowhere = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 9000));
+        std::fs::write(
+            directory.join(ANCHOR_FILE),
+            format!("not an address\n{nowhere}\n {}\n", address(3, 9000)),
+        )
+        .unwrap();
+        let read_back = AddressBook::load(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let anchors: Vec<SocketAddr> = read_back.anchors().iter().copied().collect();
+        assert_eq!(
+            anchors,
+            vec![address(3, 9000)],
+            "the anchors read back from a file with a bad line"
+        );
+        assert!(
+            !read_back.contains(&nowhere),
+            "an address nobody can dial went into the book as an anchor"
+        );
+    }
+
+    /// A book told the peers a node went out to keeps them as its anchors,
+    /// counts a change only when they are new, and is never told nobody.
+    ///
+    /// Told nobody, a node whose network went for a minute, or one killed
+    /// between its first dial at a start and the answer, would write down
+    /// that it should start from nobody, and the next start would dial the
+    /// book in the order a stranger chose.
+    #[test]
+    fn being_told_nobody_leaves_the_anchors_where_they_were() {
+        let mut book = AddressBook::new();
+        book.anchor([address(1, 9000)]);
+        assert_eq!(book.anchor_changes(), 1);
+        let mapped = SocketAddr::new(
+            IpAddr::V6(Ipv4Addr::new(203, 0, 113, 1).to_ipv6_mapped()),
+            9000,
+        );
+        book.anchor([mapped]);
+        assert_eq!(
+            book.anchor_changes(),
+            1,
+            "the same anchors, one spelt as IPv6, were counted as news"
+        );
+        book.anchor(std::iter::empty());
+        assert_eq!(
+            book.anchors().iter().copied().collect::<Vec<_>>(),
+            vec![address(1, 9000)],
+            "a node holding nobody wrote down that it should start from nobody"
+        );
+        assert_eq!(book.anchor_changes(), 1);
+        book.anchor([address(2, 9000)]);
+        assert_eq!(
+            book.anchors().iter().copied().collect::<Vec<_>>(),
+            vec![address(2, 9000)],
+            "new anchors did not replace the old"
+        );
+        assert_eq!(book.anchor_changes(), 2, "new anchors were not counted");
+    }
+
+    /// An anchor kept off the file is dialled first this run and never
+    /// written down, for the reason [`AddressBook::keep_off_the_file`] gives.
+    #[test]
+    fn an_anchor_kept_off_the_file_is_not_written_down() {
+        let mut book = AddressBook::new();
+        book.insert_seed(address(1, 9000));
+        book.keep_off_the_file(address(1, 9000));
+        book.anchor([address(1, 9000), address(2, 9000)]);
+        assert_eq!(
+            book.anchors_to_write(),
+            vec![address(2, 9000)],
+            "a seed the wallet keeps off every file was written down as an anchor"
+        );
+        assert!(book.anchors().contains(&address(1, 9000)));
     }
 
     /// A scratch directory of its own.

@@ -25,11 +25,11 @@
 //! hundred and eighty addresses in twelve seconds beside twelve inbound
 //! connections, and the stranger's share of the book stood at thirty two.
 //!
-//! **What does not hold is the restart that actually happens.** Anchors are
+//! **What did not hold was the restart that actually happens.** Anchors were
 //! written by `Node::shutdown` and nowhere else. `cairnd` installs no signal
 //! handler, so a node stopped by systemd or by Ctrl-C is killed and never runs
 //! it, and `deploy/cairnd.service` says as much: "a node killed outright
-//! releases it as it dies". What a killed node leaves on disk is the book as
+//! releases it as it dies". What a killed node left on disk was the book as
 //! upkeep last saved it, ordered by when each address last answered a dial,
 //! and the honest peers a node has held for an hour answered an hour ago.
 //! Any address answered since is ahead of them: the stranger's own slots,
@@ -39,10 +39,15 @@
 //! seconds. Without that, measured once while writing this, two minutes of
 //! feelers did the same and the restart below came out the same; a node
 //! whose eight slots were all honest would take sixteen. The node is then
-//! started from a copy of its directory taken while it ran, which is what a
-//! kill leaves, and of its three honest anchors it dials one: the one the
-//! neighbourhood rule puts in the first wave. With the stranger spread over
-//! eight neighbourhoods the same rule would hand it all eight.
+//! started from a copy of what its directory holds of its peers, taken while
+//! it ran, which is what a kill leaves, and of its three honest anchors it
+//! dialled one: the one the neighbourhood rule puts in the first wave. With
+//! the stranger spread over eight neighbourhoods the same rule would hand it
+//! all eight.
+//!
+//! The anchors are now written to a file of their own whenever the peers a
+//! node went out to change, and a start dials them before the book's order:
+//! the same restart dials all three. See `node::keep_anchors`.
 
 #![allow(
     clippy::unwrap_used,
@@ -66,7 +71,7 @@ use cairn_ledger::note::{Address, Note};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_net::book::{MAX_PER_GROUP, PEER_FILE};
+use cairn_net::book::{ANCHOR_FILE, MAX_PER_GROUP, PEER_FILE};
 use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
 use cairn_net::node::TARGET_PEERS;
 use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
@@ -545,27 +550,28 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
 /// **A restart from what a killed node leaves on disk dials every anchor
 /// again.**
 ///
-/// It does not. The victim holds its three honest peers and gives the
+/// It did not. The victim holds its three honest peers and gives the
 /// stranger the five slots left. The stranger then hangs up, answers each
 /// redial of an address it has used with a connection shut before a word,
 /// and answers the dial of every address it has not used yet, once, until
 /// eight of its addresses have answered the victim after the honest ones
 /// did. The honest connections are never touched.
 ///
-/// The directory is copied while the victim runs, which is what a kill
-/// leaves, and a node is started on the copy. One honest anchor is dialled,
-/// because the first wave takes one address from every neighbourhood the
-/// node holds nothing in and the honest nodes are a neighbourhood of their
-/// own; that much of the rule holds and is asserted first. The other two are
-/// not dialled at all, since the stranger fills the other seven slots and a
-/// node holding eight outbound peers dials nobody else but its feelers, and a
-/// feeler only goes to an address never heard from.
+/// The book and the anchors beside it are copied while the victim runs,
+/// which is what a kill leaves of its peers, and a node is started on the
+/// copy. One honest anchor was dialled, because the first wave takes one
+/// address from every neighbourhood the node holds nothing in and the honest
+/// nodes are a neighbourhood of their own; that much of the rule held and is
+/// asserted first. The other two were not dialled at all, since the stranger
+/// filled the other seven slots and a node holding eight outbound peers dials
+/// nobody else but its feelers, and a feeler only goes to an address never
+/// heard from.
 ///
-/// The smallest repair is in `cairnd`: stop on SIGTERM and SIGINT by letting
-/// the watch loop end, so `Node::shutdown` runs and writes the anchors, as
-/// Bitcoin does. A crash, an out-of-memory kill or a power cut would still
-/// skip it; covering those means writing the anchors when the set of
-/// outbound peers changes rather than once at the end.
+/// The repair this was written beside was in `cairnd`: stop on SIGTERM and
+/// SIGINT so `Node::shutdown` runs, as Bitcoin does. A crash, an out-of-memory
+/// kill or a power cut would still skip it, so the anchors are written when
+/// the set of outbound peers changes instead, and dialled first at a start:
+/// three honest and five stranger outbound, of three honest anchors.
 #[test]
 fn a_restart_from_what_a_killed_node_leaves_on_disk_redials_its_anchors() {
     let honest = honest_nodes(&[]);
@@ -607,11 +613,14 @@ fn a_restart_from_what_a_killed_node_leaves_on_disk_redials_its_anchors() {
         "an honest outbound connection was lost while the stranger churned"
     );
 
-    // Upkeep writes the book once a round when it has changed: two rounds,
-    // and the copy is what a kill at this moment would leave.
+    // Upkeep writes the book once a round when it has changed, and the
+    // anchors beside it when they have: two rounds, and the copy is what a
+    // kill at this moment would leave of the node's peers.
     thread::sleep(Duration::from_millis(2_100));
     let killed = scratch("killed-copy");
-    std::fs::copy(directory.join(PEER_FILE), killed.join(PEER_FILE)).unwrap();
+    for file in [PEER_FILE, ANCHOR_FILE] {
+        std::fs::copy(directory.join(file), killed.join(file)).unwrap();
+    }
     victim.shutdown();
     drop(victim);
     stranger.lab.churning.store(false, Ordering::SeqCst);
@@ -636,8 +645,8 @@ fn a_restart_from_what_a_killed_node_leaves_on_disk_redials_its_anchors() {
         honest_out, HONEST,
         "after a restart from what a killed node leaves on disk, the victim dialled \
          {honest_out} of its {HONEST} honest anchors and gave the stranger {stranger_out} \
-         of its {TARGET_PEERS} outbound slots. Anchors are written by Node::shutdown, which \
-         cairnd never reaches when it is stopped"
+         of its {TARGET_PEERS} outbound slots. Anchors are written as the outbound peers \
+         change and dialled first at a start, and one of the two did not happen"
     );
 
     restarted.shutdown();

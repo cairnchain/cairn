@@ -10,7 +10,7 @@
 //! which this module calls while holding the chain, and to the consensus rules
 //! underneath it.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -1813,6 +1813,15 @@ struct Shared {
     /// and apart from [`Shared::unsaved_book`] so that asking why the last
     /// save failed never waits on the disk.
     saving_book: Mutex<()>,
+    /// The book's count of changes to its anchors as of the last write of
+    /// them that got through: see [`keep_anchors`].
+    anchors_written_at: AtomicU64,
+    /// Held across a write of the anchors, for the reason
+    /// [`Shared::saving_book`] is held across a save of the book, and across
+    /// the count of peers that goes before it, so that a stop and a round of
+    /// upkeep write theirs one after the other: see [`keep_anchors`]. Taken
+    /// before the peers and the book, and never the other way round.
+    writing_anchors: Mutex<()>,
     /// Blocks this build turned out not to be able to read, and who sent them.
     ///
     /// Also a leaf, and for the same reason: it is written from the thread
@@ -3415,23 +3424,33 @@ impl Shared {
     }
 
     /// Writes down the peers this node went out to and is still talking to as
-    /// heard from now, so they are the first it dials at the next start.
+    /// heard from now, so they stand at the front of the book's order at the
+    /// next start.
     ///
     /// A restart is the moment an attacker who filled the book waits for: the
     /// book is read back and dialled in its order, and that order is when each
     /// address last answered a dial, which for a peer held for a month is a
     /// month ago. Bitcoin dials its anchors first for this reason.
+    ///
+    /// Only a stop reaches this, and a node killed outright never stops. What
+    /// a start dials first is [`crate::book::ANCHOR_FILE`], which
+    /// [`keep_anchors`] writes whenever these peers change.
     fn anchor(&self, now: u64) {
-        let anchors: Vec<SocketAddr> = self
-            .peers()
-            .values()
-            .filter(|peer| peer.dialled && peer.greeted && !peer.feeler)
-            .filter_map(|peer| peer.dialled_to)
-            .collect();
+        let anchors = self.went_out_to();
         let mut book = self.book();
         for address in anchors {
             book.answered(&address, now);
         }
+    }
+
+    /// The peers this node went out to, that have introduced themselves and
+    /// are not feelers: the ones it vouches for at its next start.
+    fn went_out_to(&self) -> Vec<SocketAddr> {
+        self.peers()
+            .values()
+            .filter(|peer| peer.dialled && peer.greeted && !peer.feeler)
+            .filter_map(|peer| peer.dialled_to)
+            .collect()
     }
 
     /// Writes down that a peer handed over a block or a transfer this node
@@ -4947,6 +4966,8 @@ impl Node {
         } else {
             KEEP_BLOCK_BYTES
         };
+        // The anchors a book was read back with are the ones on the disk.
+        let anchors_written_at = book.anchor_changes();
 
         let shared = Arc::new(Shared {
             params,
@@ -4993,6 +5014,8 @@ impl Node {
             proofs_asked_for: AtomicU64::new(0),
             unsaved_book: Mutex::new(None),
             saving_book: Mutex::new(()),
+            anchors_written_at: AtomicU64::new(anchors_written_at),
+            writing_anchors: Mutex::new(()),
             unjudged: Mutex::new(Unreadable::default()),
             unweighed: Mutex::new(Unweighed::default()),
             out_of_step: Mutex::new(OutOfStep::default()),
@@ -6000,6 +6023,9 @@ impl Node {
         }
         self.shared.anchor(unix_now());
         save_book(&self.shared);
+        // Before a single connection is shut, which is what the anchors are
+        // counted from.
+        keep_anchors(&self.shared, true);
         // Until the table stays empty. Nothing has to be woken: the accept
         // loop polls, and every peer thread is either reading with a deadline
         // or on a socket just shut. Upkeep finishes the round it is in, whose
@@ -8212,6 +8238,58 @@ fn save_book(shared: &Arc<Shared>) {
         .unwrap_or_else(PoisonError::into_inner) = refusal;
 }
 
+/// Writes down the peers this node went out to and is talking to whenever
+/// they are not the ones last written, so that what a node killed outright
+/// leaves on its disk names them, and its next start dials them first.
+///
+/// They were written by [`Node::shutdown`] and by nothing else, and `cairnd`
+/// never runs that: it has no handler for a signal, and
+/// `deploy/cairnd.service` stops it by killing it. What a kill left was the
+/// book as upkeep last saved it, in the order each address last answered a
+/// dial, and honest peers held for an hour answered an hour ago. A stranger
+/// whose addresses answered since, by taking the slots it was left and
+/// hanging up, or by answering feelers, came first: restarted from such a
+/// disk, a node gave it seven of its eight outbound slots and dialled one of
+/// its three honest peers. Written as they change, the anchors are on the
+/// disk after a kill, a crash, the kernel ending the process for its memory
+/// or the power going, on every platform, with nothing to catch first.
+///
+/// Called once a round by upkeep, and once by a stop before it shuts
+/// anything. Nothing is written while the anchors stand where the last write
+/// left them, so the file is written as often as the outbound peers change
+/// and no more often. `stopping` says the stop is the caller: a round still
+/// running once a stop has begun would count the peers as the stop shuts
+/// them, and write down whichever happened to be slowest to go.
+///
+/// A write the disk refuses is tried again the next round, and is not
+/// reported on its own: the file sits beside the book, and a directory that
+/// refuses one refuses the other, which [`Node::unsaved_addresses`] says.
+fn keep_anchors(shared: &Arc<Shared>, stopping: bool) {
+    let _writing = shared
+        .writing_anchors
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if !stopping && shared.winding_down.load(Ordering::SeqCst) {
+        return;
+    }
+    let went_out_to = shared.went_out_to();
+    let (anchors, changes) = {
+        let mut book = shared.book();
+        book.anchor(went_out_to);
+        let changes = book.anchor_changes();
+        if shared.anchors_written_at.load(Ordering::Relaxed) == changes {
+            return;
+        }
+        (book.anchors_to_write(), changes)
+    };
+    let Some(directory) = shared.directory.as_ref() else {
+        return;
+    };
+    if crate::book::save_anchors(directory, &anchors).is_ok() {
+        shared.anchors_written_at.store(changes, Ordering::Relaxed);
+    }
+}
+
 /// Takes connections, and turns away the ones this node has no room for.
 ///
 /// Accepting without limit is the cheapest attack there is: two threads and a
@@ -8318,6 +8396,7 @@ fn maintenance_loop(shared: &Arc<Shared>) {
         look_up_seed_names(shared, now);
         dial_from_book(shared, now);
         save_book(shared);
+        keep_anchors(shared, false);
         collect_finished(shared);
         shared.trim_history();
         // Peers this node can actually put a question to, which is not every
@@ -9435,13 +9514,15 @@ where
     // one stranger and twenty four claimed ports did. The loop counts what it
     // opened instead, the book is bounded at `MAX_ADDRESSES` so the walk is
     // too, and `DIAL_BUDGET` still ends a round that is taking too long.
-    let candidates: Vec<SocketAddr> = shared
-        .book()
-        .ready(now)
+    let (ready, anchors) = {
+        let book = shared.book();
+        (book.ready(now), book.anchors().clone())
+    };
+    let candidates: Vec<SocketAddr> = ready
         .into_iter()
         .filter(|address| *address != shared.address && !connected.contains(address))
         .collect();
-    let candidates = dial_order(candidates, &held);
+    let candidates = dial_order(candidates, &held, &anchors);
 
     let dialling_since = Instant::now();
     let mut candidates = candidates.into_iter();
@@ -9589,8 +9670,9 @@ fn feel(shared: &Arc<Shared>, connected: &HashSet<SocketAddr>, now: u64) {
 }
 
 /// The order one round of dialling tries the book's candidates in: the
-/// first address from each neighbourhood `held` has no dialled connection in,
-/// in the book's order, and then everything else, in the book's order.
+/// `anchors` among them, then the first address from each neighbourhood
+/// `held` has no dialled connection in, in the book's order, and then
+/// everything else, in the book's order.
 ///
 /// The book's order alone decided, and a book holding thirty two addresses in
 /// one /16 that answer beside a hundred honest ones spread out gave that /16
@@ -9598,15 +9680,28 @@ fn feel(shared: &Arc<Shared>, connected: &HashSet<SocketAddr>, now: u64) {
 /// were full. Bitcoin keeps its outbound connections to one per group for
 /// this reason: eight connections then need eight neighbourhoods that answer.
 ///
-/// A preference and not a rule, which is what the second half is for. A
+/// A preference and not a rule, which is what the last part is for. A
 /// devnet on one machine is a single neighbourhood, and so is a lab; a node
 /// there still dials every address it has, one neighbourhood deep.
-fn dial_order(candidates: Vec<SocketAddr>, held: &HashSet<Group>) -> Vec<SocketAddr> {
+///
+/// The anchors go ahead of both, which is what they are for: the peers this
+/// node held when it last wrote them down, ahead of an order that is when
+/// each address last answered and that a stranger moves by answering. See
+/// [`keep_anchors`]. Once a node holds its anchors they are connected and
+/// not candidates, so this decides a start, and a node that lost every peer.
+fn dial_order(
+    candidates: Vec<SocketAddr>,
+    held: &HashSet<Group>,
+    anchors: &BTreeSet<SocketAddr>,
+) -> Vec<SocketAddr> {
+    let (anchored, others): (Vec<SocketAddr>, Vec<SocketAddr>) = candidates
+        .into_iter()
+        .partition(|address| anchors.contains(address));
     let mut reached = held.clone();
-    let (first, rest): (Vec<SocketAddr>, Vec<SocketAddr>) = candidates
+    let (first, rest): (Vec<SocketAddr>, Vec<SocketAddr>) = others
         .into_iter()
         .partition(|address| reached.insert(group_of_host(address.ip())));
-    first.into_iter().chain(rest).collect()
+    anchored.into_iter().chain(first).chain(rest).collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15086,6 +15181,148 @@ mod peers_and_loops {
         );
     }
 
+    /// A node opened on a directory of its own, with none of its own threads
+    /// running and nothing yet begun to stop it: a running node as far as
+    /// [`keep_anchors`] can tell, and one only the test writes from.
+    fn anchoring(name: &str) -> (Node, PathBuf) {
+        let directory =
+            std::env::temp_dir().join(format!("cairn-anchors-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let (node, _) = Node::open(ConsensusParams::testnet(), local(), &directory).unwrap();
+        node.shutdown();
+        node.shared.winding_down.store(false, Ordering::SeqCst);
+        (node, directory)
+    }
+
+    /// What the file of anchors in `directory` holds, or `None` without one.
+    fn anchors_on_disk(directory: &Path) -> Option<BTreeSet<SocketAddr>> {
+        let text = std::fs::read_to_string(directory.join(crate::book::ANCHOR_FILE)).ok()?;
+        Some(text.lines().map(|line| line.parse().unwrap()).collect())
+    }
+
+    /// One greeted connection this node dialled to `address`, under `id`.
+    fn held_at(node: &Node, socket: &TcpStream, id: PeerId, address: SocketAddr) {
+        node.shared.peers().insert(
+            id,
+            Peer {
+                dialled_to: Some(address),
+                greeted: true,
+                ..stand_in(socket, true)
+            },
+        );
+    }
+
+    /// **The peers a node went out to are written down as they change, so a
+    /// node killed outright leaves them on its disk.**
+    ///
+    /// They were written by [`Node::shutdown`] and nothing else, and `cairnd`
+    /// never reaches it: it is stopped by being killed. Restarted from what a
+    /// kill left, a node gave a stranger seven of its eight outbound slots and
+    /// dialled one of its three honest peers, in
+    /// `tests/a_flood_of_addresses_and_a_restart.rs`. And nothing is written
+    /// while they stand still, or the file would go to the disk once a round.
+    #[test]
+    fn the_peers_a_node_went_out_to_are_written_down_as_they_change() {
+        let (node, directory) = anchoring("as-they-change");
+        let (socket, _far) = a_socket();
+        let vacant = vacant_addresses(2);
+        let (first, second) = (vacant[0], vacant[1]);
+
+        held_at(&node, &socket, 1, first);
+        keep_anchors(&node.shared, false);
+        let one = anchors_on_disk(&directory);
+
+        // Nothing has changed, so nothing is written: the file is taken away
+        // and a round must not put it back.
+        std::fs::remove_file(directory.join(crate::book::ANCHOR_FILE)).unwrap();
+        keep_anchors(&node.shared, false);
+        let unchanged = anchors_on_disk(&directory);
+
+        held_at(&node, &socket, 2, second);
+        keep_anchors(&node.shared, false);
+        let two = anchors_on_disk(&directory);
+
+        // And a node left holding nobody keeps the anchors it had.
+        node.shared.peers().clear();
+        keep_anchors(&node.shared, false);
+        let after_nobody = anchors_on_disk(&directory);
+
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            one,
+            Some([first].into_iter().collect()),
+            "the peer this node went out to was not written down"
+        );
+        assert_eq!(
+            unchanged, None,
+            "the anchors were written again with nothing changed"
+        );
+        assert_eq!(
+            two,
+            Some([first, second].into_iter().collect()),
+            "a second peer this node went out to was not written down"
+        );
+        assert_eq!(
+            after_nobody, two,
+            "a node holding nobody wrote over the anchors it had"
+        );
+    }
+
+    /// **A round still running once a stop has begun writes no anchors, and
+    /// the stop does.**
+    ///
+    /// The stop writes them before it shuts a single connection, and then
+    /// shuts them all. A round of upkeep counting after that would write
+    /// down whichever peers happened to be slowest to go.
+    #[test]
+    fn a_round_running_after_a_stop_began_writes_no_anchors_and_the_stop_does() {
+        let (node, directory) = anchoring("at-the-stop");
+        let (socket, _far) = a_socket();
+        let held = vacant_addresses(1)[0];
+        held_at(&node, &socket, 1, held);
+        node.shared.winding_down.store(true, Ordering::SeqCst);
+
+        keep_anchors(&node.shared, false);
+        let by_the_round = anchors_on_disk(&directory);
+        keep_anchors(&node.shared, true);
+        let by_the_stop = anchors_on_disk(&directory);
+
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            by_the_round, None,
+            "a round running after the stop began wrote the anchors"
+        );
+        assert_eq!(
+            by_the_stop,
+            Some([held].into_iter().collect()),
+            "the stop did not write the anchors"
+        );
+    }
+
+    /// A round of dialling tries the anchors before the book's order and
+    /// before the neighbourhood rule.
+    ///
+    /// The book's order is when each address last answered a dial, which a
+    /// stranger moves by answering, and the neighbourhood rule took one
+    /// honest anchor and gave the stranger the other seven slots at a
+    /// restart. An anchor that is not a candidate, because it is connected or
+    /// waiting out a failed dial, is not dialled for being an anchor.
+    #[test]
+    fn a_round_of_dialling_tries_the_anchors_first() {
+        let crowded = |at: u8| SocketAddr::from((Ipv4Addr::new(10, 1, at, 1), 9_000));
+        let elsewhere = SocketAddr::from((Ipv4Addr::new(10, 2, 0, 1), 9_000));
+        let book = vec![crowded(0), elsewhere, crowded(1), crowded(2)];
+        let anchors: BTreeSet<SocketAddr> =
+            [crowded(2), crowded(1), crowded(9)].into_iter().collect();
+        assert_eq!(
+            dial_order(book, &HashSet::new(), &anchors),
+            vec![crowded(1), crowded(2), crowded(0), elsewhere],
+            "the anchors were not dialled first, or a candidate was lost or invented"
+        );
+    }
+
     /// A node says where it put a list of peers that did not read, and says
     /// nothing when there was none.
     ///
@@ -16421,7 +16658,7 @@ mod tests {
         // The book's order: the crowd first, the others behind it.
         let book: Vec<SocketAddr> = (0..32).map(crowded).chain((0..3).map(elsewhere)).collect();
 
-        let order = dial_order(book.clone(), &HashSet::new());
+        let order = dial_order(book.clone(), &HashSet::new(), &BTreeSet::new());
         assert_eq!(
             order.get(..4),
             Some([crowded(0), elsewhere(0), elsewhere(1), elsewhere(2)].as_slice()),
@@ -16435,7 +16672,7 @@ mod tests {
 
         let held: HashSet<Group> = std::iter::once(group_of_host(crowded(0).ip())).collect();
         assert_eq!(
-            dial_order(book.clone(), &held).get(..3),
+            dial_order(book.clone(), &held, &BTreeSet::new()).get(..3),
             Some([elsewhere(0), elsewhere(1), elsewhere(2)].as_slice()),
             "a neighbourhood this node already reached was dialled again before one it had not"
         );
@@ -16444,7 +16681,10 @@ mod tests {
         let devnet: Vec<SocketAddr> = (1..=20u8)
             .map(|at| SocketAddr::from((Ipv4Addr::new(127, 0, 0, at), 9_000)))
             .collect();
-        assert_eq!(dial_order(devnet.clone(), &HashSet::new()), devnet);
+        assert_eq!(
+            dial_order(devnet.clone(), &HashSet::new(), &BTreeSet::new()),
+            devnet
+        );
     }
 
     /// A short valid chain, built off to the side.
