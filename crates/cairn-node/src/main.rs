@@ -1179,19 +1179,20 @@ fn clock_is_slow(behind: &Behind) -> String {
 /// A network is released and installed ahead of the opening its first block
 /// is dated at, so this is what every node started early prints, and it is
 /// not a fault: the node lays the first block down by itself and follows the
-/// network from there, and a miner started with it begins then. It used to
-/// read the same refusal as proof the clock was slow. The clock is still
-/// named, because a machine behind a network that has already opened reads
-/// exactly the same from here, and the date is what tells the two apart.
+/// network from there, and a miner started with it begins at the opening
+/// itself, not when the block is laid down. It used to read the same refusal
+/// as proof the clock was slow. The clock is still named, because a machine
+/// behind a network that has already opened reads exactly the same from here,
+/// and the date is what tells the two apart.
 fn not_open_yet(opening: &Opening) -> String {
     format!(
         "this network opens on {}, in about {} by this machine's clock: its first block, \
          written into this build, is dated then, and no block is taken from more than {} \
          seconds ahead of the clock reading it. Nothing needs doing. This node has no chain \
          until then, lays the first block down by itself {} seconds before the opening and \
-         follows the network from there, and a miner started with it begins at the same \
-         moment. If that date has already passed, it is the clock on this machine that is \
-         behind, and the time on this machine is what to look at.",
+         follows the network from there, and a miner started with it begins at the \
+         opening itself, not before. If that date has already passed, it is the clock on \
+         this machine that is behind, and the time on this machine is what to look at.",
         cairn_ledger::genesis::when(opening.at),
         roughly(opening.in_seconds),
         opening.drift,
@@ -1721,6 +1722,10 @@ mod said_out_loud {
         assert!(
             text.contains("by itself 600 seconds before the opening"),
             "and that nothing has to be done for the node to open: {text}"
+        );
+        assert!(
+            text.contains("a miner started with it begins at the opening itself, not before"),
+            "and that a miner waits for the opening, not for the block: {text}"
         );
         assert!(
             text.contains("If that date has already passed"),
