@@ -14,13 +14,13 @@
 //! the cold set's roots and the paths a node keeps current under them, the
 //! coinbases still maturing, the supply after the place price is burned, the
 //! headers, and the undo record each block on the new branch leaves for the
-//! next switch. `invariants.rs` holds one undo and one reorganisation at the
-//! ledger level, and `audit_a_reorganisation_is_the_inverse.rs` one switch
-//! through the store over coinbase payments. Neither switches back, nor at
-//! every depth up to the limit, nor over blocks that pay the place price,
-//! spend the same notes differently on each side, spend out of the cold set
-//! with a proof and out of the grace window without one, and push notes they
-//! created themselves straight into the cold set.
+//! next switch. `invariants.rs` undoes sequences block by block and walks one
+//! losing branch back per sequence, at the ledger level and through no store;
+//! `audit_a_reorganisation_is_the_inverse.rs` makes one switch through the
+//! store over coinbase payments. None of them goes back and forth, reaches
+//! every depth up to the limit, or runs with a place price, coinbases still
+//! maturing, notes a block pushes into the cold set the moment it creates
+//! them, and switches failing partway, all at once.
 //!
 //! So this grows a tree of competing branches on a common chain longer than
 //! the grace window, deterministic from a seed, and feeds it to several stores
@@ -784,6 +784,10 @@ impl Tree {
             1,
             "a tree has one heaviest branch, so every order ends on it"
         );
+        assert!(
+            highest >= PREFIX,
+            "a tree outweighs the common chain it grows on, which runs past its lowest fork"
+        );
         tree.winner = winners[0];
         tree.winning = tree.path(tree.winner).into_iter().collect();
         tree
@@ -885,7 +889,8 @@ fn draw_shared(miner: &Miner, rng: &mut Rng, params: &ConsensusParams) -> Vec<Tr
 
 /// Two to three branches off the last few blocks of the common chain, now and
 /// then one more off one of them, none reaching past what a switch may undo
-/// from the lowest fork, and one of them strictly the longest.
+/// from the lowest fork, and one of them strictly the longest, the common
+/// chain included.
 fn random_specs(rng: &mut Rng) -> Vec<(Fork, usize)> {
     let top = 2 + rng.below(2);
     let mut forks: Vec<Fork> = (0..top)
@@ -916,6 +921,12 @@ fn random_specs(rng: &mut Rng) -> Vec<(Fork, usize)> {
         let tied: Vec<usize> = (0..tips.len())
             .filter(|&index| tips[index] == highest)
             .collect();
+        // The common chain runs on past the lowest fork, so it is a branch
+        // too, and one every store has taken first and keeps on a tie.
+        if highest < PREFIX {
+            lengths[tied[0]] += 1;
+            continue;
+        }
         if tied.len() == 1 {
             break;
         }
@@ -1492,7 +1503,9 @@ struct Run<'t> {
     /// replay does not change, so it is printed once.
     replays: HashMap<(Hash32, bool), Print>,
     label: String,
-    fillers: u64,
+    /// Blocks this run made that no branch holds, counted so no two of them
+    /// are ever the same block.
+    made_up: u64,
 }
 
 impl<'t> Run<'t> {
@@ -1512,7 +1525,7 @@ impl<'t> Run<'t> {
             fresh: HashMap::new(),
             replays: HashMap::new(),
             label,
-            fillers: 0,
+            made_up: 0,
         }
     }
 
@@ -1785,15 +1798,19 @@ impl<'t> Run<'t> {
             }
         }
         // The header names the body, so the door lets the block in and only
-        // applying it finds what is wrong.
+        // applying it finds what is wrong. The nonce makes it a block this
+        // store has never refused, which the same break of the same child
+        // would otherwise be the second time it was drawn.
         block.header.transactions_root = block.transactions_root();
+        self.made_up += 1;
+        block.header.nonce = u64::MAX - self.made_up;
         *self.reached.failed_kinds.entry(kind).or_default() += 1;
         block
     }
 
     /// A block nobody will ever apply, there to make a branch heavier.
     fn filler(&mut self, parent: &BlockHeader) -> Block {
-        self.fillers += 1;
+        self.made_up += 1;
         let height = parent.height + 1;
         let mut block = Block {
             header: BlockHeader {
@@ -1808,7 +1825,7 @@ impl<'t> Run<'t> {
             coinbase: CoinbaseTransaction::with_extra(
                 height,
                 Vec::new(),
-                self.fillers.to_le_bytes().to_vec(),
+                self.made_up.to_le_bytes().to_vec(),
             ),
             transfers: Vec::new(),
         };
