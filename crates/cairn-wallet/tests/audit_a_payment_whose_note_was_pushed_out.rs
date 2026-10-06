@@ -17,6 +17,32 @@
 //! through the pool and an honest miner's choice, paying for every place and
 //! outbidding the payment for the block's room, then follow the payment to
 //! the block that carries it or to the line that says nothing will.
+//!
+//! What they found, on devnet's tier of sixty four and cap of thirty two:
+//!
+//! - At the quote, the payment stays in the pool across the flush and the
+//!   next block carries it. The margin is spent to the pebble: once its note
+//!   has fallen the payment owes exactly what it pays. A payment of two hot
+//!   notes, both pushed out, is carried the same way on a margin of two
+//!   places.
+//! - At the floor, which a person may name, the flush makes the payment one
+//!   no block may carry. Nothing re-signs it. The wallet says why in words
+//!   beside it, holds its notes for `HELD_AFTER_REFUSAL` blocks, then names
+//!   it as not carried with its money back, and the payment sent again spends
+//!   the same note, so the two can never both be carried.
+//! - At the quote, but kept out of every block until its note leaves the
+//!   grace window, the payment needs a proof. The margin covers the place and
+//!   not the proof's bytes: the rules would carry it, and no pool will. The
+//!   wallet then goes the floor's way, in the same plain words.
+//!
+//! What a flush costs: the place price for every note ahead of the one it is
+//! after and for that note, less one place each block's coinbase pushes out
+//! for nothing. Here sixteen places, 96 000 pebbles destroyed, and about as
+//! much again to the miner to outbid the payment for the block's places,
+//! which a miner flushing on its own account keeps. Keeping the payment out
+//! past the grace window took sixty five blocks of that, 1 040 places and
+//! 6 240 000 pebbles destroyed. At a public network's cap the window is eight
+//! blocks of about a thousand places each.
 
 #![allow(
     clippy::unwrap_used,
