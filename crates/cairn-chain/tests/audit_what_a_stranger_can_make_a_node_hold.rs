@@ -97,11 +97,13 @@ impl Chain {
 ///
 /// Difficulty one accepts every hash, so this costs its maker no work at all.
 /// Almost nothing here is validated: a block that loses the fork choice is
-/// stored and never connected, and the one thing asked of its body is that it
-/// is the body its header names, a root anybody can work out. Only the nonce
-/// changes between them, which is enough for a different identifier, so a
-/// whole branch of these hangs off one parent rather than having to be
-/// chained.
+/// stored and never connected. Its header is asked what its parent alone
+/// settles, and on a network at the difficulty floor, which this one is, the
+/// parent demands difficulty one and the work behind it plus one, so the
+/// header says exactly that; and its body is asked to be the body its header
+/// names, a root anybody can work out. Only the nonce changes between them,
+/// which is enough for a different identifier, so a whole branch of these
+/// hangs off one parent rather than having to be chained.
 fn side_block(height: u64, previous: Hash32, bytes: usize, nonce: u64, owner: &SecretKey) -> Block {
     let value = Amount::from_pebbles(1).unwrap();
     let per = Note::new(value, owner.public_key()).encode().len();
@@ -124,7 +126,8 @@ fn side_block(height: u64, previous: Hash32, bytes: usize, nonce: u64, owner: &S
             history: Hash32::ZERO,
             timestamp: NOW,
             difficulty: 1,
-            total_work: 0,
+            // One a block from the first, at the floor.
+            total_work: u128::from(height) + 1,
             nonce,
         },
         coinbase: CoinbaseTransaction::new(height, Vec::new()),
@@ -162,9 +165,15 @@ fn a_block_already_refused_is_not_taken_into_memory_again() {
     let next = store.height().unwrap() + 1;
 
     // Each claims to build straight on the tip, so each is weighed heavier
-    // than the branch and taken to `follow`, and none of them can apply.
+    // than the branch and taken to `follow`, and none of them can apply: each
+    // states a total work that does not add up, which the header alone
+    // settles, so the refusal is one the node remembers.
     let refused: Vec<Block> = (0..64u64)
-        .map(|nonce| side_block(next, tip, 16 * 1024, nonce, &miner))
+        .map(|nonce| {
+            let mut block = side_block(next, tip, 16 * 1024, nonce, &miner);
+            block.header.total_work = 0;
+            block
+        })
         .collect();
 
     for block in &refused {

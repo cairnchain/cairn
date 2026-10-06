@@ -842,6 +842,8 @@ fn the_most_a_node_will_hold_stays_something_a_phone_has() {
 /// peer may make a node hold is bounded by the sweeps in `cairn-chain` and by
 /// nothing else. The one thing asked of its body is that it produces the root
 /// its header names, which anybody can work out, so the header here names it.
+/// Its header is asked what its parent alone settles, which on a network at
+/// the difficulty floor is difficulty one and the work behind it plus one.
 fn fat_block(height: u64, previous: Hash32, bytes: usize, owner: &SecretKey) -> Block {
     let value = Amount::from_pebbles(1).unwrap();
     let per = Note::new(value, owner.public_key()).encode().len();
@@ -864,7 +866,8 @@ fn fat_block(height: u64, previous: Hash32, bytes: usize, owner: &SecretKey) -> 
             history: Hash32::ZERO,
             timestamp: NOW,
             difficulty: 1,
-            total_work: 0,
+            // One a block from the first, at the floor.
+            total_work: u128::from(height) + 1,
             nonce: height,
         },
         coinbase: CoinbaseTransaction::new(height, Vec::new()),
@@ -919,15 +922,24 @@ fn what_a_node_holds_is_bounded_on_a_chain_younger_than_the_window() {
     // A rival hanging off the first block, in blocks nothing sized. It stays
     // lighter than the branch the whole way: twenty blocks of the least work
     // there is against thirty of the same.
+    //
+    // Past the side store's ceiling the sweep drops the lightest block
+    // nothing builds on, which on a single branch is its top, so the block
+    // after it arrives over a parent this node has let go of and is refused
+    // for that. Either way it is not followed and the branch does not move.
     let mut previous = chain[0].id();
     for n in 0..20u64 {
         let block = fat_block(1 + n, previous, 2 * 1024 * 1024, &wallet(9));
         previous = block.id();
-        assert_eq!(
-            store.add_block(block, NOW).unwrap(),
-            Accepted::SideBranch,
-            "rival block {n} was not held aside"
+        let answer = store.add_block(block, NOW);
+        assert!(
+            matches!(
+                answer,
+                Ok(Accepted::SideBranch) | Err(ChainError::UnknownParent(_))
+            ),
+            "rival block {n} was answered {answer:?}"
         );
+        assert_eq!(store.height(), Some(29), "rival block {n} moved the branch");
     }
     let offered = store.held_bytes();
     assert!(

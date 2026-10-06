@@ -20,8 +20,9 @@ thiserror.workspace = true
 # the floor rate it was measured at.
 cairn-accumulator.workspace = true
 cairn-crypto.workspace = true
-# For `tests/fuzz_reorganisation_storm.rs`, whose trees and orders are drawn
-# from a campaign seed, so the nightly run reaches cases the suite does not.
+# For the campaigns whose sequences and trees are drawn from a seed, so the
+# nightly run reaches cases the suite does not: `tests/fuzz_block_store.rs`
+# and `tests/fuzz_reorganisation_storm.rs`.
 cairn-fuzz.workspace = true
 # For the relay-cost test in `tests/pool.rs`, which counts bytes hashed rather
 # than timing anything. Only the test build asks for it.

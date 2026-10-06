@@ -2185,11 +2185,29 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       Before a branch can be compared its blocks have to be held, and a node SHOULD
       refuse to hold a block whose identifier does not meet the target for the
       difficulty it claims. That check needs nothing but the block, and without it a
-      peer fills a node's memory for the price of nothing. The difficulty a block
-      off the followed branch claims is otherwise taken at its word: whether it is
-      the difficulty the retarget demands is decided when the branch is applied, and
-      a block claiming more than it is entitled to had to do that much work to be
-      stored at all, so the most it buys is one wasted attempt.
+      peer fills a node's memory for the price of nothing.
+    </p>
+
+    <p>
+      A node SHOULD also refuse to hold a block off the followed branch that fails a
+      header rule its parent alone settles: the network, the opening, the version
+      its height asks for, the difficulty the retarget demands of the parent, the
+      total work, and the drift bound against the node's own clock, asked in the
+      order the header rules ask them. The retarget reads the parent alone, so a
+      block claiming less than its parent demands is otherwise held at the price of
+      the work it claims, which for difficulty one is one hash. None of these
+      refusals changes a verdict: each is a rule the block fails when its branch is
+      applied, and it is answered and charged as that failure would be.
+    </p>
+
+    <p>
+      What a node holds off the followed branch it SHOULD bound, by count and by
+      bytes. When a bound is passed it SHOULD let go only of blocks no other held
+      block builds on, those whose branch no longer reaches the followed one first,
+      and then the lightest by the total work of the branch the block ends. Letting
+      go by height or by arrival lets junk lighter than an honest branch push that
+      branch's first block out as it arrives, and the node then never assembles the
+      heavier branch.
     </p>
 
     <h3 id="burial"><span class="sub">8.6</span>Burial</h3>
@@ -3820,8 +3838,8 @@ levels    = max(bit_length(max(separable, 1)), 1)</code></pre>
       for its bytes like any other block, and has all of that but one unit handed back
       once it is on the branch this node follows, which it cannot be without the work
       its header claims at the difficulty the chain demands. A block under a parent
-      this node does not hold, or one filed beside the branch without being checked,
-      costs its sender nothing to make, and keeps its price.
+      this node does not hold costs its sender nothing to make, and one filed beside
+      the branch has not been applied; both keep their price.
     </p>
 
     <p>
