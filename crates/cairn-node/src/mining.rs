@@ -147,6 +147,17 @@ pub(crate) enum Waiting {
     /// that does not hold it yet: anything built here would be a second first
     /// block, refused.
     ForAChain,
+    /// A network whose first block is written into the program, held by this
+    /// node before the moment it is dated, which is the network's opening.
+    ///
+    /// A node takes that block as far ahead of its clock as the drift lets any
+    /// block stand, so it holds it from the drift before the opening, ten
+    /// minutes on testnet-8, and the miner built on it at once, before the
+    /// announced time: on testnet-8, blocks 1 to 10 were found in the ten
+    /// minutes before the opening, each stamped a second or so past it because
+    /// the median of the chain allowed nothing earlier, and the chain opened
+    /// ten blocks ahead of its schedule. Holds the opening, as a timestamp.
+    ForTheOpening(u64),
     /// The recent blocks are dated past what this node's own clock would
     /// accept, so every block it could build is one it would refuse itself.
     ForTheClock,
@@ -175,6 +186,14 @@ impl fmt::Display for Waiting {
             Self::ForAChain => out.write_str(
                 "mining waits until this node holds its network's first block: anything built \
                  before it would be refused as a second one",
+            ),
+            Self::ForTheOpening(at) => write!(
+                out,
+                "mining waits until this network opens on {}, by this machine's clock: this \
+                 node holds the first block already, since a block is taken from as far ahead \
+                 of the clock as the drift, but a block built on it now would be mined before \
+                 the announced opening. It mines from the opening on",
+                cairn_ledger::genesis::when(*at),
             ),
             Self::ForTheClock => out.write_str(
                 "mining waits for the clock: the recent blocks are dated past what this node \
@@ -469,6 +488,14 @@ fn candidate(
 ) -> Result<(Block, Option<Hash32>), Waiting> {
     if chain.is_empty() && params.genesis.is_some() {
         return Err(Waiting::ForAChain);
+    }
+    // The node holds that first block from the drift before the moment it is
+    // dated, and nothing is built on it until that moment by this clock: the
+    // opening is when mining starts, for every miner alike. A network with no
+    // first block written in has no opening to wait for here, and a block it
+    // dates before its `opens_at` is refused by the chain like any other.
+    if params.genesis.is_some() && now < params.opens_at {
+        return Err(Waiting::ForTheOpening(params.opens_at));
     }
     let extending = chain.tip();
     let state = chain.state();
@@ -1177,6 +1204,122 @@ mod saying {
         );
     }
 
+    /// A network that writes its first block into the program opens at the
+    /// moment that block is dated, and nothing is built on the block before
+    /// then by this clock, though the chain holds it from the drift before.
+    ///
+    /// AUDIT, repaired (testnet-8, T8-1). A node takes the first block as far
+    /// ahead of its clock as the drift lets any block stand, and the miner
+    /// built on it at once: blocks 1 to 10 of testnet-8 were mined in the ten
+    /// minutes before its announced opening.
+    #[test]
+    fn nothing_is_built_on_the_first_block_before_the_opening() {
+        let open = ConsensusParams::testnet();
+        let (first, _) = candidate(&ChainStore::new(open), &open, reward_key(), NOW).unwrap();
+        let first = mine_block(first, 1 << 20).unwrap();
+        let opens = first.header.timestamp;
+        let pinned = ConsensusParams {
+            genesis: Some(first.id()),
+            opens_at: opens,
+            ..open
+        };
+        let drift = pinned.max_timestamp_drift;
+        let mut chain = ChainStore::new(pinned);
+        chain.add_block(first, opens - drift).unwrap();
+
+        for early in [opens - drift, opens - 1] {
+            assert_eq!(
+                candidate(&chain, &pinned, reward_key(), early).err(),
+                Some(Waiting::ForTheOpening(opens)),
+                "a block was built on the first block {} seconds before the opening",
+                opens - early
+            );
+        }
+        let (block, extending) = candidate(&chain, &pinned, reward_key(), opens)
+            .expect("nothing could be built at the opening");
+        assert_eq!(block.header.height, 1);
+        assert_eq!(extending, chain.tip(), "and it is built on the first block");
+
+        let unpinned = ConsensusParams {
+            opens_at: u64::MAX,
+            ..open
+        };
+        assert!(
+            candidate(&ChainStore::new(unpinned), &unpinned, reward_key(), NOW).is_ok(),
+            "a network with no first block written in has no opening for the miner to wait \
+             for: its chain refuses an early block itself"
+        );
+    }
+
+    /// A miner on a node that holds its network's first block before the
+    /// opening says it waits for the opening, mines nothing until then by this
+    /// machine's clock, and mines from then on.
+    ///
+    /// AUDIT, repaired (testnet-8, T8-1). The whole path rather than the
+    /// candidate alone: every node took testnet-8's first block ten minutes
+    /// early, and a node started with `--mine` mined from that moment. The
+    /// opening here is a few seconds ahead of the wall clock, which is the one
+    /// clock the miner reads. Only a network built into the program has a
+    /// first block the node lays down itself, so this one is handed to it,
+    /// and it is taken by the same rule: dated no further ahead of the clock
+    /// than the drift.
+    #[test]
+    fn a_miner_holding_the_first_block_early_mines_from_the_opening() {
+        let open = ConsensusParams::testnet();
+        // Ahead by far more than a node bound and one block taken can cost a
+        // slow machine, so the miner's first look comes before the opening.
+        let opens = super::unix_now() + 5;
+        let (first, _) = candidate(&ChainStore::new(open), &open, reward_key(), opens).unwrap();
+        let first = mine_block(first, 1 << 20).unwrap();
+        let params = ConsensusParams {
+            genesis: Some(first.id()),
+            opens_at: opens,
+            ..open
+        };
+        let node = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
+        node.submit_block(first).unwrap();
+        assert_eq!(
+            node.height(),
+            Some(0),
+            "fixture: the node did not take the first block ahead of the opening"
+        );
+
+        let running = AtomicBool::new(true);
+        let (tell, told) = mpsc::channel();
+        let key = reward_key();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                run(&node, &params, key, true, &running, |report| {
+                    let _ = tell.send(heard(&report));
+                });
+            });
+            let _stop = Stop(&running);
+            assert_eq!(
+                next(&told),
+                Heard::Waits(Waiting::ForTheOpening(opens)),
+                "a miner holding the first block before the opening did not wait for it"
+            );
+            assert_eq!(
+                next(&told),
+                Heard::Resumes,
+                "and never resumed once it came"
+            );
+            // Read after the miner said it, so a miner that resumed on time
+            // passes however slow the machine is, and one that resumed
+            // seconds early, as the miner did, is caught.
+            assert!(
+                super::unix_now() >= opens,
+                "the miner resumed before the opening"
+            );
+            assert_eq!(
+                next(&told),
+                Heard::Found(1, true),
+                "and mined nothing from the opening on"
+            );
+        });
+        node.shutdown();
+    }
+
     /// An identifier for the block at `height`, one per height and worked out
     /// rather than written down.
     fn at(height: u64) -> Hash32 {
@@ -1255,6 +1398,8 @@ mod saying {
         assert!(said(Waiting::ForProbation).contains("ledger it was handed"));
         assert!(said(Waiting::ForAPeer).contains("until this node has a peer it reached itself"));
         assert!(said(Waiting::ForAChain).contains("first block"));
+        assert!(said(Waiting::ForTheOpening(1_791_309_600))
+            .contains("until this network opens on 6 October 2026 at 18:00:00 UTC"));
         assert!(said(Waiting::ForTheClock).contains("waits for the clock"));
         assert!(said(Waiting::CannotAssemble("a reason".into())).contains("(a reason)"));
         assert_eq!(Saying::Resumes.to_string(), "mining again");

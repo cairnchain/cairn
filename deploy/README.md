@@ -247,9 +247,10 @@ at that moment. In order:
    with no chain and says when the network opens, in `journalctl -u cairnd`.
 5. **The network opens by itself** at the announced time. Each node lays the
    first block down ten target times before it, which is as far ahead of its
-   clock as any block may stand, and a node installed with `MINE` mines from
-   then on. Nothing has to be done on the day. A server installed after the
-   opening joins as any node does.
+   clock as any block may stand. A node installed with `MINE` builds nothing
+   on it until the opening itself, by its own clock, says so in the meantime,
+   and mines from the opening on. Nothing has to be done on the day. A server
+   installed after the opening joins as any node does.
 
 ## Putting the explorer on a public address
 
