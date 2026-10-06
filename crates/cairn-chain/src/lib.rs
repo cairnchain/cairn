@@ -11,12 +11,13 @@
 //! has to be all or nothing. A switch that fails halfway would leave a node
 //! following neither branch, with a state matching no block anyone agrees on.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::note::NoteId;
-use cairn_ledger::pow::{meets_target, work_of};
+use cairn_ledger::pow::{meets_target, next_difficulty, work_of};
 use cairn_ledger::transaction::Transfer;
 use cairn_ledger::validation::{
     check_transfer, check_transfer_again, check_transfer_shape, connect_block, disconnect_block,
@@ -364,7 +365,8 @@ const _: () = assert!(cairn_ledger::validation::COINBASE_MATURITY == MAX_REORG_D
 /// to, so holding its blocks is holding history nobody will ask for.
 pub const MAX_SIDE_BLOCKS: usize = 4_096;
 
-/// Bytes of blocks off the followed branch kept before the oldest are dropped.
+/// Bytes of blocks off the followed branch kept before the lightest are
+/// dropped.
 ///
 /// A count of blocks does not bound memory, because a block is not a fixed
 /// size. Counting them alone let an adversary offer four thousand blocks at
@@ -382,6 +384,30 @@ pub const MAX_SIDE_BLOCKS: usize = 4_096;
 /// already made the copy: `audit_what_a_stranger_can_make_a_node_hold.rs`
 /// restated it, saying in its own doc that it is private here.
 pub const MAX_SIDE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Whether what is held off the followed branch is past either bound, which
+/// is when the sweep beside the branch runs.
+const fn side_store_is_over(bytes: usize, blocks: usize) -> bool {
+    bytes > MAX_SIDE_BYTES || blocks > MAX_SIDE_BLOCKS
+}
+
+/// Where that sweep stops: an eighth under each bound.
+///
+/// It weighs every block held off the branch, which is a walk of the store,
+/// a table of who builds on whom and a heap of what can go. Stopping at the
+/// bound left a flood at the bound paying all of that on every block it
+/// sent, one block dropped for each: thirty thousand empty blocks off one
+/// parent took 198 seconds where the sweep before it, a sort, took 30.
+/// Stopping an eighth under pays it once for every five hundred and twelve.
+const fn side_store_has_room(bytes: usize, blocks: usize) -> bool {
+    bytes <= SIDE_BYTES_AFTER_A_SWEEP && blocks <= SIDE_BLOCKS_AFTER_A_SWEEP
+}
+
+/// What the sweep beside the branch leaves, at most, in blocks.
+const SIDE_BLOCKS_AFTER_A_SWEEP: usize = MAX_SIDE_BLOCKS - MAX_SIDE_BLOCKS / 8;
+
+/// And in bytes.
+const SIDE_BYTES_AFTER_A_SWEEP: usize = MAX_SIDE_BYTES - MAX_SIDE_BYTES / 8;
 
 /// Blocks whose bodies stay in memory behind the tip.
 ///
@@ -669,6 +695,12 @@ struct StoredBlock {
     /// the number: at the small end the factor is several times 1.4, which is
     /// why the count is not the wire form.
     bytes: usize,
+    /// When it was taken into memory, counted in blocks taken.
+    ///
+    /// Read by the sweep that bounds what is held off the branch, which drops
+    /// the earliest of two blocks carrying equal work first. See
+    /// [`ChainStore::forget_lightest_side_blocks`].
+    arrived: u64,
 }
 
 /// What one entry costs beyond the bytes its block arrived as.
@@ -1020,6 +1052,9 @@ pub struct ChainStore {
     /// Wire bytes of every block held in `blocks`, so what bounds them can be
     /// checked without walking the map on each arrival.
     held_bytes: usize,
+    /// Blocks taken into memory so far, which is what each one's `arrived`
+    /// is read off.
+    taken: u64,
     /// Where bodies are read back from, for a node that has somewhere to read
     /// them. Without one it keeps every body it may still need, which is what
     /// a chain with no disk behind it does.
@@ -1109,6 +1144,7 @@ impl ChainStore {
             params,
             blocks: HashMap::new(),
             held_bytes: 0,
+            taken: 0,
             bodies: None,
             invalid: HashMap::new(),
             branch: Branch::default(),
@@ -2208,6 +2244,7 @@ impl ChainStore {
                 body: None,
                 total_work: last.total_work,
                 bytes: HELD_OVERHEAD,
+                arrived: self.taken,
             },
         );
         Ok(())
@@ -2383,13 +2420,35 @@ impl ChainStore {
                     found: block.header.height,
                 });
             }
-            // The difficulty is taken as claimed here. A block claiming more
-            // than its branch demands has to have done that much work to be
-            // stored at all, and the switch below rejects it, so the worst it
-            // buys is one wasted attempt.
-            parent
+            // The difficulty was taken as claimed here, on the reasoning that
+            // a block claiming more than its branch demands has done that much
+            // work, and the switch refuses it. A block claiming less was never
+            // weighed against that reasoning, and it is the cheap one: a block
+            // claiming difficulty one costs one hash. Four thousand of them
+            // hung beside the tip filled the side store for nothing, and the
+            // sweep that bounds it then dropped the first block of an honest
+            // heavier branch as it arrived, so the node never put that branch
+            // together and stayed on the lighter one (E05 of the testnet-8
+            // attack catalogue).
+            //
+            // Since the difficulty a block must carry follows from its parent
+            // alone and the network's origin, it is asked here, before the
+            // block is held, with the other rules a parent alone settles. No
+            // block's validity moves: a block failing one of these was already
+            // refused when its branch was tried, and is refused at the door
+            // instead, charged to whoever sent it the way any invalid block
+            // is. What moves is the price of a place beside the branch, which
+            // is now the work the parent demands.
+            let judged = self.judge_against_parent(&block, parent, now);
+            let total_work = parent
                 .total_work
-                .saturating_add(work_of(block.header.difficulty))
+                .saturating_add(work_of(block.header.difficulty));
+            if let Err(source) = judged {
+                let refused = ChainError::InvalidBlock { id, source };
+                self.remember_refused(id, &refused);
+                return Err(refused);
+            }
+            total_work
         };
 
         // A block that loses the fork choice is held without being applied, so
@@ -2470,8 +2529,27 @@ impl ChainStore {
         self.follow(id, now)
     }
 
-    /// Moves the followed branch onto the one ending at `target`.
+    /// Moves the followed branch onto the one ending at `target`, and bounds
+    /// what is held off it whatever the switch came to.
+    ///
+    /// The sweep ran at the end of a switch that held and nowhere else on
+    /// this path, so a switch that failed left whatever it found. One that
+    /// fails on the first block of the branch it tried leaves every block
+    /// above that one held over a parent that has gone, and a block built on
+    /// those is held in turn, tried, and refused for that parent, again
+    /// without a sweep: one block tying the tip, then a branch of junk on it,
+    /// left 19 999 blocks held beside the branch against 4 096, and 200
+    /// blocks of half a megabyte left 104.5 MB against 32. Swept here, on the
+    /// way out of every switch, the store ends inside both bounds on every
+    /// path that holds a block: this one and the side branch in `add_block`.
     fn follow(&mut self, target: Hash32, now: u64) -> Result<Accepted, ChainError> {
+        let switched = self.switch_to(target, now);
+        self.forget_unreachable_branches();
+        switched
+    }
+
+    /// The switch itself, for [`Self::follow`].
+    fn switch_to(&mut self, target: Hash32, now: u64) -> Result<Accepted, ChainError> {
         let (fork_position, branch) = self.branch_to(target)?;
 
         // Refused here rather than discovered halfway through the rewind, when
@@ -2506,12 +2584,7 @@ impl ChainStore {
                     // `branch_to` as an ordinary refusal, with the peer blamed
                     // for this node being old, which is the one outcome the
                     // scheduled rule change exists to avoid.
-                    if error.settles_the_header() {
-                        if self.invalid.len() >= MAX_INVALID {
-                            self.invalid.clear();
-                        }
-                        self.invalid.insert(*id, Condemned::for_(&error));
-                    }
+                    self.remember_refused(*id, &error);
                     // And the block goes, unless the only thing wrong with it
                     // is that this node is too old to judge it.
                     //
@@ -2557,7 +2630,6 @@ impl ChainStore {
         self.prune_pool();
         self.repool(&rolled_back);
         self.forget_what_cannot_change();
-        self.forget_unreachable_branches();
 
         if rolled_back.is_empty() {
             return Ok(Accepted::Extended);
@@ -2566,6 +2638,119 @@ impl ChainStore {
             removed: rolled_back,
             added,
         })
+    }
+
+    /// Writes down that `id` was refused with `error`, if the header alone
+    /// settles that verdict, so the same block is never judged twice.
+    ///
+    /// A block whose rules this software does not have is not a block known
+    /// to be bad: the same block becomes valid the moment the node is
+    /// updated. [`ChainError::settles_the_header`] leaves those out, and says
+    /// why each of the others is safe to hold against an identifier.
+    fn remember_refused(&mut self, id: Hash32, error: &ChainError) {
+        if error.settles_the_header() {
+            if self.invalid.len() >= MAX_INVALID {
+                self.invalid.clear();
+            }
+            self.invalid.insert(id, Condemned::for_(error));
+        }
+    }
+
+    /// What a block held beside the branch must already be, asked of its
+    /// parent alone.
+    ///
+    /// The rules `connect_block` asks of a header that need nothing but the
+    /// parent's header and the work behind it, in the order it asks them, so
+    /// a block failing two of them is refused here for the reason the switch
+    /// would have given: who is blamed for a refusal is read off that reason.
+    /// Then the clock, which `connect_block` asks next.
+    ///
+    /// The difficulty is the one that matters. Since 0.12 it follows from the
+    /// parent and the network's origin alone, so a block claiming less than
+    /// its parent demands is refused here rather than held at the price of
+    /// the work it claims.
+    ///
+    /// The clock is what keeps that price. The difficulty a block demands of
+    /// its children falls the further behind its schedule it is dated, to a
+    /// quarter a block at most, and nothing else at the door bounds a
+    /// timestamp from above, so a short run dated years ahead would bring the
+    /// price of every block above it down to one hash, for the work of one
+    /// honest block and a third. A held block dated past the drift was
+    /// refused anyway when its branch was tried, and that refusal is the one
+    /// this node reverses by waiting, which nobody is blamed for.
+    ///
+    /// What is left to the switch needs more than a parent: the history root
+    /// and the median time past read the ledger and the blocks before it, and
+    /// the body is weighed against the state it spends from.
+    fn judge_against_parent(
+        &self,
+        block: &Block,
+        parent: &StoredBlock,
+        now: u64,
+    ) -> Result<(), BlockError> {
+        let header = &block.header;
+        let params = &self.params;
+        if header.network != params.network {
+            return Err(BlockError::WrongNetwork {
+                expected: params.network,
+                found: header.network,
+            });
+        }
+        if header.timestamp < params.opens_at {
+            return Err(BlockError::BeforeTheNetworkOpened {
+                opens_at: params.opens_at,
+                found: header.timestamp,
+            });
+        }
+        // The height was asked by the caller, so this is where the block
+        // sits, and the version its rules ask for is read from there.
+        let height = header.height;
+        let required = params.version_at(height);
+        if required > BLOCK_VERSION {
+            return Err(BlockError::SoftwareTooOld {
+                height,
+                required,
+                known: BLOCK_VERSION,
+            });
+        }
+        if header.version > BLOCK_VERSION {
+            return Err(BlockError::UnsupportedVersion(header.version));
+        }
+        if header.version != required {
+            return Err(BlockError::WrongVersion {
+                height,
+                found: header.version,
+                required,
+            });
+        }
+        let demanded = next_difficulty(
+            &parent.header.summary(),
+            params.origin(),
+            params.target_block_time,
+        );
+        if header.difficulty != demanded {
+            return Err(BlockError::WrongDifficulty {
+                expected: demanded,
+                found: header.difficulty,
+            });
+        }
+        let demanded_work = parent
+            .total_work
+            .checked_add(work_of(header.difficulty))
+            .ok_or(BlockError::WorkOverflow)?;
+        if header.total_work != demanded_work {
+            return Err(BlockError::WrongTotalWork {
+                expected: demanded_work,
+                found: header.total_work,
+            });
+        }
+        if header.timestamp > now.saturating_add(params.max_timestamp_drift) {
+            return Err(BlockError::TimestampTooFarAhead {
+                timestamp: header.timestamp,
+                drift: params.max_timestamp_drift,
+            });
+        }
+        Ok(())
     }
 
     /// The answer for a block already refused, if `id` is one.
@@ -3068,6 +3253,7 @@ impl ChainStore {
     fn hold(&mut self, id: Hash32, block: Block, total_work: u128) {
         let bytes = block.encode().len().saturating_add(HELD_OVERHEAD);
         let header = block.header;
+        self.taken = self.taken.saturating_add(1);
         if let Some(replaced) = self.blocks.insert(
             id,
             StoredBlock {
@@ -3075,6 +3261,7 @@ impl ChainStore {
                 body: Some(block),
                 total_work,
                 bytes,
+                arrived: self.taken,
             },
         ) {
             // Only what was actually being counted. An entry keeps its size
@@ -3147,8 +3334,9 @@ impl ChainStore {
             .fold(0usize, usize::saturating_add)
     }
 
-    /// Drops the oldest blocks off the followed branch until what is held off
-    /// it is back under [`MAX_SIDE_BYTES`] and under [`MAX_SIDE_BLOCKS`].
+    /// Drops blocks off the followed branch, lightest branch first, once what
+    /// is held off it is past [`MAX_SIDE_BYTES`] or [`MAX_SIDE_BLOCKS`], until
+    /// it is an eighth under both.
     ///
     /// Never touches the branch being followed: those are the blocks a
     /// reorganisation has to undo, and losing one would leave the node unable
@@ -3163,29 +3351,93 @@ impl ChainStore {
     /// just run had dropped none of them. Steady state was `MAX_SIDE_BYTES`
     /// divided by the smallest block, which is about a hundred thousand
     /// entries, and an entry costs far more than the bytes it is counted at.
-    fn forget_oldest_side_blocks(&mut self) {
+    ///
+    /// The order is what decides whose blocks a full store keeps, and it was
+    /// by height and then by identifier, whatever the work. A mined block's
+    /// identifier sorts ahead of free junk's, so four thousand junk blocks
+    /// hung above an honest heavier branch made the store drop that branch's
+    /// first block as it arrived, refuse every block after it for a parent it
+    /// had dropped, and keep the junk (E05 of the testnet-8 attack catalogue).
+    /// What it drops now, first to last:
+    ///
+    /// 1. Only a block nothing held builds on. Dropping one that something
+    ///    does strands every block above it, which is how E05 cut an honest
+    ///    branch off at its root. A branch goes from its top down: once its
+    ///    tip has gone, the block below is the one weighed.
+    /// 2. A block whose branch no longer reaches the followed one, because a
+    ///    block under it has gone: a switch that failed dropped it, or this
+    ///    sweep did. No switch can be tried onto it as it stands, so the work
+    ///    it is held at is a claim nothing can test, and the junk a failed
+    ///    switch leaves is heavier than the tip by construction; ranked by
+    ///    that work it would outlast every honest branch beside it.
+    /// 3. The lightest, by the total work of the branch the block ends, which
+    ///    is the block's own since it ends one. A block beside the branch
+    ///    carries the work its parent demands, so work is the one thing a
+    ///    stranger cannot make for nothing, and junk displaces only a branch
+    ///    lighter than itself. A branch heavier than the first blocks of an
+    ///    honest one still displaces them, paying a parent's demand for every
+    ///    block it holds.
+    /// 4. The earliest of two that weigh the same. Two blocks on one parent
+    ///    carry exactly the same work, so junk hung where an honest branch
+    ///    leaves this one ties that branch's first block, and keeping the
+    ///    earlier would drop the honest block as it arrived, which is E05's
+    ///    shape again. Keeping the later means that displacing a block takes
+    ///    as many blocks of its work, sent after it, as the store holds.
+    fn forget_lightest_side_blocks(&mut self) {
         let mut over = self.side_bytes();
         let mut counted = self.side_blocks();
-        if over <= MAX_SIDE_BYTES && counted <= MAX_SIDE_BLOCKS {
+        if !side_store_is_over(over, counted) {
             return;
         }
         let branch = &self.branch;
-        let mut candidates: Vec<(u64, Hash32, usize)> = self
+        // Each block held off the branch, and the block it builds on.
+        let side: HashMap<Hash32, Hash32> = self
             .blocks
             .iter()
-            .filter_map(|(id, stored)| {
-                branch
-                    .height_of(id)
-                    .is_none()
-                    .then_some((stored.header.height, *id, stored.bytes))
-            })
+            .filter(|(id, _)| branch.height_of(id).is_none())
+            .map(|(id, stored)| (*id, stored.header.previous))
             .collect();
-        candidates.sort_unstable_by_key(|(height, id, _)| (*height, *id));
-
-        for (_, id, bytes) in candidates {
-            if over <= MAX_SIDE_BYTES && counted <= MAX_SIDE_BLOCKS {
-                break;
+        let mut children: HashMap<Hash32, usize> = HashMap::new();
+        for parent in side.values() {
+            let count = children.entry(*parent).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+        // Whether each one's branch reaches the followed one, walked once
+        // for all of them: a walk stops at the first block already answered.
+        let mut reaches: HashMap<Hash32, bool> = HashMap::with_capacity(side.len());
+        for start in side.keys() {
+            let mut walked = Vec::new();
+            let mut cursor = *start;
+            let answer = loop {
+                if let Some(known) = reaches.get(&cursor) {
+                    break *known;
+                }
+                let Some(parent) = side.get(&cursor) else {
+                    break branch.height_of(&cursor).is_some();
+                };
+                walked.push(cursor);
+                cursor = *parent;
+            };
+            for id in walked {
+                reaches.insert(id, answer);
             }
+        }
+        let rank = |id: Hash32, stored: &StoredBlock, reaches: bool| {
+            Reverse((reaches, stored.total_work, stored.arrived, id))
+        };
+        let mut leaves: BinaryHeap<Reverse<(bool, u128, u64, Hash32)>> = reaches
+            .iter()
+            .filter(|(id, _)| !children.contains_key(*id))
+            .filter_map(|(id, reaches)| Some(rank(*id, self.blocks.get(id)?, *reaches)))
+            .collect();
+
+        while !side_store_has_room(over, counted) {
+            let Some(Reverse((_, _, _, id))) = leaves.pop() else {
+                break;
+            };
+            let Some(dropped) = self.blocks.remove(&id) else {
+                continue;
+            };
             counted = counted.saturating_sub(1);
             // Only what was actually being counted, which is the rule
             // `release` and `recount` already keep: an entry whose body has
@@ -3198,20 +3450,28 @@ impl ChainStore {
             // more than `WARM_BODIES` below the tip, and a reorganisation
             // deeper than that moves every one of them off the branch at once,
             // leaving up to a thousand entries with a full block's size
-            // recorded and no bytes behind it. Sorted oldest first, those are
-            // exactly what this walks before it reaches anything real: a
-            // hundred and twenty megabytes of credit against a ceiling of
-            // thirty two, so the sweep dropped the free entries, believed
-            // itself done, and left the rival branch it was called to bound
-            // sitting in memory at full size. Measured at forty eight
-            // megabytes held under a thirty two megabyte ceiling, with none of
-            // the twelve rival blocks touched.
-            if self
-                .blocks
-                .remove(&id)
-                .is_some_and(|stored| stored.body.is_some())
-            {
-                over = over.saturating_sub(bytes);
+            // recorded and no bytes behind it. Sorted oldest first, as this
+            // sweep once was, those are exactly what it walked before it
+            // reached anything real: a hundred and twenty megabytes of credit
+            // against a ceiling of thirty two, so the sweep dropped the free
+            // entries, believed itself done, and left the rival branch it was
+            // called to bound sitting in memory at full size. Measured at
+            // forty eight megabytes held under a thirty two megabyte ceiling,
+            // with none of the twelve rival blocks touched.
+            if dropped.body.is_some() {
+                over = over.saturating_sub(dropped.bytes);
+            }
+            let parent = dropped.header.previous;
+            let Some(left) = children.get_mut(&parent) else {
+                continue;
+            };
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                if let (Some(reaches), Some(stored)) =
+                    (reaches.get(&parent), self.blocks.get(&parent))
+                {
+                    leaves.push(rank(parent, stored, *reaches));
+                }
             }
         }
         self.recount();
@@ -3246,20 +3506,21 @@ impl ChainStore {
     ///
     /// Deleting the whole function reads like cover for all of it and is not:
     /// what that deletes is the unconditional call to
-    /// [`Self::forget_oldest_side_blocks`] at the end, so it was caught while
+    /// [`Self::forget_lightest_side_blocks`] at the end, so it was caught while
     /// everything the function does for itself survived being read the other
     /// way round. Nine mutations, nine survivors, with the chain suite and the
     /// network suite both green. The reason is that the two sweeps overlap
     /// almost exactly: what this one drops is what a rewind can no longer
-    /// reach, what the other drops is the oldest off the branch, and the
-    /// oldest is what falls out of reach first.
+    /// reach, what the other dropped then was the oldest off the branch, and
+    /// the oldest is what falls out of reach first. It drops the lightest now,
+    /// and what falls out of reach is deep, which is light.
     ///
     /// Seven are measured now, by the pair of tests at the end of
     /// `audit_what_a_stranger_can_make_a_node_hold.rs`. Both hold a population
-    /// off the branch that the sweep by age has nothing to say about, then
-    /// move nothing but the cutoff. One arrives here by the count and one by
-    /// the bytes, which are two separate ways in: a fixture that only ever
-    /// arrives by one leaves the other free to be read backwards.
+    /// off the branch that the sweep within the bounds has nothing to say
+    /// about, then move nothing but the cutoff. One arrives here by the count
+    /// and one by the bytes, which are two separate ways in: a fixture that
+    /// only ever arrives by one leaves the other free to be read backwards.
     ///
     /// The two left are the slack in each threshold, read as `>=` instead of
     /// `>`. Each fires one entry, or one byte, earlier than this does, and is
@@ -3304,7 +3565,7 @@ impl ChainStore {
 
         // What is left inside the window can still be more than the window is
         // worth holding, since a block inside it may be as large as the rules
-        // allow. Dropping by age is what bounds that.
+        // allow. Dropping the lightest first is what bounds that.
         //
         // Whatever the two numbers above said. They are about what this node
         // holds in total and this is about what a peer can make it hold, and
@@ -3317,13 +3578,13 @@ impl ChainStore {
         // times what `MAX_SIDE_BYTES` says, before anything swept.
         //
         // The same early exit had already been found once, at the cutoff below
-        // it, and the comment above `forget_oldest_side_blocks` says what it
-        // cost. This is the other one.
+        // it, and the comment above `forget_lightest_side_blocks` says what
+        // it cost. This is the other one.
         //
         // It costs a walk of the held blocks on every call, which is why both
         // halves of that walk read the identifier off the map instead of
         // hashing a header for it.
-        self.forget_oldest_side_blocks();
+        self.forget_lightest_side_blocks();
     }
 
     fn apply(&mut self, id: Hash32, now: u64) -> Result<(), ChainError> {
@@ -3573,16 +3834,31 @@ mod tests {
     /// building the tens of megabytes it takes to reach the ceiling would cost
     /// a second of every run to prove something about the encoder instead.
     fn shelve(store: &mut ChainStore, height: u64, nonce: u64, bytes: usize) -> Hash32 {
-        let block = block_at(height, Hash32::ZERO, nonce);
+        shelve_on(store, Hash32::ZERO, height, nonce, bytes, 0)
+    }
+
+    /// The same, on a stated parent and at a stated total work, which is what
+    /// the sweep beside the branch reads.
+    fn shelve_on(
+        store: &mut ChainStore,
+        previous: Hash32,
+        height: u64,
+        nonce: u64,
+        bytes: usize,
+        total_work: u128,
+    ) -> Hash32 {
+        let block = block_at(height, previous, nonce);
         let header = block.header;
         let id = header.id();
+        store.taken += 1;
         store.blocks.insert(
             id,
             StoredBlock {
                 header,
                 body: Some(block),
-                total_work: 0,
+                total_work,
                 bytes,
+                arrived: store.taken,
             },
         );
         store.held_bytes = store.held_bytes.saturating_add(bytes);
@@ -4070,51 +4346,170 @@ mod tests {
     /// of a gigabyte held on the word of a peer. So what is held off the
     /// followed branch is bounded in bytes, and the branch itself is never
     /// what pays for it: those are the blocks a reorganisation has to undo.
+    ///
+    /// What goes is the lightest, until an eighth of the ceiling is free. The
+    /// rivals here are weighed so that the lightest are neither the oldest
+    /// nor the lowest, which is what the sweep went by before.
     #[test]
-    fn blocks_off_the_followed_branch_are_dropped_oldest_first_and_it_is_never_touched() {
+    fn blocks_off_the_followed_branch_are_dropped_lightest_first_and_it_is_never_touched() {
         const CHUNK: usize = 4 * 1024 * 1024;
 
         let mut store = ChainStore::new(params());
 
-        // On the branch, and older than every rival, so a sweep going by age
-        // alone would take it first.
+        // On the branch, older and lighter than every rival, so a sweep going
+        // by age or by work alone would take it first.
         let anchor = shelve(&mut store, 0, 0, CHUNK);
         store.branch.push(anchor);
 
-        let rivals: Vec<Hash32> = (1..=12u64)
-            .map(|n| shelve(&mut store, n, n, CHUNK))
+        // Exactly at the ceiling, which is not past it: nothing goes.
+        let rivals: Vec<(Hash32, u128)> = (1..=8u64)
+            .map(|n| {
+                let work = u128::from((n * 7) % 13);
+                (shelve_on(&mut store, anchor, n, n, CHUNK, work), work)
+            })
+            .collect();
+        assert_eq!(store.side_bytes(), MAX_SIDE_BYTES);
+        store.forget_lightest_side_blocks();
+        assert_eq!(
+            store.side_bytes(),
+            MAX_SIDE_BYTES,
+            "a store at its ceiling was swept"
+        );
+
+        // Work 7, 1, 8, 2, 9, 3, 10, 4, 11, 5, 12, 6: the five lightest are
+        // the second, fourth, sixth, eighth and tenth to arrive.
+        let rivals: Vec<(Hash32, u128)> = rivals
+            .into_iter()
+            .chain((9..=12u64).map(|n| {
+                let work = u128::from((n * 7) % 13);
+                (shelve_on(&mut store, anchor, n, n, CHUNK, work), work)
+            }))
             .collect();
         assert_eq!(store.side_bytes(), CHUNK * 12);
-        assert!(store.side_bytes() > MAX_SIDE_BYTES);
 
-        store.forget_oldest_side_blocks();
+        store.forget_lightest_side_blocks();
 
-        assert!(
-            store.side_bytes() <= MAX_SIDE_BYTES,
-            "holding {} bytes off the branch, the ceiling is {MAX_SIDE_BYTES}",
-            store.side_bytes()
+        assert_eq!(
+            store.side_bytes(),
+            SIDE_BYTES_AFTER_A_SWEEP,
+            "past the ceiling, the sweep leaves an eighth of it free, and no more"
         );
         assert!(
             store.contains(&anchor),
             "the branch a reorganisation has to undo was swept away with the rest"
         );
-        for gone in &rivals[..4] {
-            assert!(!store.contains(gone), "the oldest rivals should have gone");
-        }
-        for kept in &rivals[4..] {
-            assert!(store.contains(kept), "and no more than the oldest");
+        for (id, work) in &rivals {
+            assert_eq!(
+                store.contains(id),
+                *work > 5,
+                "the rival at work {work} should {} have gone",
+                if *work > 5 { "not" } else { "alone" }
+            );
         }
         assert_eq!(
             store.held_bytes(),
-            CHUNK * 9,
+            CHUNK * 8,
             "the count was rebuilt from what is left rather than adjusted as it went"
         );
 
         // Under the ceiling there is nothing to do, and it does nothing.
         let held = store.len();
-        store.forget_oldest_side_blocks();
+        store.forget_lightest_side_blocks();
         assert_eq!(store.len(), held);
-        assert_eq!(store.held_bytes(), CHUNK * 9);
+        assert_eq!(store.held_bytes(), CHUNK * 8);
+    }
+
+    /// A branch beside the followed one goes from its top down.
+    ///
+    /// A block something held builds on is never what goes: dropping it would
+    /// strand everything above it, which is how a flood of junk once cut an
+    /// honest branch off at its root. So a branch whose top is heavy keeps its
+    /// first block, however light, while lighter blocks nothing builds on go.
+    ///
+    /// And of two blocks weighing the same, the earlier goes first. Blocks on
+    /// one parent carry the same work, so a flood hung where an honest branch
+    /// leaves this one ties that branch's first block, and keeping the earlier
+    /// would drop the honest block as it arrived.
+    ///
+    /// Asked by the count, which is the other way in: the test above arrives
+    /// by the bytes.
+    #[test]
+    fn a_block_beside_the_branch_goes_only_once_nothing_builds_on_it() {
+        let mut store = ChainStore::new(params());
+        let anchor = shelve(&mut store, 0, 0, 0);
+        store.branch.push(anchor);
+
+        // A branch of three: the lightest block held, then one, then a block
+        // heavier than anything else here.
+        let low = shelve_on(&mut store, anchor, 1, 1, 0, 1);
+        let middle = shelve_on(&mut store, low, 2, 2, 0, 2);
+        let high = shelve_on(&mut store, middle, 3, 3, 0, 50);
+        // The rest of the store, all of one weight, in the order they came.
+        let filler: Vec<Hash32> = (0..MAX_SIDE_BLOCKS as u64 - 3)
+            .map(|n| shelve_on(&mut store, anchor, 1, 100 + n, 0, 10))
+            .collect();
+
+        // Exactly at the ceiling, which is not past it.
+        assert_eq!(store.side_blocks(), MAX_SIDE_BLOCKS);
+        store.forget_lightest_side_blocks();
+        assert_eq!(
+            store.side_blocks(),
+            MAX_SIDE_BLOCKS,
+            "a store at its ceiling was swept"
+        );
+
+        let later = shelve_on(&mut store, anchor, 1, 99, 0, 10);
+        store.forget_lightest_side_blocks();
+
+        assert_eq!(
+            store.side_blocks(),
+            SIDE_BLOCKS_AFTER_A_SWEEP,
+            "past the ceiling, the sweep leaves an eighth of it free, and no more"
+        );
+        let dropped = MAX_SIDE_BLOCKS + 1 - SIDE_BLOCKS_AFTER_A_SWEEP;
+        assert!(
+            [low, middle, high].iter().all(|id| store.contains(id)),
+            "the lightest block here went, with a block built on it still held"
+        );
+        assert!(filler[..dropped].iter().all(|id| !store.contains(id)));
+        assert!(
+            filler[dropped..].iter().all(|id| store.contains(id)),
+            "a block that weighs what the earlier ones do went before them"
+        );
+        assert!(store.contains(&later));
+        assert!(store.contains(&anchor));
+    }
+
+    /// A block whose branch has lost a block under it goes before any whose
+    /// branch still reaches the followed one, whatever it weighs.
+    ///
+    /// No switch can be tried onto it until the block it lacks comes back, so
+    /// what it weighs is a claim nothing can test, and the blocks a failed
+    /// switch leaves stranded are heavier than the tip by construction:
+    /// ranked by that weight, they would outlast every honest branch beside
+    /// them.
+    #[test]
+    fn a_block_cut_off_from_the_branch_goes_before_one_that_reaches_it() {
+        const CHUNK: usize = 4 * 1024 * 1024;
+        let mut store = ChainStore::new(params());
+        let anchor = shelve(&mut store, 0, 0, 0);
+        store.branch.push(anchor);
+
+        let reaching: Vec<Hash32> = (1..=7u64)
+            .map(|n| shelve_on(&mut store, anchor, 1, n, CHUNK, 1))
+            .collect();
+        // Above a block nobody holds, and as heavy as anything here.
+        let stranded = shelve_on(&mut store, id(77), 2, 8, CHUNK, u128::MAX);
+        let above = shelve_on(&mut store, stranded, 3, 9, CHUNK, u128::MAX);
+        assert!(store.side_bytes() > MAX_SIDE_BYTES);
+
+        store.forget_lightest_side_blocks();
+
+        assert!(!store.contains(&stranded) && !store.contains(&above));
+        assert!(
+            reaching.iter().all(|id| store.contains(id)),
+            "a block that reaches the branch went while one cut off from it was held"
+        );
     }
 
     /// The sweep by size runs whatever the trigger above it decides.
@@ -4136,7 +4531,7 @@ mod tests {
     /// the constant says, in a sawtooth between thirty one megabytes and a
     /// hundred and sixty eight.
     ///
-    /// The two tests below call `forget_oldest_side_blocks` by hand, so they
+    /// The two tests below call `forget_lightest_side_blocks` by hand, so they
     /// measure what the sweep does and never when it runs. The one end-to-end
     /// test, `fork_choice::what_a_node_holds_is_bounded_on_a_chain_younger_
     /// than_the_window`, lowers `max_block_bytes` to 4096 so the published
@@ -4202,8 +4597,9 @@ mod tests {
     /// A body is let go of once it is more than `WARM_BODIES` below the tip,
     /// and a reorganisation deeper than that moves every one of those blocks
     /// off the branch at once. What is left is an entry with a full block's
-    /// size recorded against it and no bytes behind it, and being the oldest
-    /// blocks this node holds, they are the first thing a sweep by age walks.
+    /// size recorded against it and no bytes behind it, and being the deepest
+    /// blocks this node holds, and so the lightest, they are the first thing
+    /// the sweep walks, as they were when it went by age.
     ///
     /// They cost nothing, so dropping them frees nothing. Crediting the sweep
     /// with their recorded size is what let it stop before it reached a single
@@ -4227,7 +4623,7 @@ mod tests {
             })
             .collect();
         let rivals: Vec<Hash32> = (7..=18u64)
-            .map(|n| shelve(&mut store, n, n, CHUNK))
+            .map(|n| shelve_on(&mut store, Hash32::ZERO, n, n, CHUNK, 1))
             .collect();
         store.recount();
 
@@ -4239,7 +4635,7 @@ mod tests {
         );
         assert!(store.side_bytes() > MAX_SIDE_BYTES);
 
-        store.forget_oldest_side_blocks();
+        store.forget_lightest_side_blocks();
 
         assert!(
             store.side_bytes() <= MAX_SIDE_BYTES,
@@ -4254,7 +4650,7 @@ mod tests {
         );
         assert_eq!(
             rivals.iter().filter(|id| store.contains(id)).count(),
-            MAX_SIDE_BYTES / CHUNK,
+            SIDE_BYTES_AFTER_A_SWEEP / CHUNK,
             "and what was dropped is rival blocks, which is what costs memory"
         );
     }

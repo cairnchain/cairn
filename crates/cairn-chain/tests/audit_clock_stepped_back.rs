@@ -121,8 +121,13 @@ fn followed() -> (Miner, Vec<Block>) {
 /// Bad by a state root that does not match what its own body produces, which
 /// is a fact about the block rather than about any clock, so the refusal it
 /// earns reads the same at every hour of the day. The blocks above it are
-/// never judged: they exist to make the branch outweigh the one being
-/// followed, so that the node rewinds before it finds out.
+/// never judged by the switch: they exist to make the branch outweigh the one
+/// being followed, so that the node rewinds before it finds out.
+///
+/// All dated with the first. A block held beside the branch is asked at the
+/// door what its parent alone settles, and the clock with it, so one dated
+/// past the drift of the clock the finding steps back to is refused there,
+/// before any switch is tried, and the finding is never reached.
 fn rival(at_fork: &Miner) -> Vec<Block> {
     let mut bad = at_fork.next(RIVAL_OPENS_AT);
     assert_ne!(
@@ -138,7 +143,6 @@ fn rival(at_fork: &Miner) -> Vec<Block> {
         let mut next = previous.clone();
         next.header.previous = previous.header.id();
         next.header.height = previous.header.height + 1;
-        next.header.timestamp = previous.header.timestamp + 60;
         next.header.total_work = previous.header.total_work + 1;
         branch.push(next);
     }
