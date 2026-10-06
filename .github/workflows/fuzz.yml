@@ -83,9 +83,9 @@ jobs:
           cargo test --release --locked \
             -p cairn-primitives --test fuzz_codec --test fuzz_hex \
             -p cairn-accumulator --test fuzz_accumulator \
-            -p cairn-ledger --test fuzz_ledger_structures --test fuzz_connect_block \
+            -p cairn-ledger --test fuzz_ledger_structures --test fuzz_connect_block --test fuzz_retarget \
             -p cairn-net --test fuzz_wire --test fuzz_address_book --test fuzz_join_answers \
-            -p cairn-chain --test fuzz_reorganisation_storm --test fuzz_block_store \
+            -p cairn-chain --test fuzz_reorganisation_storm --test fuzz_block_store --test fuzz_pool \
             -p cairn-store --test fuzz_record_framing --test fuzz_header_tree \
             -p cairn-http --test fuzz_request \
             -p cairn-wallet --test fuzz_history \
