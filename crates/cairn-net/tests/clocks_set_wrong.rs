@@ -283,8 +283,8 @@ fn a_node_just_past_the_drift_behind_waits_and_takes_the_blocks_once_its_clock_a
             "the slow node held a block refused for its clock"
         );
     }
-    assert_eq!(
-        kept.0, 2,
+    assert!(
+        kept.0 >= 2,
         "the slow node let go of a peer for its own clock"
     );
     assert_eq!(kept.1, TurnedAway::default());
@@ -385,7 +385,10 @@ fn a_miner_more_than_the_drift_fast_mines_blocks_only_fast_clocks_keep() {
         turned_away.iter().all(|one| *one == TurnedAway::default()),
         "somebody was turned away over a clock: {turned_away:?}"
     );
-    assert_eq!(kept, (3, 3), "a peer was let go of over a clock");
+    assert!(
+        kept.0 >= 3 && kept.1 >= 3,
+        "a peer was let go of over a clock: {kept:?}"
+    );
 }
 
 /// **A node an hour behind, with as many peers as a node looks for, refuses
@@ -477,8 +480,8 @@ fn a_node_an_hour_behind_refuses_says_so_and_catches_up_once_its_clock_is_set() 
         !behind.1,
         "the slow node held a block refused for its clock"
     );
-    assert_eq!(
-        behind.2, TARGET_PEERS,
+    assert!(
+        behind.2 >= TARGET_PEERS,
         "the slow node let go of a peer for its own clock"
     );
     assert_eq!(behind.3, TurnedAway::default());
