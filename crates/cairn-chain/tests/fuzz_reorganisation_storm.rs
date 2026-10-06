@@ -36,10 +36,10 @@
 //! it found it, pool and records included. At the end every store, whatever
 //! order it was fed in, holds the same ledger.
 //!
-//! Two tests. One walks every depth from one to the undo limit, back and forth
-//! between two branches. The other is a `cairn_fuzz` campaign over random trees
-//! and orders, which `CAIRN_FUZZ_SEED`, `CAIRN_FUZZ_CASES` and
-//! `CAIRN_FUZZ_SECONDS` steer.
+//! Two tests, both `cairn_fuzz` campaigns, so `CAIRN_FUZZ_SEED`,
+//! `CAIRN_FUZZ_CASES` and `CAIRN_FUZZ_SECONDS` steer them. One walks every
+//! depth from one to the undo limit, back and forth between two branches, in
+//! every case. The other draws its trees and orders at random.
 
 #![allow(
     clippy::unwrap_used,
@@ -101,8 +101,10 @@ const WATCHED: usize = OWNERS - 1;
 /// The common chain is the same in every case. The branches are what the seed
 /// varies.
 const PREFIX_SEED: u64 = 0x0005_EED0_F2E0_0418;
-/// Cases the campaign runs in `cargo test`.
+/// Cases the storm runs in `cargo test`.
 const QUICK: usize = 6;
+/// Cases the depth sweep runs in `cargo test`. Each walks every depth.
+const SWEEPS: usize = 3;
 
 fn params() -> ConsensusParams {
     ConsensusParams::testnet()
@@ -1930,31 +1932,27 @@ impl<'t> Run<'t> {
 /// scattered, and all four have to end holding the same ledger.
 #[test]
 fn every_depth_up_to_the_limit_back_and_forth() {
-    const SEEDS: u64 = 3;
+    let campaign = Campaign::named("chain: every depth back and forth");
     let params = params();
     assert_eq!(
         ChainStore::new(params).undo_limit(),
         LIMIT,
         "the rules this file sets are the undo limit it walks to"
     );
+    let seed = campaign.seed();
     let mut reached = Reached::default();
-    for seed in 0..SEEDS {
-        let mut rng = Rng::new(0xDE97_0000 ^ seed);
+    let ran = campaign.run(SWEEPS, |case, rng| {
         let tip = PREFIX - 1;
         let tree = Tree::grow(
             &[
                 (Fork::Prefix(tip), LIMIT as usize + 1),
                 (Fork::Prefix(tip), LIMIT as usize),
             ],
-            &mut rng,
+            rng,
             &params,
         );
-        let mut run = Run::new(
-            params,
-            &tree,
-            &mut reached,
-            format!("depth sweep, seed {seed}"),
-        );
+        let label = format!("depth sweep, case {case} of seed {seed:#x}");
+        let mut run = Run::new(params, &tree, &mut reached, label.clone());
         let mut nodes = vec![
             Node::new(
                 "a plain node switching at every depth from one",
@@ -1970,40 +1968,44 @@ fn every_depth_up_to_the_limit_back_and_forth() {
             Node::new("a plain node given the blocks scattered", false, params),
         ];
         let orders = [
-            ping_pong(&tree, 0, 1, 1, Some(&mut rng)),
-            ping_pong(&tree, 1, 0, 2, Some(&mut rng)),
+            ping_pong(&tree, 0, 1, 1, Some(&mut *rng)),
+            ping_pong(&tree, 1, 0, 2, Some(&mut *rng)),
             branch_after_branch(&tree, &[1, 0]),
-            scattered(&tree, &mut rng),
+            scattered(&tree, rng),
         ];
         let before = run.reached.switches.clone();
-        run.play(&mut nodes[0], &orders[0], &mut rng);
+        run.play(&mut nodes[0], &orders[0], rng);
         for depth in 1..=LIMIT as usize {
             assert_eq!(
                 run.reached.switches.get(&depth).copied().unwrap_or(0),
                 before.get(&depth).copied().unwrap_or(0) + 1,
-                "seed {seed}: the first store switched once at each depth up to the limit, \
+                "{label}: the first store switched once at each depth up to the limit, \
                  and not once at depth {depth}"
             );
         }
         for (node, steps) in nodes.iter_mut().zip(&orders).skip(1) {
-            run.play(node, steps, &mut rng);
+            run.play(node, steps, rng);
         }
         run.level(&mut nodes);
-    }
+    });
     eprintln!(
         "depth sweep reached {reached:#?}\nempty archivist rows dropped so far: {}",
         EMPTY_ROWS.load(Ordering::Relaxed)
     );
-    reached.reached_every_kind();
     assert_eq!(
         reached.switches.keys().copied().collect::<Vec<_>>(),
         (1..=LIMIT as usize).collect::<Vec<_>>(),
         "switches went to every depth up to the limit and no deeper"
     );
-    assert!(
-        reached.failed_depths.keys().any(|depth| *depth == LIMIT),
-        "a switch failed partway at the undo limit itself: {reached:#?}"
-    );
+    // A replay of one case asks for fewer than this, and says nothing about
+    // coverage.
+    if ran.cases >= SWEEPS {
+        reached.reached_every_kind();
+        assert!(
+            reached.failed_depths.keys().any(|depth| *depth == LIMIT),
+            "a switch failed partway at the undo limit itself: {reached:#?}"
+        );
+    }
 }
 
 /// Random trees fed to a plain node and an archivist in two different storms
