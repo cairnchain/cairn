@@ -389,20 +389,62 @@ fn answer(mut socket: TcpStream, port: u16, lab: &Lab) {
     lab.holding.fetch_sub(1, Ordering::SeqCst);
 }
 
-/// Who holds the victim's outbound slots, read once neither count has moved
-/// for [`SETTLED`]: honest nodes, and the stranger.
-fn outbound(victim: &Node, stranger: &Stranger) -> (usize, usize) {
-    let mut last = (usize::MAX, usize::MAX);
+/// The counts the readings below are taken from: the victim's outbound
+/// peers, the connections it dialled that the stranger holds, and every peer
+/// that has introduced itself to the victim, whoever opened the connection.
+fn counts(victim: &Node, stranger: &Stranger) -> (usize, usize, usize) {
+    (
+        victim.peers_reached(),
+        stranger.holding(),
+        victim.peers_introduced(),
+    )
+}
+
+/// Whether no feeler of the victim's is open, given the `inbound`
+/// connections the stranger holds into it.
+///
+/// A feeler is a connection the stranger holds and the victim does not count
+/// among its outbound peers, so while one is open the stranger's count reads
+/// one honest peer short. The victim counts it among the peers that
+/// introduced themselves, and nothing else is there to count: the honest
+/// nodes never dial the victim, which names no port.
+fn no_feeler_open(counts: (usize, usize, usize), inbound: usize) -> bool {
+    let (reached, _, introduced) = counts;
+    introduced == reached + inbound
+}
+
+/// Who holds the victim's outbound slots: honest nodes, and the stranger.
+///
+/// Read once the victim holds all [`TARGET_PEERS`] of them, no feeler of its
+/// is open, and none of the counts has moved for [`SETTLED`]. Every caller
+/// expects all of them held, so the first two say when to read and not what
+/// is read. They were not asked, and both bit on a slow runner. Windows
+/// takes about two seconds to refuse a dial on the loopback, so a round of
+/// dials into the dead addresses the stranger hands over held the counts
+/// still for longer than `SETTLED` while the victim was still filling its
+/// slots: windows-latest read three honest and two stranger before the
+/// stranger had the other three. And macos-latest once read two honest and
+/// six stranger after a clean restart, and three and five on the run after,
+/// which is what one feeler left open looks like.
+fn outbound(victim: &Node, stranger: &Stranger, inbound: usize) -> (usize, usize) {
+    let mut last = (usize::MAX, usize::MAX, usize::MAX);
     let mut since = Instant::now();
     let settled = wait_until(PATIENCE, || {
-        let now = (victim.peers_reached(), stranger.holding());
+        let now = counts(victim, stranger);
         if now != last {
             last = now;
             since = Instant::now();
         }
-        since.elapsed() >= SETTLED && now.0 >= now.1
+        since.elapsed() >= SETTLED
+            && now.0 == TARGET_PEERS
+            && no_feeler_open(now, inbound)
+            && now.0 >= now.1
     });
-    assert!(settled, "the victim's outbound connections never settled");
+    assert!(
+        settled,
+        "the victim's outbound connections never settled: {last:?} outbound, held by the \
+         stranger, introduced"
+    );
     (last.0 - last.1, last.1)
 }
 
@@ -447,7 +489,7 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
     let stranger = Stranger::start();
     stranger.lab.flooding.store(true, Ordering::SeqCst);
     let inbound = stranger.greet(victim.address(), LISTENERS / 2);
-    let (honest_out, stranger_out) = outbound(&victim, &stranger);
+    let (honest_out, stranger_out) = outbound(&victim, &stranger, inbound.len());
     assert_eq!(
         (honest_out, stranger_out),
         (HONEST, TARGET_PEERS - HONEST),
@@ -456,20 +498,22 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
 
     // The flood runs while the slots are watched. Nothing about it is
     // misbehaviour: each list answers a request and is paid for.
-    // Read only once both counts have stood still for `SETTLED`: a feeler
-    // the victim sends is a connection the stranger holds for a moment and
-    // the victim does not count, and would read as an honest peer lost.
+    // Read only once the counts have stood still for `SETTLED` with no
+    // feeler open: a feeler the victim sends is a connection the stranger
+    // holds and the victim does not count, and would read as an honest peer
+    // lost. Standing still was the only condition, and a feeler left open
+    // longer than that on a slow runner is still a feeler.
     let mut fewest_honest = HONEST;
     let mut readings = 0usize;
-    let mut last = (usize::MAX, usize::MAX);
+    let mut last = (usize::MAX, usize::MAX, usize::MAX);
     let mut since = Instant::now();
     let flooding_until = Instant::now() + Duration::from_secs(12);
     while Instant::now() < flooding_until {
-        let now = (victim.peers_reached(), stranger.holding());
+        let now = counts(&victim, &stranger);
         if now != last {
             last = now;
             since = Instant::now();
-        } else if since.elapsed() >= SETTLED {
+        } else if since.elapsed() >= SETTLED && no_feeler_open(now, inbound.len()) {
             fewest_honest = fewest_honest.min(now.0.saturating_sub(now.1));
             readings += 1;
         }
@@ -529,7 +573,7 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
         "the stranger saw the victim go"
     );
     let (restarted, _) = Node::open_watching(params(), here_v4(), &directory, &[owner()]).unwrap();
-    let (honest_out, stranger_out) = outbound(&restarted, &stranger);
+    let (honest_out, stranger_out) = outbound(&restarted, &stranger, 0);
     println!("after a clean restart: {honest_out} honest and {stranger_out} stranger outbound");
     assert_eq!(
         honest_out, HONEST,
@@ -580,7 +624,7 @@ fn a_restart_from_what_a_killed_node_leaves_on_disk_redials_its_anchors() {
 
     let stranger = Stranger::start();
     let _ = stranger.greet(victim.address(), LISTENERS);
-    let (honest_out, stranger_out) = outbound(&victim, &stranger);
+    let (honest_out, stranger_out) = outbound(&victim, &stranger, 0);
     assert_eq!(
         (honest_out, stranger_out),
         (HONEST, TARGET_PEERS - HONEST),
@@ -631,7 +675,7 @@ fn a_restart_from_what_a_killed_node_leaves_on_disk_redials_its_anchors() {
     );
 
     let (restarted, _) = Node::open_watching(params(), here_v4(), &killed, &[owner()]).unwrap();
-    let (honest_out, stranger_out) = outbound(&restarted, &stranger);
+    let (honest_out, stranger_out) = outbound(&restarted, &stranger, 0);
     println!(
         "after a restart from the copy: {honest_out} honest and {stranger_out} stranger \
          outbound, of {HONEST} honest anchors"

@@ -9688,7 +9688,8 @@ fn feel(shared: &Arc<Shared>, connected: &HashSet<SocketAddr>, now: u64) {
 /// node held when it last wrote them down, ahead of an order that is when
 /// each address last answered and that a stranger moves by answering. See
 /// [`keep_anchors`]. Once a node holds its anchors they are connected and
-/// not candidates, so this decides a start, and a node that lost every peer.
+/// not candidates, so this decides a start, the round after an outbound peer
+/// goes, which dials it again first, and a node that has lost every peer.
 fn dial_order(
     candidates: Vec<SocketAddr>,
     held: &HashSet<Group>,
