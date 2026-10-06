@@ -4391,7 +4391,7 @@ mod tests {
 
         assert_eq!(
             store.side_bytes(),
-            SIDE_BYTES_AFTER_A_SWEEP,
+            CHUNK * 7,
             "past the ceiling, the sweep leaves an eighth of it free, and no more"
         );
         assert!(
@@ -4461,12 +4461,15 @@ mod tests {
         let later = shelve_on(&mut store, anchor, 1, 99, 0, 10);
         store.forget_lightest_side_blocks();
 
+        // Written out rather than read off the constant the sweep stops at,
+        // so a constant read wrongly is not also the answer expected of it.
+        let left = MAX_SIDE_BLOCKS - MAX_SIDE_BLOCKS / 8;
         assert_eq!(
             store.side_blocks(),
-            SIDE_BLOCKS_AFTER_A_SWEEP,
+            left,
             "past the ceiling, the sweep leaves an eighth of it free, and no more"
         );
-        let dropped = MAX_SIDE_BLOCKS + 1 - SIDE_BLOCKS_AFTER_A_SWEEP;
+        let dropped = MAX_SIDE_BLOCKS + 1 - left;
         assert!(
             [low, middle, high].iter().all(|id| store.contains(id)),
             "the lightest block here went, with a block built on it still held"
@@ -4650,8 +4653,9 @@ mod tests {
         );
         assert_eq!(
             rivals.iter().filter(|id| store.contains(id)).count(),
-            SIDE_BYTES_AFTER_A_SWEEP / CHUNK,
-            "and what was dropped is rival blocks, which is what costs memory"
+            7,
+            "and what was dropped is rival blocks, which is what costs memory, down to \
+             an eighth of the ceiling free"
         );
     }
 
