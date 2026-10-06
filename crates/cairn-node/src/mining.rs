@@ -152,7 +152,7 @@ pub(crate) enum Waiting {
     ///
     /// A node takes that block as far ahead of its clock as the drift lets any
     /// block stand, so it holds it from the drift before the opening, ten
-    /// minutes on testnet-8. A miner that built on it then mined before the
+    /// minutes on testnet-8, and the miner built on it at once, before the
     /// announced time: on testnet-8, blocks 1 to 10 were found in the ten
     /// minutes before the opening, each stamped a second or so past it because
     /// the median of the chain allowed nothing earlier, and the chain opened
