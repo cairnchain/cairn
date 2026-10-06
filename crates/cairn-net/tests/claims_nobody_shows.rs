@@ -327,11 +327,13 @@ fn a_newcomer_asks_every_heavier_claim_once_and_then_takes_the_honest_chain() {
                  a heavier claim stood unexamined"
             );
         };
-        // Two seconds past the window for a round of upkeep that runs late:
-        // a second turn would start a whole window after the first ended.
+        // A second turn for one stranger could only start once the other had
+        // run its whole window, so it would sit at least two windows after
+        // the first ask. Anything under that is one turn, however late a
+        // round of upkeep runs on a loaded machine.
         let span = last.saturating_duration_since(first);
         assert!(
-            span <= Duration::from_secs(FIRST_ANSWER + 2),
+            span < Duration::from_secs(2 * FIRST_ANSWER),
             "stranger {at} was asked over {span:?}, more than one turn: a claim that failed \
              was waited on twice"
         );
