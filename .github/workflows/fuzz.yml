@@ -71,11 +71,20 @@ jobs:
         # the most exposed thing in this workspace and the one target the
         # weekly run never varies. That is a change to a security test and not
         # a line in a list, so it is not made here.
+        #
+        # One target reads nothing from strangers and is here all the same:
+        # `cairn-chain --test fuzz_reorganisation_storm`, whose input is a
+        # tree of competing branches and the orders they arrive in. Both of
+        # its tests are campaigns, so a fresh seed varies them as it varies a
+        # byte string, and what they hold is the one rule the attack catalogue
+        # rates critical with no attacker in it: a switch between branches
+        # leaves the ledger a replay of the winning one gives.
         run: |
           cargo test --release --locked \
             -p cairn-primitives --test fuzz_codec --test fuzz_hex \
             -p cairn-accumulator --test fuzz_accumulator \
             -p cairn-ledger --test fuzz_ledger_structures --test fuzz_connect_block \
+            -p cairn-chain --test fuzz_reorganisation_storm \
             -p cairn-net --test fuzz_wire --test fuzz_address_book --test fuzz_join_answers \
             -p cairn-chain --test fuzz_block_store \
             -p cairn-store --test fuzz_record_framing --test fuzz_header_tree \
