@@ -16,9 +16,10 @@
 //! is by height, so a withholder announcing a block that does not exist
 //! costs the same nothing as one announcing a real one.
 //!
-//! Measured on loopback: the victim takes every block within milliseconds of
-//! the control, and the withholder is still owed every block it was asked for
-//! when the honest copy lands.
+//! Measured on loopback: the victim takes every block in the same two
+//! millisecond poll as the control, three milliseconds after the miner is
+//! handed it, and the withholder is still owed every block it was asked for
+//! when the honest copy lands, asked once and never again.
 
 #![allow(
     clippy::cast_precision_loss,
