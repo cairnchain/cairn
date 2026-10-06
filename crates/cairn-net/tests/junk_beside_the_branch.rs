@@ -175,8 +175,27 @@ impl Flood {
                 counted.fetch_add(1, Ordering::SeqCst);
             }
             // Held open, so a node that keeps reading has nothing to hang up
-            // on but what was sent.
-            thread::sleep(PATIENCE);
+            // on but what was sent, and read, because every block can fit in
+            // the socket's buffers before the node judges the first: then no
+            // write fails, and the hang up shows only as the end of the stream.
+            let _ = stream.set_read_timeout(Some(PATIENCE));
+            let mut scratch = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stream, &mut scratch) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        return
+                    }
+                    Err(_) => break,
+                }
+            }
+            noticed.store(true, Ordering::SeqCst);
         });
         Self { sent, hung_up }
     }
@@ -238,11 +257,9 @@ fn a_node_flooded_with_junk_beside_its_branch_still_takes_a_heavier_branch_met_a
         held, 0,
         "junk claiming less than its parent demands was held"
     );
-    assert!(
-        flood.hung_up.load(Ordering::SeqCst),
-        "the sender of junk claiming less than its parent demands was left connected, \
-         having written {} blocks",
-        flood.sent.load(Ordering::SeqCst)
+    wait_for(
+        "the sender of junk claiming less than its parent demands to be hung up on",
+        || flood.hung_up.load(Ordering::SeqCst),
     );
     victim.shutdown();
     for node in &peers {
