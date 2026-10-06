@@ -25,14 +25,17 @@
 //! so that half is measured on the chooser itself with a clock it is handed,
 //! as `tests/audit_owed_a_turn.rs` measures it.
 //!
-//! **The second half does not hold.** The pause doubles up to `MAX_HELD_OFF`,
-//! half an hour, and stops there. A stranger whose addresses take longer than
-//! that to go round once, at one answering window each, finds the first of
-//! them out of its pause by the time the last has failed, and goes round
+//! **The second half did not hold.** The pause doubled up to `MAX_HELD_OFF`,
+//! half an hour, and stopped there. A stranger whose addresses took longer
+//! than that to go round once, at one answering window each, found the first
+//! of them out of its pause by the time the last had failed, and went round
 //! again for ever without a fresh address. Measured below with no more
 //! connections than a node takes from outside: twenty addresses dialling back
 //! cost a newcomer thirty five minutes, and from sixty two the honest peer
-//! standing there the whole time is never asked at all.
+//! standing there the whole time was never asked at all. An address that has
+//! failed more than once now also waits a turn for every address on the list,
+//! and sixty two cost two hours fifty five minutes: see
+//! `choosing::Chooser::pause_for`, which says what still bounds the wait.
 
 #![allow(
     clippy::unwrap_used,
@@ -502,35 +505,34 @@ fn against_reused_addresses(hosts: u64, dial_back: bool, watch: u64) -> (Option<
     (None, asked_honest)
 }
 
-/// **Reusing addresses buys a stranger turns for ever once it has enough of
+/// **Reusing addresses bought a stranger turns for ever once it had enough of
 /// them to outlast the longest pause.**
 ///
-/// `choosing::held_off_for` says the doubling makes "a turn now cost a
+/// `choosing::held_off_for` said the doubling made "a turn now cost a
 /// stranger an address it has not already spent", and
 /// `reusing_a_handful_of_addresses_does_not_buy_turns_for_ever` holds it for
 /// up to twenty three addresses. The doubling stops at `MAX_HELD_OFF`. Once
-/// one round of the stranger's addresses, at one answering window each, takes
-/// longer than half an hour, the first address is out of its pause before the
-/// last has failed, and the round starts again with nothing new spent.
+/// one round of the stranger's addresses, at one answering window each, took
+/// longer than half an hour, the first address was out of its pause before
+/// the last had failed, and the round started again with nothing new spent.
 ///
 /// The honest peer is there from the start with a chain it can show. Sixty
 /// two addresses, reused and never fresh, and never more than forty connected
-/// at once, keep it from being asked for two days of the newcomer's clock,
-/// which is the same as for ever: every pause has reached its ceiling within
-/// the first few rounds, and from there each round is the one before it.
+/// at once, kept it from being asked for two days of the newcomer's clock,
+/// which is the same as for ever: every pause had reached its ceiling within
+/// the first few rounds, and from there each round was the one before it.
 /// Sixty one cost four hours fifty two minutes. The catalogue's arrangement,
 /// twenty strangers that claim once each, costs ten minutes against its
 /// fifteen; the same twenty dialling back as their pauses end cost thirty five.
 ///
-/// The smallest repair found ties the ceiling to the round: an address past
-/// its first failure waits at least one answering window for every address
-/// on the list, so none is back before all the others have had their turn.
-/// Tried while writing this and not kept: sixty two addresses then cost two
-/// hours fifty five minutes and the wait ends, and every chooser test in the
-/// crate still passes. Ranking a claim from an address that failed behind
-/// the rest also ends it, and breaks `tests/shared_address_claims.rs`, which
-/// holds on purpose that a neighbour's claim past its pause is judged on its
-/// work.
+/// The repair ties the pause to the round: an address past its first failure
+/// waits at least one turn for every address on the list, so none is back
+/// before all the others have had their turn. Measured with it: sixty two
+/// addresses cost two hours fifty five minutes and the wait ends, sixty one
+/// two hours fifty two, and the same twenty dialling back thirty two minutes.
+/// Ranking a claim from an address that failed behind the rest also ends it,
+/// and breaks `tests/shared_address_claims.rs`, which holds on purpose that a
+/// neighbour's claim past its pause is judged on its work.
 #[test]
 fn reused_addresses_do_not_keep_a_newcomer_off_the_honest_chain_for_ever() {
     let watch = 2 * 24 * 3_600;

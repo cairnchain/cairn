@@ -98,8 +98,8 @@ const OWED_PATIENCE: u64 = PROVEN_PATIENCE.saturating_add(FIRST_ANSWER_PATIENCE)
 /// anything has been proved at all. The clock in both terms starts at the first
 /// showing, so a node that nobody has yet shown a chain to is outside this, and
 /// how long a stranger can keep it there is bounded by what turns cost rather
-/// than by any number here. That is [`held_off_for`]'s side of the argument,
-/// and the same test file measures it. Being held there is a node with no
+/// than by any number here. That is [`Chooser::pause_for`]'s side of the
+/// argument, and the same test file measures it. Being held there is a node with no
 /// chain, which is loud; being held off one it has proved is a node that has
 /// the answer and will not use it, which is not.
 ///
@@ -118,8 +118,8 @@ pub const HELD_OFF_AT_MOST: u64 = OWED_PATIENCE.saturating_add(ATTEMPT_PATIENCE)
 /// broken peer every round would be a tight loop of nothing.
 const RETRY_PAUSE: u64 = 30;
 
-/// The longest an address is left alone between turns, however often its claims
-/// have failed.
+/// The longest the doubling in [`held_off_for`] leaves an address alone,
+/// however often its claims have failed.
 ///
 /// A pause that grew without a ceiling would be the defect this pause replaced
 /// wearing a slower fuse: a per-address memory that shut out whoever shared an
@@ -128,13 +128,22 @@ const RETRY_PAUSE: u64 = 30;
 /// to dials, and `tests/audit_owed_a_turn.rs` measures the worst case it buys
 /// against the worst case it costs.
 ///
-/// What keeps the ceiling affordable is that a pause is never the end of the
+/// It is not the longest pause there is. An address that has failed more than
+/// once also waits out a round of every address on the list, which grows with
+/// what the stranger has spent rather than with time: see
+/// [`Chooser::pause_for`].
+///
+/// What keeps the pause affordable is that a pause is never the end of the
 /// road. [`Chooser::last_resort`] ignores it and reads from the heaviest claim
 /// there is, inside [`RETRY_PAUSE`], so the only peer a node can see is asked
 /// whatever its address has done. What the pause costs is the handover, not the
 /// chain, and that is the trade it exists to make: a handover is taken on the
 /// strength of the claim behind it, and a read is checked block by block.
 const MAX_HELD_OFF: u64 = 1_800;
+
+/// Seconds one turn takes a claim nobody shows: its answering window, and the
+/// round of upkeep in which the next turn is handed out.
+const TURN: u64 = FIRST_ANSWER_PATIENCE.saturating_add(1);
 
 /// How long an address is left alone after `failures` claims of its went
 /// unshown.
@@ -148,8 +157,16 @@ const MAX_HELD_OFF: u64 = 1_800;
 /// Doubling twice per further failure is the shape [`crate::book`] already uses
 /// against addresses that will not answer a dial, and it says the same thing
 /// here: one failure is a bad minute, and a run of them is an address that is
-/// not going to show a chain. A turn now costs a stranger an address it has not
-/// already spent, which is the cost this module has always said a turn has.
+/// not going to show a chain.
+///
+/// This said that a turn now cost a stranger an address it had not already
+/// spent. It did not, because the doubling stops at [`MAX_HELD_OFF`]: once a
+/// stranger's addresses take longer than that to go round once, at one
+/// answering window each, the first is out of its pause before the last has
+/// failed. Sixty two addresses, reused and never fresh, kept a newcomer off an
+/// honest chain standing beside them for two days of its clock, and the
+/// honest peer was never asked. What closes that is [`Chooser::pause_for`],
+/// which reads this and stretches it to a round of every address on the list.
 fn held_off_for(failures: u32) -> u64 {
     let steps = failures.saturating_sub(1).saturating_mul(2);
     RETRY_PAUSE
@@ -278,7 +295,8 @@ pub struct Chooser {
     ///
     /// When each last failed, and how many times, because what the pause after
     /// one costs has to grow with how often an address has spent one: see
-    /// [`held_off_for`].
+    /// [`held_off_for`], and with how many addresses are on it: see
+    /// [`Self::pause_for`].
     unbacked_hosts: HashMap<IpAddr, Unshown>,
     /// When the first claim long enough to be final arrived, while there is
     /// still one to settle. Without one there is no choice to make: a short
@@ -651,7 +669,8 @@ impl Chooser {
         });
         // A paused claim is never the end of the road: [`Self::last_resort`]
         // ignores the pause and reads from the heaviest claim there is, which
-        // is what makes it affordable for [`MAX_HELD_OFF`] to be half an hour.
+        // is what makes it affordable for a pause to run half an hour, or a
+        // whole round of [`Self::pause_for`].
         // Reading rather than a handover, deliberately: a handover is taken on
         // the strength of the claim behind it, and a read is checked block by
         // block as it arrives.
@@ -812,7 +831,50 @@ impl Chooser {
         };
         self.unbacked_hosts
             .get(&host)
-            .is_some_and(|spent| now < spent.at.saturating_add(held_off_for(spent.failures)))
+            .is_some_and(|spent| now < spent.at.saturating_add(self.pause_for(spent.failures)))
+    }
+
+    /// How long an address is left alone after `failures` claims of its went
+    /// unshown: [`held_off_for`], and past the first failure at least one turn
+    /// for every address on the list.
+    ///
+    /// The doubling alone stops at [`MAX_HELD_OFF`], so a stranger with enough
+    /// addresses to outlast it went round them for ever: the first was out of
+    /// its pause before the last had failed, and the honest peer standing
+    /// beside them was never the heaviest claim left. With a turn for every
+    /// address on the list, none of them is back before every other one has
+    /// had its turn, so each round of the stranger's leaves a gap, and the
+    /// honest peer is asked in it. Measured on the chooser: sixty two
+    /// addresses, which held a newcomer off for two days and counting, now
+    /// cost it two hours fifty five minutes.
+    ///
+    /// The first failure keeps its own pause. One failure is a bad minute,
+    /// and an honest neighbour behind the same gateway as a stranger, or a
+    /// peer whose one answer was lost, is not made to wait out every address
+    /// a stranger has spent.
+    ///
+    /// What still bounds the wait is how many addresses the stranger has, as
+    /// [`crate::book::machine_of`] counts them: one per IPv4 address and one
+    /// per IPv6 /64, and /64s are cheap, a /48 holding sixty five thousand of
+    /// them. The wait grows faster than the addresses do. A turn takes its
+    /// window and the round is a second longer, so the addresses coming back
+    /// leave about a second a turn free, and every fresh address takes its
+    /// first two turns out of that. Measured against a stranger that knows
+    /// this rule and dials each address back the second its pause is over: a
+    /// hundred addresses cost seven and a half hours, four hundred two and a
+    /// half days, a thousand eight days. Past [`MAX_UNBACKED_HOSTS`] the
+    /// oldest entry is forgotten, and an address nothing remembers is fresh
+    /// again: eleven hundred went sixty days without the honest peer being
+    /// asked once, and nothing here bounds that.
+    fn pause_for(&self, failures: u32) -> u64 {
+        let pause = held_off_for(failures);
+        if failures < 2 {
+            return pause;
+        }
+        let round = u64::try_from(self.unbacked_hosts.len())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(TURN);
+        pause.max(round)
     }
 
     fn pick(&self, ceiling: Option<(u128, u64)>, now: u64) -> Option<(u64, Approach)> {
@@ -1849,6 +1911,98 @@ mod tests {
             Step::Ask(2, Approach::Join),
             "the pause ran a second past its end"
         );
+    }
+
+    /// A chooser with `listed` addresses on its list, each failed once at
+    /// 100, and a claim standing from the last of them as peer `listed`.
+    fn with_failed(listed: u8) -> Chooser {
+        let mut chooser = Chooser::new();
+        for last in 1..=listed {
+            chooser.noted(u64::from(last), Some(host(last)), 900, LONG, true, 100);
+            chooser.failed(u64::from(last), 100);
+        }
+        chooser.noted(u64::from(listed), Some(host(listed)), 900, LONG, true, 101);
+        chooser
+    }
+
+    fn holds_off_peer(chooser: &Chooser, peer: u64, now: u64) -> bool {
+        chooser
+            .claims
+            .get(&peer)
+            .is_some_and(|claim| chooser.held_off(claim, now))
+    }
+
+    /// An address that has failed twice waits a turn for every address on
+    /// the list, so none is back before every other one has had its turn.
+    ///
+    /// The doubling alone stopped at [`MAX_HELD_OFF`], so sixty two addresses
+    /// at one answering window each went round for ever and the honest peer
+    /// beside them was never asked: see `tests/claims_nobody_shows.rs`. Ten
+    /// addresses here make a round of three hundred and ten seconds, which is
+    /// longer than the doubling's two minutes, so the round is what decides.
+    #[test]
+    fn an_address_that_failed_twice_waits_a_turn_for_every_address_on_the_list() {
+        let mut chooser = with_failed(10);
+        chooser.failed(10, 200);
+        chooser.noted(11, Some(host(10)), 900, LONG, true, 201);
+        let round = 10 * TURN;
+        assert!(
+            round > held_off_for(2),
+            "the fixture: the round is longer than the doubling"
+        );
+        assert!(
+            holds_off_peer(&chooser, 11, 200 + round - 1),
+            "an address that failed twice was back before every address on the list had \
+             had a turn"
+        );
+        assert!(
+            !holds_off_peer(&chooser, 11, 200 + round),
+            "an address that failed twice was kept past its round"
+        );
+    }
+
+    /// One failure is paused for [`RETRY_PAUSE`] however many addresses are
+    /// on the list.
+    ///
+    /// The round is for an address that keeps failing. An honest neighbour
+    /// behind a stranger's gateway, or a peer whose one answer was lost, is
+    /// not made to wait out every address a stranger has spent, and
+    /// `tests/shared_address_claims.rs` holds the neighbour to its thirty
+    /// seconds.
+    #[test]
+    fn one_failure_waits_its_own_pause_however_long_the_list() {
+        let chooser = with_failed(10);
+        assert!(
+            holds_off_peer(&chooser, 10, 100 + RETRY_PAUSE - 1),
+            "the fixture: one failure pauses the address"
+        );
+        assert!(
+            !holds_off_peer(&chooser, 10, 100 + RETRY_PAUSE),
+            "an address that failed once waited out a round of the whole list"
+        );
+    }
+
+    /// Where the doubling is the longer of the two, the doubling decides.
+    ///
+    /// Two addresses make a round of a minute, and a third failure earns
+    /// eight. Taking the round instead would hand a stranger with a handful
+    /// of addresses back the turn the doubling exists to take from it.
+    #[test]
+    fn the_doubling_decides_when_it_is_the_longer() {
+        let mut chooser = with_failed(2);
+        chooser.failed(2, 200);
+        chooser.noted(3, Some(host(2)), 900, LONG, true, 201);
+        chooser.failed(3, 300);
+        chooser.noted(4, Some(host(2)), 900, LONG, true, 301);
+        assert!(
+            held_off_for(3) > 2 * TURN,
+            "the fixture: the doubling is longer than the round"
+        );
+        assert!(
+            holds_off_peer(&chooser, 4, 300 + held_off_for(3) - 1),
+            "a third failure was paused for the round rather than for the doubling"
+        );
+        assert!(!holds_off_peer(&chooser, 4, 300 + held_off_for(3)));
     }
 
     /// A peer claiming exactly what the chain carries is not nudged.
