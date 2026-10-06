@@ -48,7 +48,7 @@ use cairn_ledger::pow::median_time_past;
 use cairn_ledger::transaction::CoinbaseTransaction;
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
-use cairn_net::node::TARGET_PEERS;
+use cairn_net::node::{TurnedAway, TARGET_PEERS};
 use cairn_net::Node;
 use cairn_primitives::Hash32;
 
@@ -88,8 +88,8 @@ fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
 }
 
-fn key(seed: u8) -> PublicKey {
-    SecretKey::from_bytes(&[seed; 32]).public_key()
+fn key(seed: usize) -> PublicKey {
+    SecretKey::from_bytes(&[u8::try_from(seed).unwrap(); 32]).public_key()
 }
 
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
@@ -215,7 +215,7 @@ fn clocks_five_minutes_out_either_way_inside_the_drift_follow_one_chain() {
         said, [false; 4],
         "a clock inside the drift was said to be out"
     );
-    assert!(turned_away.iter().all(|one| *one == Default::default()));
+    assert!(turned_away.iter().all(|one| *one == TurnedAway::default()));
 }
 
 /// **A node a little more than the drift behind refuses the network's blocks,
@@ -249,7 +249,7 @@ fn a_node_just_past_the_drift_behind_waits_and_takes_the_blocks_once_its_clock_a
     let before = tip(&slow);
 
     let mined: Vec<Block> = (0..SAID_AFTER)
-        .map(|at| mine_on(&right, AHEAD, &key(10 + at as u8)))
+        .map(|at| mine_on(&right, AHEAD, &key(10 + at)))
         .collect();
     let newest = mined.last().unwrap().clone();
     // The moment the newest of them is no longer past the slow node's drift,
@@ -287,7 +287,7 @@ fn a_node_just_past_the_drift_behind_waits_and_takes_the_blocks_once_its_clock_a
         kept.0, 2,
         "the slow node let go of a peer for its own clock"
     );
-    assert_eq!(kept.1, Default::default());
+    assert_eq!(kept.1, TurnedAway::default());
     assert!(
         taken <= allowed + BLOCK,
         "the slow node took the blocks {} seconds after its clock allowed them, more than a \
@@ -341,7 +341,7 @@ fn a_miner_more_than_the_drift_fast_mines_blocks_only_fast_clocks_keep() {
             || tip(&hour) == Some(found.id()),
         );
         let honest: Vec<Block> = (0..2)
-            .map(|_| mine_on(&right, 0, &key(31 + round as u8)))
+            .map(|_| mine_on(&right, 0, &key(31 + round)))
             .collect();
         let newest = honest[1].id();
         wait_for("every node to stand on the honest branch", || {
@@ -382,7 +382,7 @@ fn a_miner_more_than_the_drift_fast_mines_blocks_only_fast_clocks_keep() {
     );
     assert_eq!(fast_said, (None, None));
     assert!(
-        turned_away.iter().all(|one| *one == Default::default()),
+        turned_away.iter().all(|one| *one == TurnedAway::default()),
         "somebody was turned away over a clock: {turned_away:?}"
     );
     assert_eq!(kept, (3, 3), "a peer was let go of over a clock");
@@ -428,7 +428,7 @@ fn a_node_an_hour_behind_refuses_says_so_and_catches_up_once_its_clock_is_set() 
     });
 
     let mined: Vec<Block> = (0..3)
-        .map(|at| mine_on(&network[0], HOUR, &key(40 + at as u8)))
+        .map(|at| mine_on(&network[0], HOUR, &key(40 + at)))
         .collect();
     let newest = mined.last().unwrap().id();
     wait_for("the network to take them", || {
@@ -481,7 +481,7 @@ fn a_node_an_hour_behind_refuses_says_so_and_catches_up_once_its_clock_is_set() 
         behind.2, TARGET_PEERS,
         "the slow node let go of a peer for its own clock"
     );
-    assert_eq!(behind.3, Default::default());
+    assert_eq!(behind.3, TurnedAway::default());
     assert!(
         behind.4,
         "a node on the network's time followed the slow node's blocks"
@@ -542,7 +542,7 @@ fn a_node_an_hour_behind_with_three_peers_says_its_clock_looks_behind() {
 
     let mut newest = None;
     for at in 0..SAID_AFTER {
-        newest = Some(mine_on(&network[0], HOUR, &key(60 + at as u8)).id());
+        newest = Some(mine_on(&network[0], HOUR, &key(60 + at)).id());
     }
     wait_for("the network to take them", || {
         network.iter().all(|node| tip(node) == newest)

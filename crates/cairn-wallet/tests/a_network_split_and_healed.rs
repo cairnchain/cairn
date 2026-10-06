@@ -279,53 +279,53 @@ fn received(wallet: &Wallet, id: &Hash32) -> usize {
 /// **A split shorter than the undo limit heals onto the heavier half, and
 /// what the lighter half carried is put back where it can still be.**
 ///
-/// Two nodes and a miner on each side, a payer and a payee on the lighter
-/// side. The lighter half carries two payments to the payee: one from the
-/// payer's wallet, out of a note the heavier half never touched, and one from
+/// Two nodes and a miner on each side, a buyer and a merchant on the lighter
+/// side. The lighter half carries two payments to the merchant: one from the
+/// buyer's wallet, out of a note the heavier half never touched, and one from
 /// a third key whose note the heavier half spends elsewhere. Ten blocks
 /// against six, under an undo limit of twelve.
 #[test]
 fn a_split_shorter_than_the_undo_limit_heals_onto_the_heavier_half() {
     let directory = scratch("short");
-    let payer_key = key(1);
-    let payee_key = key(2);
+    let buyer_key = key(1);
+    let merchant_key = key(2);
     let spender = key(3);
     let elsewhere = key(4).public_key();
     let miner_a = key(5).public_key();
     let miner_b = key(6).public_key();
 
-    // The payer is paid by the first shared block and the spender by the
+    // The buyer is paid by the first shared block and the spender by the
     // second.
-    let (shared, _) = shared(&[payer_key.public_key(), spender.public_key()]);
+    let (shared, _) = shared(&[buyer_key.public_key(), spender.public_key()]);
     let a1 = Node::bind(params(), v4()).unwrap();
     let a2 = Node::bind(params(), v4()).unwrap();
     let b1 = Node::bind(params(), v4()).unwrap();
     let b2 = Node::bind(params(), v4()).unwrap();
-    let payer = opened(&directory, "payer", &payer_key);
-    let payee = opened(&directory, "payee", &payee_key);
-    for node in [&a1, &a2, &b1, &b2, payer.node(), payee.node()] {
+    let buyer = opened(&directory, "buyer", &buyer_key);
+    let merchant = opened(&directory, "merchant", &merchant_key);
+    for node in [&a1, &a2, &b1, &b2, buyer.node(), merchant.node()] {
         for block in &shared {
             node.submit_block(block.clone()).unwrap();
         }
     }
     a2.connect(a1.address()).unwrap();
     b2.connect(b1.address()).unwrap();
-    payer.node().connect(b1.address()).unwrap();
-    payee.node().connect(b1.address()).unwrap();
+    buyer.node().connect(b1.address()).unwrap();
+    merchant.node().connect(b1.address()).unwrap();
     wait_for("each half to be connected", || {
         a1.peers_introduced() >= 1 && b1.peers_introduced() >= 3
     });
 
-    // The lighter half. The payer's own wallet pays ten, and the spender
+    // The lighter half. The buyer's own wallet pays ten, and the spender
     // seven out of a note the heavier half will spend on something else.
-    let sent = payer
-        .send(payee_key.public_key(), cairn("10"), fee())
+    let sent = buyer
+        .send(merchant_key.public_key(), cairn("10"), fee())
         .unwrap();
-    let doomed = pay(&spender, &shared[1], &payee_key.public_key(), cairn("7"));
+    let doomed = pay(&spender, &shared[1], &merchant_key.public_key(), cairn("7"));
     let contradiction = pay(&spender, &shared[1], &elsewhere, cairn("7"));
     assert!(b1.submit_transaction(doomed.clone()).unwrap());
     wait_for(
-        "the payer's payment to reach the lighter half's miner",
+        "the buyer's payment to reach the lighter half's miner",
         || pooled(&b1, &sent.id),
     );
     let carrying = mine_on(&b1, &miner_b);
@@ -341,7 +341,7 @@ fn a_split_shorter_than_the_undo_limit_heals_onto_the_heavier_half() {
     let lighter_tip = lighter.last().unwrap().id();
     all_on(
         "the lighter half to follow its miner",
-        &[&b1, &b2, payer.node(), payee.node()],
+        &[&b1, &b2, buyer.node(), merchant.node()],
         lighter_tip,
     );
 
@@ -367,20 +367,20 @@ fn a_split_shorter_than_the_undo_limit_heals_onto_the_heavier_half() {
 
     // Before: what both wallets read on the lighter half, as a face redrawing
     // itself would have read it.
-    assert!(payer
+    assert!(buyer
         .history()
         .iter()
         .any(|m| m.id == sent.id && m.direction == Direction::Sent));
-    assert!(payer.waiting().iter().all(|one| one.id != sent.id));
-    assert_eq!(received(&payee, &sent.id), 1);
-    assert_eq!(received(&payee, &doomed.id()), 1);
-    assert_eq!(payee.holdings().total(), cairn("17"));
+    assert!(buyer.waiting().iter().all(|one| one.id != sent.id));
+    assert_eq!(received(&merchant, &sent.id), 1);
+    assert_eq!(received(&merchant, &doomed.id()), 1);
+    assert_eq!(merchant.holdings().total(), cairn("17"));
 
     // The cut ends. One link each way across it, and no block mined until
     // every node agrees.
     b1.connect(a1.address()).unwrap();
     a2.connect(b2.address()).unwrap();
-    let everyone = [&a1, &a2, &b1, &b2, payer.node(), payee.node()];
+    let everyone = [&a1, &a2, &b1, &b2, buyer.node(), merchant.node()];
     all_on(
         "every node to take the heavier half with no further block",
         &everyone,
@@ -392,10 +392,10 @@ fn a_split_shorter_than_the_undo_limit_heals_onto_the_heavier_half() {
         "every node is on the same tip and not on the same ledger: {roots:?}"
     );
 
-    // The payer's payment spends a note the heavier half never touched, so
+    // The buyer's payment spends a note the heavier half never touched, so
     // every node that undid it holds it again. The spender's payment to the
-    // payee spends a note the heavier half has spent, so no node holds it.
-    for node in [&b1, &b2, payer.node(), payee.node()] {
+    // merchant spends a note the heavier half has spent, so no node holds it.
+    for node in [&b1, &b2, buyer.node(), merchant.node()] {
         assert!(
             pooled(node, &sent.id),
             "a payment still valid on the heavier half is not back in the pool of a node \
@@ -409,11 +409,11 @@ fn a_split_shorter_than_the_undo_limit_heals_onto_the_heavier_half() {
         );
     }
 
-    // What each wallet says. The payee was paid by neither payment now, and
+    // What each wallet says. The merchant was paid by neither payment now, and
     // is told both were taken back and that the money is not in its balance.
-    assert_eq!(received(&payee, &sent.id), 0);
-    assert_eq!(received(&payee, &doomed.id()), 0);
-    let undone = payee.undone();
+    assert_eq!(received(&merchant, &sent.id), 0);
+    assert_eq!(received(&merchant, &doomed.id()), 0);
+    let undone = merchant.undone();
     for id in [sent.id, doomed.id()] {
         assert_eq!(
             undone
@@ -424,35 +424,35 @@ fn a_split_shorter_than_the_undo_limit_heals_onto_the_heavier_half() {
             "a payment in the chain took back is not listed once as taken back"
         );
     }
-    let said = cairn_wallet::undone_note(&undone, &payee.waiting()).unwrap();
+    let said = cairn_wallet::undone_note(&undone, &merchant.waiting()).unwrap();
     assert!(
         said.contains("not in the balance any more"),
-        "the payee is not told the money left its balance: {said}"
+        "the merchant is not told the money left its balance: {said}"
     );
     assert_eq!(
-        payee.holdings().total(),
+        merchant.holdings().total(),
         Amount::ZERO,
-        "the payee's balance still counts a payment the chain no longer carries"
+        "the merchant's balance still counts a payment the chain no longer carries"
     );
-    assert_eq!(payee.progress().warning(), None);
+    assert_eq!(merchant.progress().warning(), None);
 
-    // The payer's payment is waiting for a block again, with its notes held,
-    // and the payer is told so rather than that it went through.
-    let waiting = payer.waiting();
+    // The buyer's payment is waiting for a block again, with its notes held,
+    // and the buyer is told so rather than that it went through.
+    let waiting = buyer.waiting();
     assert!(
         waiting.iter().any(|one| one.id == sent.id && one.pooled),
-        "the payer's undone payment is not waiting for a block again"
+        "the buyer's undone payment is not waiting for a block again"
     );
-    let said = cairn_wallet::undone_note(&payer.undone(), &waiting).unwrap();
+    let said = cairn_wallet::undone_note(&buyer.undone(), &waiting).unwrap();
     assert!(
         said.contains("waiting again"),
-        "the payer is not told its payment is waiting again: {said}"
+        "the buyer is not told its payment is waiting again: {said}"
     );
-    let held = payer.holdings();
+    let held = buyer.holdings();
     assert_eq!(
         held.total(),
         shared[0].coinbase.created_notes()[0].1.value,
-        "the payer's money is not all there, held or spendable, while its payment waits"
+        "the buyer's money is not all there, held or spendable, while its payment waits"
     );
 
     // The next block, found by the miner of what was the lighter half, which
@@ -465,32 +465,32 @@ fn a_split_shorter_than_the_undo_limit_heals_onto_the_heavier_half() {
     all_on("every node to take the next block", &everyone, again.id());
 
     // Counted once, by both of them.
-    assert_eq!(received(&payee, &sent.id), 1);
-    assert_eq!(received(&payee, &doomed.id()), 0);
-    let undone = payee.undone();
+    assert_eq!(received(&merchant, &sent.id), 1);
+    assert_eq!(received(&merchant, &doomed.id()), 0);
+    let undone = merchant.undone();
     assert!(
         !undone.iter().any(|m| m.id == sent.id),
         "a payment carried again is still listed as taken back"
     );
     assert!(undone.iter().any(|m| m.id == doomed.id()));
     assert_eq!(
-        payee.holdings().total(),
+        merchant.holdings().total(),
         cairn("10"),
-        "the payee's balance does not count the payment carried again exactly once"
+        "the merchant's balance does not count the payment carried again exactly once"
     );
-    assert!(payer.waiting().iter().all(|one| one.id != sent.id));
+    assert!(buyer.waiting().iter().all(|one| one.id != sent.id));
     assert_eq!(
-        payer
+        buyer
             .history()
             .iter()
             .filter(|m| m.id == sent.id && m.direction == Direction::Sent)
             .count(),
         1
     );
-    assert!(!payer.undone().iter().any(|m| m.id == sent.id));
+    assert!(!buyer.undone().iter().any(|m| m.id == sent.id));
 
-    payer.shutdown();
-    payee.shutdown();
+    buyer.shutdown();
+    merchant.shutdown();
     for node in [&a1, &a2, &b1, &b2] {
         node.shutdown();
     }
