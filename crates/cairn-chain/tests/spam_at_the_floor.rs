@@ -36,6 +36,9 @@
 //! nobody: a payment at its floor ranks above the place buyer's own floor,
 //! and its place comes out of the spammer's. Testnet's 1 008 places would
 //! burn 6 048 000 pebbles a block, 3.6 CAIRN an hour.
+//!
+//! What a wallet pays when nobody names a fee, and whether that goes through,
+//! is the wallet's half: `cairn-wallet/tests/spam_at_the_floor_and_stale_proofs.rs`.
 
 #![allow(
     clippy::unwrap_used,
