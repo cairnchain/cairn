@@ -17,10 +17,11 @@
 //! a branch forking deeper than a node will undo: a node already following
 //! refuses it "and says the branch is out of reach rather than hiding it", and
 //! "a newcomer weighs the branch and takes it for the heavier". The nodes hold
-//! the first half. Two tests below do not hold and are kept failing on
-//! purpose until the code is changed: a wallet left on the lighter half says
-//! nothing, and a newcomer on a network burying below a thousand and twenty
-//! four takes whichever half answers first.
+//! the first half. Two tests below did not hold when they were written: a
+//! wallet left on the lighter half said nothing, and a newcomer on a network
+//! burying below a thousand and twenty four took whichever half answered
+//! first. The wallet says so now; the newcomer is kept failing on purpose
+//! until the code is changed.
 
 #![allow(
     clippy::unwrap_used,
@@ -568,11 +569,12 @@ fn a_split_longer_than_the_undo_limit_is_refused_and_said_by_the_lighter_half() 
 /// fourteen rewards that the heavier half, every newcomer and every node that
 /// was away do not have.
 ///
-/// A gap, kept failing on purpose: `Progress` carries nothing of
-/// `Node::out_of_reach`, so `Progress::warning` has nothing to say, and both
-/// faces show the lighter half's balance as the wallet's money with no line
-/// beside it. Each of the other states in which a wallet reads a chain the
-/// network has left, a slow clock and a build too old, has its line.
+/// It was a gap: `Progress` carried nothing of `Node::out_of_reach`, so
+/// `Progress::warning` had nothing to say, and both faces showed the lighter
+/// half's balance as the wallet's money with no line beside it, while each of
+/// the other states in which a wallet reads a chain the network has left, a
+/// slow clock and a build too old, had its line. `Progress::out_of_reach`
+/// carries the count now, and the line ranks below the slow clock's.
 #[test]
 fn a_wallet_on_the_half_the_network_left_says_so_beside_the_balance() {
     let directory = scratch("left-behind");

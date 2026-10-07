@@ -872,6 +872,16 @@ pub struct Progress {
     /// owner never arrive. `cairnd` has named this since the node learned to
     /// count it, and the wallet, where the balance is read, did not.
     pub clock_behind: Option<Behind>,
+    /// Blocks the node was offered from a chain it cannot switch to, once
+    /// they came from two machines or more within the hour, and nought
+    /// otherwise: `Node::out_of_reach`.
+    ///
+    /// A wallet left on the half of a split the network moved away from,
+    /// deeper than its node will undo, reads that half as it would any chain:
+    /// a height, and a balance counting what that half paid, which no node on
+    /// the other half holds. `cairnd` says so beside its status, and the
+    /// wallet, where the balance is read, did not.
+    pub out_of_reach: u64,
     /// When this wallet's network opens, while that is still ahead of this
     /// machine's clock and there is no chain to read a balance from.
     ///
@@ -938,6 +948,28 @@ fn clock_is_slow(behind: &Behind) -> String {
          into a block, so this is a reason to look at the clock rather than a verdict. \
          Nothing is lost and the key file is not touched.",
         behind.blocks, behind.peers, behind.seconds, behind.drift,
+    )
+}
+
+/// The line for a wallet whose node keeps being offered `blocks` blocks from
+/// a chain it cannot switch to.
+///
+/// Circumstantial, as `cairnd`'s line for the same count is: two machines can
+/// be one party. What it cannot be is quiet, since the balance beside it may
+/// be money only the half of a split this wallet is on ever paid.
+fn on_a_branch_left_behind(blocks: u64) -> String {
+    format!(
+        "{blocks} blocks arrived, from at least two machines within the last hour, from a \
+         chain this wallet cannot switch to: it parts from the chain this wallet follows \
+         further back than its node will undo. If they keep coming while the rest of the \
+         network is not heard from, this wallet is on a branch the network has left, and \
+         the balance beside this may count payments only that branch carried, which no \
+         node on the network's chain holds. Two machines can still be one party, so this \
+         is a reason to check before relying on money received lately rather than a \
+         verdict. The way onto the network's chain is to close this wallet, delete \
+         everything in its data directory except history.dat, which is its own account of \
+         this key, and start it again. The key file is a separate file and is not touched \
+         by that."
     )
 }
 
@@ -1078,8 +1110,9 @@ impl Progress {
     /// what the numbers beside it are worth. First the two that mean this
     /// wallet has stopped following the chain and will not start again. Then
     /// the one that means the number is not this wallet's own reading at all,
-    /// and then the one that means it is this wallet's reading of a chain the
-    /// network has left. Then the ones that mean the chain the number is
+    /// and then the two that mean it is this wallet's reading of a chain the
+    /// network has left, a slow clock first because it is mended now and a
+    /// branch out of reach second. Then the ones that mean the chain the number is
     /// counted from is sound and something else is at risk, the disk first
     /// because it can leave what is held back as stranded behind the chain,
     /// and last the three about this wallet's own account. Those can mean
@@ -1137,6 +1170,12 @@ impl Progress {
         // stands.
         if let Some(behind) = &self.clock_behind {
             return Some(clock_is_slow(behind));
+        }
+        // Beside the clock and for the same reason: the balance is this
+        // wallet's own reading of a chain the network may have left, and every
+        // line below this one would let it stand as the money.
+        if self.out_of_reach > 0 {
+            return Some(on_a_branch_left_behind(self.out_of_reach));
         }
         // Below the clock: blocks refused from peers say the network has
         // opened and this machine is behind it, which is the line to act on.
@@ -1899,6 +1938,7 @@ impl Wallet {
             unwritten: self.node.unwritten(),
             unread: self.node.unread(),
             clock_behind: self.node.clock_behind(),
+            out_of_reach: self.node.out_of_reach(),
             opening: self.node.opening(),
             unjudged: self.node.unjudged(),
             unweighable: self.node.unweighable(),
@@ -5300,6 +5340,7 @@ mod tests {
             unwritten: None,
             unread: None,
             clock_behind: None,
+            out_of_reach: 0,
             opening: None,
             unjudged: None,
             unweighable: None,
@@ -5873,6 +5914,68 @@ mod tests {
             said.contains("slow"),
             "blocks from peers ahead of the clock say the network opened and this \
              machine is behind it, and that is not what was said: {said}"
+        );
+    }
+
+    /// A wallet whose node keeps being offered blocks from a chain it cannot
+    /// switch to says so in numbers beside the balance, and how onto it.
+    ///
+    /// `Progress` carried nothing of `Node::out_of_reach`, so a wallet left on
+    /// the lighter half of a split deeper than its node will undo showed that
+    /// half's balance with no line beside it, while `cairnd` on the same node
+    /// said the network was elsewhere.
+    #[test]
+    fn a_wallet_on_a_branch_the_network_left_says_so_beside_the_balance() {
+        assert_eq!(healthy().warning(), None, "a healthy wallet said something");
+        let left = Progress {
+            out_of_reach: 14,
+            ..healthy()
+        };
+        let said = left.warning().expect("a person is told");
+        assert!(
+            said.contains("14 blocks arrived, from at least two machines"),
+            "the evidence is not said in numbers: {said}"
+        );
+        assert!(
+            said.contains("may count payments only that branch carried"),
+            "what it costs the person is not said: {said}"
+        );
+        assert!(
+            said.contains("delete everything in its data directory except history.dat"),
+            "the way onto the network's chain is not said: {said}"
+        );
+
+        // Below a slow clock, which is mended now, and above a full disk,
+        // whose line would let the balance stand as the money.
+        let and_slow = Progress {
+            clock_behind: Some(Behind {
+                seconds: 9_000,
+                drift: 7_200,
+                blocks: 8,
+                peers: 2,
+            }),
+            ..left.clone()
+        };
+        let said = and_slow.warning().expect("a person is told");
+        assert!(
+            said.contains("slow"),
+            "a slow clock was not said first: {said}"
+        );
+        let and_a_full_disk = Progress {
+            unwritten: Some(Unwritten {
+                what: Writing::Blocks,
+                because: "no space left on device".to_owned(),
+                reached: 1_200,
+                written_through: Some(900),
+                blocks: 300,
+                within_reach: true,
+            }),
+            ..left
+        };
+        let said = and_a_full_disk.warning().expect("a person is told");
+        assert!(
+            said.contains("cannot switch to"),
+            "a full disk hid a wallet on a branch the network left: {said}"
         );
     }
 
