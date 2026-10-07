@@ -5910,8 +5910,8 @@ impl Node {
             self.reach_for_an_archivist();
             reached = true;
         }
-        // Answers in when the node reached past the peers that gave them, so
-        // that what it reached for is waited on and not ended by those.
+        // How many had answered when the node last reached past them, so that
+        // answers it already had do not end the wait for what it reached.
         let mut answered_before = 0;
 
         let deadline = Instant::now().checked_add(patience);
