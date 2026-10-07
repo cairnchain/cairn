@@ -70,7 +70,8 @@ Network options
                        the network will carry, worked out from the transfer,
                        and a little over it so that a note of it falling out
                        of the hot set before a block carries it does not
-                       leave it paying too little
+                       leave it paying too little, and so that a miner earns
+                       more carrying it than carrying filler paid the least
   --fee-anyway         pay a fee out of all proportion to the amount. Without
                        this the wallet stops and asks, because a fee larger
                        than the payment is usually a decimal point in the
@@ -834,10 +835,11 @@ fn spend(arguments: &[String]) -> Result<(), String> {
         );
     }
     // Without one named, what the network asks for, with a margin for the
-    // floor moving before a block carries it. Nothing is not an option any
-    // more and defaulting to it would send transfers nobody carries; the floor
-    // exactly was a payment the pool let go of the block after one of its
-    // notes fell.
+    // floor moving before a block carries it, and enough to be carried ahead
+    // of filler paying the floor. Nothing is not an option any more and
+    // defaulting to it would send transfers nobody carries; the floor exactly
+    // was a payment the pool let go of the block after one of its notes fell,
+    // or, from notes already fallen, one that waited behind blocks kept full.
     let fee = asked.unwrap_or_else(|| wallet.fee_for(recipient, amount));
     // Refused before a fee is named for it, as the page's quote is. For money
     // this wallet does not have there is no transfer to price, and the line

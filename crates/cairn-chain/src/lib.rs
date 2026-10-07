@@ -158,6 +158,22 @@ pub const MIN_FEE_PER_WEIGHT: u64 = 10;
 /// without dividing pebbles away.
 const RATE_SCALE: u128 = 1 << 16;
 
+/// The rate a transfer taking no place ranks at when it pays exactly its
+/// floor: [`MIN_FEE_PER_WEIGHT`] in the fixed point the pool ranks by.
+///
+/// The best rate the floor buys. A transfer taking a place pays that place's
+/// burn on top, which no miner keeps, and the place adds [`NOTE_WEIGHT`] to
+/// what it is ranked against, so at its floor it ranks below this. One taking
+/// none, a hot note spent whole back to its owner, leaves its miner every
+/// pebble of its floor, which makes it the cheapest way to keep blocks full.
+///
+/// Read by the wallet, whose quote for a fee nobody names ranks above it. A
+/// payment spending only notes that have fallen out of the hot set frees no
+/// place, so its floor and margin ranked it below this, one fallen note with
+/// change at about a third of it, and it waited for as long as anybody paid
+/// the floor to keep blocks full.
+pub const FLOOR_RATE: u128 = (MIN_FEE_PER_WEIGHT as u128) * RATE_SCALE;
+
 /// The places a transfer takes in the hot set: its outputs less the notes it
 /// spends out of the hot set, or none when it gives room back.
 ///
@@ -3712,6 +3728,33 @@ mod tests {
                     "{fee} on a weight of {weight} is more than it takes to outrank {rate}"
                 );
             }
+        }
+    }
+
+    /// A transfer taking no place and paying exactly its floor ranks at
+    /// `FLOOR_RATE`, and one taking a place ranks below it at its floor.
+    ///
+    /// The wallet quotes past this rate when nobody names a fee, so that what
+    /// it sends is carried ahead of blocks kept full at the floor. A rate that
+    /// was not the filler's would make that quote either short of what it is
+    /// for or over it for nothing.
+    #[test]
+    fn a_transfer_taking_no_place_at_its_floor_ranks_at_the_floor_rate() {
+        let rules = ConsensusParams::testnet();
+        for bytes in [1usize, 150, 223, 467, 8_192] {
+            let filler = super::fee_floor(bytes, 0, &rules);
+            assert_eq!(
+                super::rate(filler, bytes),
+                super::FLOOR_RATE,
+                "a transfer of {bytes} bytes taking no place, at its floor of {filler}"
+            );
+            let floor = super::fee_floor(bytes, 1, &rules);
+            let kept = floor.checked_sub(rules.burn_for(1).unwrap()).unwrap();
+            assert!(
+                super::rate(kept, bytes + super::NOTE_WEIGHT) < super::FLOOR_RATE,
+                "a transfer of {bytes} bytes taking a place, at its floor of {floor}, \
+                 ranks with the filler"
+            );
         }
     }
 

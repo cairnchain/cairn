@@ -43,8 +43,30 @@
 //! gets through only because its one place's price, 6 000 pebbles, happens to
 //! be more than the 5 120 its place's weight is worth at ten a unit.
 //!
-//! The two failing tests here are R15's and R21's pass marks asked of the
-//! fee a wallet pays when nobody names one; they fail for the one reason.
+//! The two tests here that failed are R15's and R21's pass marks asked of
+//! the fee a wallet pays when nobody names one; they failed for the one
+//! reason.
+//!
+//! **What changed.** The quote is never less than the burn and what outranks
+//! a transfer taking no place at the floor, `cairn_chain::FLOOR_RATE`, so a
+//! miner keeps more a unit of weight carrying a payment than carrying any
+//! filler that pays the floor. On the same tier and block:
+//!
+//! ```text
+//! note     spam          spends beside   fee paid, pebbles      carried   handed back
+//! hot      every block   no              quote, 14 230          block 1   -
+//! fallen   every block   no              quote, 26 911          block 1   -
+//! fallen   three blocks  every block     floor, 16 670          block 4   3 of 3
+//! fallen   every block   every block     quote, 26 911          block 1   -
+//! fallen   every block   every block     twice floor, 33 340    block 1   -
+//! ```
+//!
+//! The fallen payment's miner now keeps 14 911 pebbles for its weight of
+//! 1 491, ten a unit and one pebble over. The hot payment's quote does not
+//! move: its margin already ranked it above the filler. Outbidding the
+//! lowest rate the next block would carry, whenever the pool holds more than
+//! a block, would answer a filler paying over the floor too; that is left
+//! for later, in `docs/cairn-open-questions.md`.
 
 #![allow(
     clippy::unwrap_used,

@@ -81,7 +81,8 @@ pub(crate) const HTML: &str = r#"<!doctype html>
         </div>
         <p class="note-line" id="quote">Leave the fee blank for the least the
           network will carry, and a little over it in case a note of it falls
-          out of the hot set before a block carries it.</p>
+          out of the hot set before a block carries it, or so that a miner
+          earns more carrying it than carrying filler paid the least.</p>
         <button id="go" type="submit">Send</button>
         <p class="said" id="said"></p>
       </form>
@@ -565,7 +566,8 @@ let quoting = 0;
 async function quote() {
   const mine = ++quoting;
   const blank = "Leave the fee blank for the least the network will carry, and a " +
-    "little over it in case a note of it falls out of the hot set before a block carries it.";
+    "little over it in case a note of it falls out of the hot set before a block carries it, " +
+    "or so that a miner earns more carrying it than carrying filler paid the least.";
   if ($("to").value.trim().length !== 64 || $("amount").value.trim() === "") {
     text("quote", blank);
     return;
