@@ -148,6 +148,14 @@ struct Known {
     /// Heard again on the first handshake of every connection, which costs
     /// nothing, and it is only ever used to decide who to ask first.
     archives: bool,
+    /// Whether this address once handed this node a path that folded, since
+    /// it started.
+    ///
+    /// Not written down, for the reason `archives` is not. What it is for is
+    /// telling an archivist from a peer that only says it is one: the claim is
+    /// a bit in a handshake and costs nothing, and a path that folds to this
+    /// node's own commitment costs keeping the whole cold set.
+    handed_a_path: bool,
 }
 
 impl Known {
@@ -818,20 +826,42 @@ impl AddressBook {
         }
     }
 
-    /// Addresses that said they keep the cold set, newest first.
+    /// Writes down that an address handed over a path that folded.
+    ///
+    /// Only for an address already in the book, as with what it keeps.
+    pub(crate) fn handed_over_a_path(&mut self, address: &SocketAddr) {
+        if let Some(known) = self.known.get_mut(address) {
+            known.handed_a_path = true;
+        }
+    }
+
+    /// Addresses that said they keep the cold set: the ones that once handed
+    /// over a path that folded first, then the rest, each newest first.
     ///
     /// For a wallet that needs a path rebuilt and is connected to nobody who
-    /// can rebuild one. Ordered by when each last spoke, because the one that
-    /// spoke most recently is the one most likely to answer a dial.
+    /// can rebuild one, or only to peers that said they could and did not.
+    /// Newest first because the one that spoke most recently is the one most
+    /// likely to answer a dial. That alone puts peers that only claim the
+    /// archive ahead of an archivist met earlier, since a stranger sending
+    /// claimers is the one who spoke last, and a node reaching for a few
+    /// addresses reached for its claimers. A claim is a bit in a handshake;
+    /// a path that folded took keeping the whole cold set, so an address that
+    /// once handed one over goes first however long ago it spoke.
     pub(crate) fn archivists(&self) -> Vec<SocketAddr> {
-        let mut found: Vec<(u64, SocketAddr)> = self
+        let mut found: Vec<(bool, u64, SocketAddr)> = self
             .known
             .iter()
             .filter(|(_, known)| known.archives)
-            .map(|(address, known)| (known.heard, *address))
+            .map(|(address, known)| (known.handed_a_path, known.heard, *address))
             .collect();
-        found.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-        found.into_iter().map(|(_, address)| address).collect()
+        found.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then(right.1.cmp(&left.1))
+                .then(left.2.cmp(&right.2))
+        });
+        found.into_iter().map(|(_, _, address)| address).collect()
     }
 
     /// Forgets every miss held against every address.
@@ -2967,6 +2997,50 @@ mod tests {
         // and the claim is heard again on every handshake.
         book.keeps_the_cold_set(&keeper, false);
         assert!(book.archivists().is_empty());
+    }
+
+    /// An address that once handed over a path that folded is reached for
+    /// before addresses that only said they keep the set, however much more
+    /// recently those spoke.
+    ///
+    /// Newest first was the whole order, and peers sent to claim the archive
+    /// and place nothing are the newest a node has heard from: a node reaching
+    /// past them for a few archivists it met reached for more of them first.
+    #[test]
+    fn an_address_that_handed_over_a_path_is_reached_for_before_claimers() {
+        let mut book = AddressBook::new();
+        let honest: SocketAddr = "203.0.113.1:9000".parse().unwrap();
+        let earlier: SocketAddr = "198.51.100.2:9000".parse().unwrap();
+        let claimer: SocketAddr = "192.0.2.3:9000".parse().unwrap();
+        for (address, heard) in [(honest, 100), (earlier, 150), (claimer, 200)] {
+            book.insert(address);
+            book.answered(&address, heard);
+            book.keeps_the_cold_set(&address, true);
+        }
+        assert_eq!(
+            book.archivists(),
+            vec![claimer, earlier, honest],
+            "newest first, with nothing else to go on"
+        );
+
+        book.handed_over_a_path(&honest);
+        assert_eq!(
+            book.archivists(),
+            vec![honest, claimer, earlier],
+            "the one that handed over a path is not reached for first"
+        );
+        book.handed_over_a_path(&earlier);
+        assert_eq!(
+            book.archivists(),
+            vec![earlier, honest, claimer],
+            "two that handed one over, newest first between them"
+        );
+
+        // As with what an address keeps, a path is not a reason to write an
+        // address down.
+        let stranger: SocketAddr = "203.0.113.9:9000".parse().unwrap();
+        book.handed_over_a_path(&stranger);
+        assert_eq!(book.len(), 3);
     }
 
     #[test]
