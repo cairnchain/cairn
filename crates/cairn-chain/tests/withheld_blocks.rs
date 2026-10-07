@@ -124,12 +124,7 @@ fn key(seed: u8) -> PublicKey {
     SecretKey::from_bytes(&[seed; 32]).public_key()
 }
 
-fn block_on(
-    state: &LedgerState,
-    params: &ConsensusParams,
-    to: PublicKey,
-    timestamp: u64,
-) -> Block {
+fn block_on(state: &LedgerState, params: &ConsensusParams, to: PublicKey, timestamp: u64) -> Block {
     let height = state.next_height().unwrap();
     let coinbase = CoinbaseTransaction::new(height, vec![Note::new(params.initial_reward, to)]);
     let block = assemble_block(
@@ -484,6 +479,9 @@ struct Sim {
     races: HashMap<u64, Race>,
     /// Every block the withholder found, released or not.
     found_by_withholder: HashSet<Hash32>,
+    /// Every block's parent. A store keeps identifiers only inside its
+    /// reorganisation window, and the tally walks the whole branch.
+    parents: HashMap<Hash32, Hash32>,
     outcome: Outcome,
 }
 
@@ -520,6 +518,7 @@ impl Sim {
             hashrate: params.genesis_difficulty as f64 / params.target_block_time as f64,
             races: HashMap::new(),
             found_by_withholder: HashSet::new(),
+            parents: HashMap::new(),
             outcome: Outcome::default(),
         };
         for miner in 0..=HONEST_NODES {
@@ -579,6 +578,7 @@ impl Sim {
         }
         let state = self.honest[miner].chain.state();
         let block = block_on(state, &self.params, self.keys[miner], stamp(state, clock));
+        self.parents.insert(block.id(), block.header.previous);
         let height = block.header.height;
         if let Some(race) = self.races.remove(&height) {
             let (races, won) = if race.deep {
@@ -639,10 +639,16 @@ impl Sim {
         let (_, mine, theirs) = self.withholder.positions();
         let racing = self.withholder.withheld.is_empty() && mine == theirs && mine > 0;
         let w = &mut self.withholder;
-        let block = block_on(&w.state, &self.params, self.keys[HONEST_NODES], stamp(&w.state, clock));
+        let block = block_on(
+            &w.state,
+            &self.params,
+            self.keys[HONEST_NODES],
+            stamp(&w.state, clock),
+        );
         connect_block(&mut w.state, &block, &self.params, clock + 1).unwrap();
         w.ids.push(block.id());
         self.found_by_withholder.insert(block.id());
+        self.parents.insert(block.id(), block.header.previous);
         let height = block.header.height;
         w.withheld.push(block);
         self.races.remove(&height);
@@ -729,14 +735,14 @@ impl Sim {
 
     fn tally(mut self) -> Outcome {
         let chain = &self.honest[0].chain;
-        let top = chain.height().unwrap();
-        self.outcome.chain = top;
-        self.outcome.withholder = (1..=top)
-            .filter(|height| {
-                let id = chain.id_at(*height).unwrap();
-                self.found_by_withholder.contains(&id)
-            })
-            .count() as u64;
+        self.outcome.chain = chain.height().unwrap();
+        let mut id = chain.tip().unwrap();
+        while let Some(parent) = self.parents.get(&id) {
+            if self.found_by_withholder.contains(&id) {
+                self.outcome.withholder += 1;
+            }
+            id = *parent;
+        }
         self.outcome
     }
 }
@@ -744,7 +750,6 @@ impl Sim {
 fn simulate(run: Run) -> Outcome {
     Sim::new(run).run()
 }
-
 
 /// **A withholding miner earns what the papers say, and the tie rule does no
 /// more than the threat model claims.**
@@ -860,7 +865,10 @@ fn the_tables_in_the_header() {
                 })
             })
             .collect();
-        handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
     });
     let find = |share: f64, strategy, network: &str, opening| {
         cells
