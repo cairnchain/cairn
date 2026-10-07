@@ -932,20 +932,29 @@ fn belongs_to_this_network(
 /// `take_the_ledger` refuses a handover whose tip is not the one the sampling
 /// weighed.
 ///
-/// **So the version, the difficulty and the work below refuse nothing the
-/// chain would not already refuse, and they are here anyway.** Bending any of
-/// them changes the identifier the header above names, so the consecutive
-/// check catches the same tamper; what these buy is which sentence comes back.
-/// "The work at 812 does not add up" is something somebody can act on, and
-/// "not consecutive" is the same fact with the reason removed. They are
-/// written before the chain check for that reason and no other, and all three
-/// are free of any window.
+/// **So on a run cut from the honest chain, the version, the difficulty and
+/// the work below refuse nothing the chain would not already refuse, and they
+/// are here anyway.** Bending any of them changes the identifier the header
+/// above names, so the consecutive check catches the same tamper; what these
+/// buy is which sentence comes back. "The work at 812 does not add up" is
+/// something somebody can act on, and "not consecutive" is the same fact with
+/// the reason removed. They are written before the chain check for that reason
+/// and no other, and all three are free of any window.
 ///
 /// The second thing they buy is that this run carries its own argument. A
 /// guard that holds only because another guard covers it becomes wrong the day
 /// the other one moves, and nothing says so. This run seeds the window the
 /// burial above it is judged against, which makes it the wrong place to leave
 /// an argument borrowed from the forest.
+///
+/// The third is against a run the honest network never judged: a forger who
+/// mined its own burial mined this run too, and where its fork point lies
+/// inside the run, every header above that point is held to the rules a block
+/// is. The sender chooses the anchor anywhere from [`BURIAL`] to
+/// [`MOST_BURIED`] below the tip, so a forger can keep its fork point below
+/// the run at no cost, and where it does not, what the difficulty forces is
+/// the descent from the last honest header, at a quarter a block: about a third
+/// of a block at that header's difficulty. Small, and stated as small.
 ///
 /// **The median, where the run holds its window.** The median time past reads
 /// eleven headers, so it is the chain's own rule from the twelfth entry on and

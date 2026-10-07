@@ -215,7 +215,7 @@ fn the_chains_these_tests_bend_are_weighed_as_they_stand() {
 #[test]
 fn a_header_below_the_pinned_one_at_the_wrong_difficulty_is_refused_by_name() {
     let second = |pinned: u64| run_starts(pinned) + 1;
-    let between = |pinned: u64| (run_starts(pinned) + pinned) / 2;
+    let between = |pinned: u64| u64::midpoint(run_starts(pinned), pinned);
     let just_below = |pinned: u64| pinned - 1;
     let places: [&dyn Fn(u64) -> u64; 3] = [&second, &between, &just_below];
     for (place, at) in places.into_iter().enumerate() {
@@ -287,7 +287,7 @@ fn the_pinned_header_at_the_wrong_difficulty_is_refused_by_name() {
 fn a_header_below_the_pinned_one_whose_work_does_not_add_up_is_refused_by_name() {
     let (height, start) = bent(
         LONG,
-        |pinned| (run_starts(pinned) + pinned) / 2,
+        |pinned| u64::midpoint(run_starts(pinned), pinned),
         |header, parent| header.total_work = parent.total_work + work_of(OPENING) - 1,
     );
     let pinned_at = start

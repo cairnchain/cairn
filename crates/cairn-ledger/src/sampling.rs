@@ -521,11 +521,13 @@ pub const MOST_TAIL: u64 = 16 * SHALLOWEST + BELOW_THE_PINNED;
 /// a weighing says on the wire.
 ///
 /// What it is for now, beyond the median's eleven, is reach. Every header of
-/// the run from its second on is held to the retarget and the work sum, so a
-/// forger whose fork point the draw landed above has to bring its run down to
-/// an honest header within these ninety, or the run's own first header is the
-/// one it may write freely. Fewer headers below the pinned one would narrow
-/// that by as many.
+/// the run from its second on is held to the retarget and the work sum, so
+/// where the draw lands on a forger's header, the pinned header has to follow
+/// from an honest one if the fork point lies within these ninety. Below them
+/// the run's first header is the forger's to write, and the walk from it can
+/// reach the floor from testnet-8's opening difficulty in fourteen headers at a
+/// quarter each. Fewer headers below the pinned one would narrow that reach by
+/// as many.
 pub const BELOW_THE_PINNED: u64 = RECENT_HEADERS as u64 - 1;
 
 /// How far below the hardest header of the run a tip may stand, counting

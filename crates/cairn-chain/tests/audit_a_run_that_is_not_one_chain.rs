@@ -252,7 +252,7 @@ fn a_run_carrying_what_its_parents_do_not_demand_is_refused_where_it_does() {
         bend(&mut run[4]);
         run[4] = mine_header(run[4], ATTEMPTS).unwrap();
 
-        let mut joined = ChainStore::new(params.clone());
+        let mut joined = ChainStore::new(params);
         assert_eq!(
             joined.adopt(state.clone(), &run),
             Err(ChainError::BrokenRun { height: 4 }),
