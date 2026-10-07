@@ -82,9 +82,13 @@ pub const HALF_LIFE_IN_BLOCKS: u64 = 60;
 /// leaves the chain further behind its schedule than the floor's edge, and
 /// the honest chain then mines hundreds or thousands of blocks at
 /// [`MIN_DIFFICULTY`], with almost no work behind them, while it catches the
-/// schedule up: a median of 874 after a departure from 4 096 times and 7 642
-/// after 8 192, which the bound brings on sooner and makes longer. Both are
-/// held in `tests/the_difficulty_follows_the_clock.rs`.
+/// schedule up: 3 455 after a departure from 4 096 times and 9 191 after 8 192
+/// when every block takes the mean time its difficulty asks, and a median of
+/// 2 244 and 7 793 over sixty four seeds of random block times, which the
+/// bound brings on sooner and makes longer. All four are held in
+/// `tests/the_difficulty_follows_the_clock.rs`. This said a median of 874
+/// after 4 096 times, over sixteen seeds: a low draw, which the testnet-9
+/// study found by running the same simulation on sixty four.
 ///
 /// Public because the weighing in [`crate::sampling`] reasons from it. Two
 /// headers a thousand blocks apart cannot state whatever work they like

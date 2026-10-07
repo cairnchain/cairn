@@ -1459,9 +1459,10 @@ block after it is held to a quarter of the last, and from a few hundred times
 on the clamp adds about a third of that first gap to the stall. Past a few
 thousand times the stall leaves the chain further behind its schedule than the
 floor's edge, and the blocks after it are asked the floor until the chain has
-caught up to that edge: measured on testnet-8's rules, the median over sixteen
-seeds, 874 blocks at the floor after a departure from 4 096 times and 7 642
-after 8 192. It stays because the weighing reasons from it: a run of
+caught up to that edge: measured on testnet-8's rules, 3 455 blocks at the
+floor after a departure from 4 096 times and 9 191 after 8 192 when every block
+takes the mean time its difficulty asks, and a median of 2 244 and 7 793 over
+sixty four seeds of random block times. It stays because the weighing reasons from it: a run of
 blocks implies a least and a most work only because no step moves the
 difficulty further than this.
 
