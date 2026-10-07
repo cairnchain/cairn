@@ -880,7 +880,7 @@ fn crossing(points: &[(f64, f64)]) -> Option<f64> {
             let ((low, under), (high, over)) = (pair[0], pair[1]);
             (under <= 0.0 && over > 0.0).then(|| low + (high - low) * -under / (over - under))
         })
-        .last()
+        .next_back()
 }
 
 /// The tables at the top of this file.

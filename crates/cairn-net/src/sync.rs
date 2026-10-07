@@ -3397,7 +3397,8 @@ mod a_newcomer {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing
 )]
 mod a_tie_at_one_height {
     use super::{follow_up, on_block, on_message, tick, Local, Message, PeerState, Reaction};
@@ -3670,7 +3671,7 @@ mod a_tie_at_one_height {
     #[test]
     fn a_node_on_the_lighter_tip_of_a_tie_does_not_ask_round_after_round() {
         let fixture = Fixture::new();
-        let tie = fixture.rival_of_its_height(fixture.band());
+        let within = fixture.rival_of_its_height(fixture.band());
         let longer = fixture.longer_rival();
 
         let asks = |rival: &[Block]| {
@@ -3692,7 +3693,7 @@ mod a_tie_at_one_height {
             (asked, chain.tip() == Some(tip.id()))
         };
 
-        let (asked, switched) = asks(&tie);
+        let (asked, switched) = asks(&within);
         assert_eq!(
             (asked, switched),
             (0, false),

@@ -15877,7 +15877,7 @@ mod peers_and_loops {
         );
 
         let (near, _far) = a_socket();
-        let mut claim = |id: PeerId, claims: (u64, u128)| {
+        let claim = |id: PeerId, claims: (u64, u128)| {
             node.shared.peers().insert(
                 id,
                 Peer {
