@@ -1211,8 +1211,14 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         // which a node lays down the moment it starts. Asking whether the
         // chain was empty instead meant no newcomer on a real network ever
         // held off here, so every one of them read the chain block by block.
+        //
+        // Long enough to be final is the depth this network undoes. It was
+        // [`JOIN_RATHER_THAN_READ`], which is that depth on every public
+        // network and deeper than a network burying sooner undoes: a newcomer
+        // on devnet asked the first chain it was greeted with for its blocks,
+        // and had read past the reach of any other before the next peer spoke.
         let held_for_the_choice =
-            local.chain.holds_nothing_of_its_own() && theirs.height >= JOIN_RATHER_THAN_READ;
+            local.chain.holds_nothing_of_its_own() && theirs.height >= local.chain.undo_limit();
         if !held_for_the_choice {
             peer.chain_asked = true;
             peer.work_when_asked = Some(local.chain.total_work());
@@ -1247,17 +1253,18 @@ pub const BATCH_PATIENCE: u64 = 60;
 /// and what matters is that a node chooses rather than starting both and
 /// taking whichever finishes.
 ///
-/// It carries a second duty on purpose: it matches the deepest
-/// reorganisation a node accepts, so a chain this long is also one a node
-/// with nothing cannot back out of once it follows it. That is why a
-/// newcomer facing a chain past this length does not ask on the handshake,
-/// and lets [`crate::choosing`] decide whom to ask instead.
+/// It matches the deepest reorganisation any node accepts, so on every public
+/// network a chain this long is also one a node with nothing cannot back out
+/// of once it follows it. Held to that by the build below rather than by this
+/// sentence alone, as the other two numbers tied to the same depth are
+/// (`MAX_BEHIND` and the handover's burial).
 ///
-/// Held to that by the build below rather than by this sentence alone, as the
-/// other two numbers tied to the same depth are (`MAX_BEHIND` and the
-/// handover's burial): a change to either end that forgot the other would
-/// leave a newcomer committing, on a handshake, to a chain it can no longer
-/// back out of.
+/// It used to carry that second duty as well: a newcomer facing a chain past
+/// this length did not ask on the handshake, and let [`crate::choosing`]
+/// decide whom to ask instead. That length is the depth the network undoes,
+/// `ChainStore::undo_limit`, and it is read from there now. On a network that
+/// buries sooner, devnet among them, it is shorter than this, and a newcomer
+/// there committed on a handshake to a chain it could no longer back out of.
 pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 
 const _: () = assert!(JOIN_RATHER_THAN_READ == cairn_chain::MAX_REORG_DEPTH as u64);
@@ -3271,6 +3278,75 @@ mod a_slow_clock {
             said,
             Some(drift() + 1),
             "a block past the drift on the refused parent was not counted"
+        );
+    }
+}
+
+/// Whom a node with nothing asks for its chain when a peer greets it.
+#[cfg(test)]
+mod a_newcomer {
+    use super::{on_message, Local, Message, PeerState};
+    use crate::message::{Handshake, Keeps, PROTOCOL_VERSION};
+    use cairn_chain::ChainStore;
+    use cairn_ledger::validation::ConsensusParams;
+    use cairn_primitives::Hash32;
+
+    /// Whether a node with nothing, greeted by a peer claiming a chain of
+    /// `height` blocks and more work than its own, asks that peer for it at
+    /// once.
+    fn asks_at_the_handshake(chain: &mut ChainStore, height: u64) -> bool {
+        let theirs = Handshake {
+            version: PROTOCOL_VERSION,
+            network: chain.params().network,
+            genesis: Hash32::ZERO,
+            height,
+            total_work: 1_000_000,
+            listen: 0,
+            nonce: 99,
+            keeps: Keeps {
+                headers: true,
+                cold_set: false,
+            },
+        };
+        let mut local = Local {
+            chain,
+            keeps: Keeps::default(),
+            listen: 4242,
+            nonce: 1,
+        };
+        on_message(
+            &mut local,
+            &mut PeerState::default(),
+            Message::Welcome(theirs),
+            2_000_000_000,
+        )
+        .reply
+        .iter()
+        .any(|message| matches!(message, Message::GetChain { .. }))
+    }
+
+    /// On a network that undoes twelve blocks, a chain of twelve is left to
+    /// the choice and a chain of eleven is asked for at once.
+    ///
+    /// The line was drawn at a thousand and twenty four for every network,
+    /// so a newcomer on one burying sooner asked whichever chain greeted it
+    /// first, and read past the reach of any other before the next peer
+    /// spoke.
+    #[test]
+    fn a_chain_as_long_as_the_network_undoes_is_left_to_the_choice() {
+        let mut chain = ChainStore::new(ConsensusParams::testnet().with_burial(12));
+        assert_eq!(
+            chain.undo_limit(),
+            12,
+            "fixture: the depth this network undoes"
+        );
+        assert!(
+            !asks_at_the_handshake(&mut chain, 12),
+            "a newcomer asked for a chain it could not back out of at the first handshake"
+        );
+        assert!(
+            asks_at_the_handshake(&mut chain, 11),
+            "a newcomer held a chain shorter than the network undoes for the choice"
         );
     }
 }

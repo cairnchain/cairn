@@ -287,7 +287,7 @@ pub enum Step {
 ///
 /// Peers are named by the node's connection numbers, which is the one name
 /// for a peer that the peer did not choose itself.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Chooser {
     claims: HashMap<u64, Claim>,
     /// Addresses whose claims went unshown, kept apart from the claims
@@ -324,12 +324,45 @@ pub struct Chooser {
     /// Set once the node has a chain. The choice was the whole job, so
     /// after it there is nothing here for the rest of the node's life.
     done: bool,
+    /// The height from which a claim is long enough to be final: the depth
+    /// a node on this network undoes, past which a node that followed the
+    /// claim from nothing can never back out of it.
+    ///
+    /// It was [`JOIN_RATHER_THAN_READ`] for every network, which is that depth
+    /// on every public one and not on one that buries sooner. Devnet undoes
+    /// thirty two blocks, so a newcomer there met no claim long enough to
+    /// settle, followed whichever chain its first handshake offered, and read
+    /// past the reach of any other before the next peer had said a word.
+    final_from: u64,
+}
+
+impl Default for Chooser {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Chooser {
+    /// A chooser for a network whose nodes undo as deep as any node does,
+    /// which is every public one.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::reaching(JOIN_RATHER_THAN_READ)
+    }
+
+    /// A chooser for a network whose nodes undo at most `undo_limit` blocks,
+    /// which is what `ChainStore::undo_limit` says of it.
+    #[must_use]
+    pub fn reaching(undo_limit: u64) -> Self {
+        Self {
+            claims: HashMap::new(),
+            unbacked_hosts: HashMap::new(),
+            first_claim_at: None,
+            asked: None,
+            proven: None,
+            done: false,
+            final_from: undo_limit,
+        }
     }
 
     /// Notes what a peer claims to have. Only called while this node has no
@@ -362,7 +395,7 @@ impl Chooser {
                 heard,
             },
         );
-        if height >= JOIN_RATHER_THAN_READ && self.first_claim_at.is_none() {
+        if height >= self.final_from && self.first_claim_at.is_none() {
             self.first_claim_at = Some(now);
         }
     }
@@ -623,7 +656,7 @@ impl Chooser {
         let worth_settling = self
             .claims
             .values()
-            .any(|claim| claim.height >= JOIN_RATHER_THAN_READ);
+            .any(|claim| claim.height >= self.final_from);
         if !worth_settling && self.asked.is_none() {
             self.first_claim_at = None;
             return Step::Quiet;
@@ -1086,6 +1119,41 @@ mod tests {
             !chooser.holds_off(2),
             "so nobody is held off while none is claimed"
         );
+    }
+
+    /// On a network that undoes twelve blocks, a claim of twelve or more
+    /// opens the choice and is read once the settling has passed, and one of
+    /// eleven opens none.
+    ///
+    /// Final was a thousand and twenty four blocks for every network, so a
+    /// newcomer on one burying sooner never settled anything, and followed
+    /// whichever chain its first handshake offered.
+    #[test]
+    fn a_claim_as_long_as_the_network_undoes_opens_the_choice() {
+        let mut short = Chooser::reaching(12);
+        short.noted(1, Some(host(1)), 900, 11, true, 100);
+        assert!(
+            !short.holds_off(2),
+            "a claim shorter than the network undoes held a peer off"
+        );
+        assert_eq!(
+            short.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1]),
+            Step::Quiet
+        );
+        for height in [12, 13] {
+            let mut long = Chooser::reaching(12);
+            long.noted(1, Some(host(1)), 900, height, true, 100);
+            assert!(
+                long.holds_off(2),
+                "a claim of {height} blocks, past what the network undoes, opened no choice"
+            );
+            assert_eq!(
+                long.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1]),
+                Step::Ask(1, Approach::Read),
+                "a claim of {height} blocks is read, being shorter than a ledger is worth \
+                 handing over"
+            );
+        }
     }
 
     #[test]

@@ -20,8 +20,7 @@
 //! the first half. Two tests below did not hold when they were written: a
 //! wallet left on the lighter half said nothing, and a newcomer on a network
 //! burying below a thousand and twenty four took whichever half answered
-//! first. The wallet says so now; the newcomer is kept failing on purpose
-//! until the code is changed.
+//! first. Both hold now.
 
 #![allow(
     clippy::unwrap_used,
@@ -633,17 +632,18 @@ fn a_wallet_on_the_half_the_network_left_says_so_beside_the_balance() {
 /// introduce themselves half a second after the lighter half's, well inside
 /// that.
 ///
-/// A gap, kept failing on purpose, on any network that buries below a
-/// thousand and twenty four, devnet among them (32) and this file (12). The
-/// choice is made only for a chain of `JOIN_RATHER_THAN_READ` blocks or more,
-/// on the reading that a shorter one "carries no such weight: following the
-/// wrong one is undone by the fork choice like any other branch"
-/// (`cairn_net::sync`, on a greeting). That number is tied to
-/// `MAX_REORG_DEPTH`, and a node undoes `ChainStore::undo_limit`, which is the
-/// smaller of that and the network's burial. So a newcomer here asks the
-/// lighter half for its chain on the handshake, has read past the fork's reach
-/// before the heavier half has said a word, and can never take it. Testnet-8
-/// buries at a thousand and twenty four and is not affected.
+/// It was a gap on any network that buries below a thousand and twenty four,
+/// devnet among them (32) and this file (12). The choice was made only for a
+/// chain of `JOIN_RATHER_THAN_READ` blocks or more, on the reading that a
+/// shorter one "carries no such weight: following the wrong one is undone by
+/// the fork choice like any other branch" (`cairn_net::sync`, on a greeting).
+/// That number is tied to `MAX_REORG_DEPTH`, and a node undoes
+/// `ChainStore::undo_limit`, which is the smaller of that and the network's
+/// burial. So a newcomer here asked the lighter half for its chain on the
+/// handshake, had read past the fork's reach before the heavier half had said
+/// a word, and could never take it. The greeting and the chooser both draw
+/// the line at `ChainStore::undo_limit` now. Testnet-8 buries at a thousand
+/// and twenty four and was not affected.
 #[test]
 fn a_newcomer_meeting_the_lighter_half_first_still_takes_the_heavier() {
     let parted = Parted::new(BURIAL + 2, BURIAL + 8, &key(16).public_key());
