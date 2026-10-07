@@ -13,13 +13,15 @@
 //!
 //! `crates/cairn-ledger/tests/node_memory_slope.rs` already holds the hot set,
 //! the grace window and the watched paths on a bare `LedgerState`. This runs a
-//! real disk-backed `Node`, which is where those counts meet the three bounds
-//! that are the node's and not the ledger's: what it holds in memory in blocks
-//! ([`ChainStore::held_bytes`], against its ceiling, which already folds in the
-//! side store), what it keeps on disk (the block log against the budget
-//! [`KEEP_BLOCK_BYTES`](cairn_net::KEEP_BLOCK_BYTES)), and the address book ([`MAX_ADDRESSES`] and
-//! [`MAX_PER_GROUP`]). And it holds that the node's own reported figures agree
-//! with what it holds, since those are what an operator reads.
+//! real disk-backed `Node`, which is where those counts meet the bounds that
+//! are the node's and not the ledger's: what it holds in memory in blocks
+//! ([`ChainStore::held_bytes`] against its ceiling, the undo records and the
+//! block entries against [`HELD_WINDOW`]), and what it keeps on disk (the
+//! block log against the budget it was handed). The pool and the address book
+//! ([`MAX_POOLED`], [`MAX_POOL_BYTES`], [`MAX_ADDRESSES`], [`MAX_PER_GROUP`])
+//! are held on their own structures, filled past their ceilings. And it holds
+//! that the node's own reported figures agree with what it holds, since those
+//! are what an operator reads.
 //!
 //! No one chain sits at every bound at once, and the catalogue lists them as a
 //! set of edges to cover rather than a single shape. A chain that evicts a
@@ -44,7 +46,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cairn_chain::{ChainStore, HELD_OVERHEAD, HELD_WINDOW, MAX_POOLED, MAX_POOL_BYTES};
+use cairn_chain::{
+    ChainStore, HELD_OVERHEAD, HELD_WINDOW, MAX_POOLED, MAX_POOL_BYTES, WARM_BODIES,
+};
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
 use cairn_ledger::state::GRACE_NOTES;
@@ -65,19 +69,30 @@ const ATTEMPTS: u64 = 1 << 22;
 const COINBASE_OUTPUTS: usize = 16;
 
 /// The blocks the short run in the ordinary suite takes. Enough that the hot
-/// set has filled and evicted for many blocks, the block log has grown past
-/// the budget and been trimmed, and a slope would show.
+/// set has filled and evicted for many blocks, the grace window has filled,
+/// and the block log has grown past the budget and been trimmed several times
+/// over. Not enough to fill the undo window, which is [`HELD_WINDOW`] blocks
+/// wide whatever the parameters, so the undo records and the block entries are
+/// held to their ceiling here and only the long run reads them flat.
 const SHORT_BLOCKS: usize = 320;
 
 /// The blocks the long run takes. See `a_node_soaked_for_a_long_run`.
 const LONG_BLOCKS: usize = 12_000;
 
 /// The block log budget the soak runs under. These coinbase-only blocks are
-/// small, so the budget is small too, small enough that the short run grows
-/// past it and the log is trimmed back and held there whatever the chain's
-/// length. Far under [`KEEP_BLOCK_BYTES`](cairn_net::KEEP_BLOCK_BYTES), the real default; the point is the
-/// trimming, and a smaller budget reaches it sooner.
-const KEEP: u64 = 48 * 1024;
+/// under a kilobyte, so the budget is small too, small enough that the short
+/// run grows past it within a hundred blocks and the log is trimmed back and
+/// held there whatever the chain's length. The real default is
+/// `cairn_net::KEEP_BLOCK_BYTES`, a gigabyte; the point is the trimming, and a
+/// smaller budget reaches it sooner.
+///
+/// Not smaller than this, though. A node lets go of a body only while the log
+/// still holds it, so a budget that leaves fewer than [`WARM_BODIES`] blocks on
+/// disk has the node hold every body of its undo window instead. That is the
+/// trade the budget is documented to make, still inside the ceiling, but it
+/// would move what is held in memory from one plateau to another partway
+/// through the run. This leaves about eighty four blocks on disk.
+const KEEP: u64 = 64 * 1024;
 
 fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
@@ -447,6 +462,13 @@ fn soak_holds(run: &Run) {
         run.log_begins_at,
         last.height
     );
+    let begins = run.log_begins_at.unwrap_or(0);
+    assert!(
+        last.height + 1 - begins > WARM_BODIES,
+        "the budget left {} blocks on disk, not more than the {WARM_BODIES} bodies a node keeps \
+         in memory, so this run measured a node holding its undo window: raise KEEP",
+        last.height + 1 - begins
+    );
     let bound = disk_bound(&params, run.largest_record);
     assert!(
         last.kept <= bound,
@@ -650,9 +672,12 @@ fn the_address_book_holds_its_ceilings() {
 /// The one role whose cost is chosen rather than borne: an archivist keeps
 /// every block whatever budget it is handed, and its block log grows with the
 /// chain where a plain node's is flat. A measure that shows the plain node's
-/// disk flat is only worth something if the same measure shows this one rise.
+/// disk flat is only worth something if the same measure, on a node known to
+/// keep everything, finds everything kept and the plain node's bound exceeded.
 #[test]
 fn an_archivist_keeps_every_block() {
+    // Enough that the whole chain is well past what a plain node would keep.
+    const ARCHIVED_BLOCKS: usize = 120;
     let directory = scratch("archivist");
     let params = params();
     let miner = wallet(1);
@@ -663,8 +688,8 @@ fn an_archivist_keeps_every_block() {
 
     let mut state = LedgerState::new();
     let mut clock = 1_000u64;
-    let mut kept_at = Vec::new();
-    for at in 0..80usize {
+    let (mut every_record, mut largest_record) = (0u64, 0u64);
+    for _ in 0..ARCHIVED_BLOCKS {
         let height = state.next_height().unwrap();
         clock += 600;
         let block = assemble_block(
@@ -677,33 +702,36 @@ fn an_archivist_keeps_every_block() {
         )
         .unwrap();
         let block = mine_block(block, ATTEMPTS).unwrap();
+        let record = block.encode().len() as u64 + 4;
+        every_record += record;
+        largest_record = largest_record.max(record);
         connect_block(&mut state, &block, &params, NOW).unwrap();
         node.submit_block(block).unwrap();
-        if at == 39 || at == 79 {
-            std::thread::sleep(Duration::from_millis(200));
-            kept_at.push(node.kept_bytes());
-        }
     }
-    std::thread::sleep(Duration::from_secs(1));
+    // Two rounds of upkeep, so a node that trimmed an archive has had the
+    // chance to. Waiting longer only makes the check stricter.
+    std::thread::sleep(Duration::from_secs(2));
     let begins = node.blocks_from();
-    let finally = node.kept_bytes();
+    let kept = node.kept_bytes();
     node.shutdown();
     drop(node);
     let _ = std::fs::remove_dir_all(&directory);
 
-    assert!(
-        node_archivist_grew(kept_at[0], finally),
-        "an archivist kept {} bytes at forty blocks and {finally} at eighty, so it is not \
-         keeping the chain as it grows",
-        kept_at[0]
-    );
     assert_eq!(
         begins,
         Some(0),
-        "an archivist dropped the start of its chain, which it must never do: it begins at {begins:?}"
+        "an archivist dropped the start of its chain, which it must never do: it begins at \
+         {begins:?}"
     );
-}
-
-fn node_archivist_grew(early: u64, late: u64) -> bool {
-    late > early
+    assert_eq!(
+        kept, every_record,
+        "an archivist holds {kept} bytes of blocks where every record it was handed comes to \
+         {every_record}"
+    );
+    let bound = disk_bound(&params, largest_record);
+    assert!(
+        kept > bound,
+        "{ARCHIVED_BLOCKS} blocks came to {kept} bytes, within the {bound} a plain node is held \
+         to, so this control cannot tell a trimmed log from a kept one"
+    );
 }
