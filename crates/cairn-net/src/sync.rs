@@ -208,6 +208,25 @@ pub struct PeerState {
     /// behind. And once the wait was over nothing asked, so the refused block
     /// came back only with the peer's next announcement.
     pub clock_allows_at: Option<u64>,
+    /// The last block this peer sent that this node refused for being dated
+    /// ahead of its clock, or that hangs on one and was counted with it.
+    ///
+    /// A slow clock refuses the first block each peer offers past it, and
+    /// every block after that one arrives with its parent missing, because
+    /// the parent is the block refused. Only the first was counted towards
+    /// saying the clock looks behind, one a peer, so a node with fewer peers
+    /// than that count asks for blocks said nothing however far behind it
+    /// was: an hour, or a week after a flat battery. A block whose parent is
+    /// this one and which stands past the drift itself is one the clock
+    /// would refuse on its own, and is counted the same way.
+    ///
+    /// Counted on that parent and never on a date alone. A block whose parent
+    /// is missing has been checked for nothing but the work it declares, so a
+    /// date on one is a number anybody writes for a hash. One hanging on a
+    /// block this peer had refused adds nothing a stranger could not already
+    /// buy by sending the refused block again, which a refusal does not
+    /// remember and counts again.
+    pub clock_refused: Option<Hash32>,
     /// Where the connection came from, filled in by whoever opened it.
     pub remote: Option<IpAddr>,
     /// Whether this node went out and opened this connection.
@@ -1615,6 +1634,29 @@ fn below_everything_held(chain: &ChainStore, height: u64) -> bool {
     chain.branch_start().is_some_and(|floor| height <= floor)
 }
 
+/// Seconds by which block `id`, whose parent is missing, stands ahead of this
+/// node's clock, when its parent is the block `peer` last had refused for the
+/// clock and it stands further ahead than the drift allows. It is then the
+/// block the next one from `peer` is read against.
+///
+/// The same reading the refusal itself gives, for a block the clock would
+/// refuse on its own if its parent were here. See [`PeerState::clock_refused`].
+fn on_a_refused_parent(
+    chain: &ChainStore,
+    peer: &mut PeerState,
+    id: Hash32,
+    parent: Hash32,
+    dated: u64,
+    now: u64,
+) -> Option<u64> {
+    let past_the_drift = dated > now.saturating_add(chain.params().max_timestamp_drift);
+    if peer.clock_refused != Some(parent) || !past_the_drift {
+        return None;
+    }
+    peer.clock_refused = Some(id);
+    Some(dated.saturating_sub(now))
+}
+
 // The last two arms answer the same way for opposite reasons, and collapsing
 // them would bury which is which.
 #[allow(clippy::match_same_arms)]
@@ -1622,6 +1664,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
     let id = block.id();
     let height = block.header.height;
     let claimed = block.header.total_work;
+    let (parent, dated) = (block.header.previous, block.header.timestamp);
     // A block of the batch arriving is the batch still coming. See
     // [`PeerState::asked_at`].
     if peer.awaiting.remove(&height) {
@@ -1677,6 +1720,9 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             if out_of_reach {
                 reaction.unreachable = Some(height);
             }
+            // Hanging on a block this peer sent that the clock refused, and
+            // dated past the drift itself. See [`PeerState::clock_refused`].
+            reaction.ahead_of_the_clock = on_a_refused_parent(chain, peer, id, parent, dated, now);
             reaction
         }
         // The peer did nothing wrong and this node cannot judge what it sent.
@@ -1792,8 +1838,9 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // the tip does, so it is counted as the peer being ahead: see the arm
         // for a missing parent.
         //
-        // Said, though, because this is the only place in the node that can
-        // see a clock is wrong. See [`Reaction::ahead_of_the_clock`].
+        // Said, though, because this is where the node can see a clock is
+        // wrong, with the blocks that arrive hanging on this one. See
+        // [`Reaction::ahead_of_the_clock`] and [`PeerState::clock_refused`].
         Err(ChainError::InvalidBlock {
             source: BlockError::TimestampTooFarAhead { timestamp, drift },
             ..
@@ -1801,6 +1848,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             peer.total_work = peer.total_work.max(claimed);
             let allowed = timestamp.saturating_sub(drift);
             peer.clock_allows_at = Some(peer.clock_allows_at.map_or(allowed, |at| at.max(allowed)));
+            peer.clock_refused = Some(id);
             Reaction {
                 ahead_of_the_clock: Some(timestamp.saturating_sub(now)),
                 ..Reaction::idle()
@@ -3054,6 +3102,175 @@ mod what_a_frame_costs {
             unasked.spent,
             what_the_wire_costs(frame.len()),
             "a piece of a join answer from a peer nobody asked was read for nothing"
+        );
+    }
+}
+
+/// What a clock behind its peers' counts of the blocks it cannot take.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::arithmetic_side_effects
+)]
+mod a_slow_clock {
+    use super::{on_block, PeerState};
+    use cairn_chain::ChainStore;
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::block::Block;
+    use cairn_ledger::note::Note;
+    use cairn_ledger::transaction::CoinbaseTransaction;
+    use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
+    use cairn_ledger::LedgerState;
+
+    const NOW: u64 = 2_000_000_000;
+
+    fn params() -> ConsensusParams {
+        ConsensusParams::testnet()
+    }
+
+    fn drift() -> u64 {
+        params().max_timestamp_drift
+    }
+
+    /// The block after `state`, dated `dated`, mined for real and not
+    /// connected.
+    fn next(state: &LedgerState, dated: u64) -> Block {
+        let params = params();
+        let height = state.next_height().unwrap();
+        let coinbase = CoinbaseTransaction::new(
+            height,
+            vec![Note::new(
+                params.reward_at(height),
+                SecretKey::from_bytes(&[4; 32]).public_key(),
+            )],
+        );
+        let block = assemble_block(state, coinbase, Vec::new(), &params, dated, 0).unwrap();
+        mine_block(block, 1 << 22).unwrap()
+    }
+
+    /// Takes `block` into `state` by a clock that agrees with its date.
+    fn connect(state: &mut LedgerState, block: &Block) {
+        connect_block(state, block, &params(), block.header.timestamp).unwrap();
+    }
+
+    /// A node at `NOW` holding three blocks dated long ago, and the ledger
+    /// they leave, to mine on from there.
+    fn settled() -> (ChainStore, LedgerState) {
+        let mut state = LedgerState::new();
+        let mut chain = ChainStore::new(params());
+        for at in 1..=3 {
+            let block = next(&state, 1_000 + 600 * at);
+            connect(&mut state, &block);
+            chain.add_block(block, NOW).unwrap();
+        }
+        (chain, state)
+    }
+
+    /// Three blocks in a row past this node's drift, each further than the
+    /// last.
+    fn ahead(state: &LedgerState) -> Vec<Block> {
+        let mut state = state.clone();
+        (1..=3)
+            .map(|at| {
+                let block = next(&state, NOW + drift() + 600 * at);
+                connect(&mut state, &block);
+                block
+            })
+            .collect()
+    }
+
+    fn greeted() -> PeerState {
+        PeerState {
+            greeted: true,
+            ..PeerState::default()
+        }
+    }
+
+    /// Every block after the first a slow clock refuses is counted as refused
+    /// for the clock, with the figure it stands ahead by, and none is taken.
+    ///
+    /// The first is refused for its date and every one after it arrives with
+    /// that block missing, so only the first was counted: one a peer, which a
+    /// node with three peers never adds up to the eight the line asks for.
+    #[test]
+    fn the_blocks_hanging_on_one_the_clock_refused_are_counted_for_the_clock() {
+        let (mut chain, state) = settled();
+        let mut peer = greeted();
+        let said: Vec<Option<u64>> = ahead(&state)
+            .into_iter()
+            .map(|block| on_block(&mut chain, &mut peer, block, NOW).ahead_of_the_clock)
+            .collect();
+        assert_eq!(
+            said,
+            [
+                Some(drift() + 600),
+                Some(drift() + 1_200),
+                Some(drift() + 1_800)
+            ],
+            "the blocks after the first a slow clock refused were not counted against it"
+        );
+        assert_eq!(chain.height(), Some(2), "a block past the drift was taken");
+    }
+
+    /// A block whose parent is missing is counted only on a parent this peer
+    /// had refused for the clock, and never on its date alone.
+    ///
+    /// Its date is a number anybody writes for a hash: nothing about its work
+    /// can be checked without the parent. Nor does one peer's refusal count a
+    /// block another peer delivers on it.
+    #[test]
+    fn a_block_dated_past_the_drift_on_a_parent_never_refused_is_not_counted() {
+        let (mut chain, state) = settled();
+        let mut blocks = ahead(&state).into_iter();
+        let (first, second) = (blocks.next().unwrap(), blocks.next().unwrap());
+        let mut stranger = greeted();
+        let alone = on_block(&mut chain, &mut stranger, second.clone(), NOW);
+        assert_eq!(
+            alone.ahead_of_the_clock, None,
+            "a date on a block whose parent nobody sent was counted against the clock"
+        );
+
+        let mut one = greeted();
+        let mut other = greeted();
+        let refused = on_block(&mut chain, &mut one, first, NOW);
+        assert!(refused.ahead_of_the_clock.is_some(), "fixture: refused");
+        let elsewhere = on_block(&mut chain, &mut other, second, NOW);
+        assert_eq!(
+            elsewhere.ahead_of_the_clock, None,
+            "a block was counted on a refusal another peer was given"
+        );
+    }
+
+    /// A block on a refused parent that is itself within the drift is not
+    /// counted, and one a second past it is.
+    ///
+    /// What is counted is a block the clock would refuse on its own. The one
+    /// within the drift is not one, and it leaves the refused parent as the
+    /// one the next block is read against.
+    #[test]
+    fn a_block_on_a_refused_parent_is_counted_only_past_the_drift_itself() {
+        let (mut chain, state) = settled();
+        let mut peer = greeted();
+        let refused = ahead(&state).remove(0);
+        let mut above = state.clone();
+        connect(&mut above, &refused);
+        let within = next(&above, NOW + drift());
+        let past = next(&above, NOW + drift() + 1);
+        assert!(on_block(&mut chain, &mut peer, refused, NOW)
+            .ahead_of_the_clock
+            .is_some());
+
+        let said = on_block(&mut chain, &mut peer, within, NOW).ahead_of_the_clock;
+        assert_eq!(
+            said, None,
+            "a block the clock allows was counted against it"
+        );
+        let said = on_block(&mut chain, &mut peer, past, NOW).ahead_of_the_clock;
+        assert_eq!(
+            said,
+            Some(drift() + 1),
+            "a block past the drift on the refused parent was not counted"
         );
     }
 }

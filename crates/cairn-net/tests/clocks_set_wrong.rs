@@ -404,7 +404,8 @@ fn a_miner_more_than_the_drift_fast_mines_blocks_only_fast_clocks_keep() {
 /// again once the clock allows it, is the one measured above.
 ///
 /// Eight peers because the line needs eight refused blocks, and a slow node
-/// is offered one per peer: see the test after this one.
+/// used to count one per peer: the test after this one holds the same line
+/// with three.
 #[test]
 fn a_node_an_hour_behind_refuses_says_so_and_catches_up_once_its_clock_is_set() {
     const HOUR: i64 = 3_600;
@@ -516,16 +517,17 @@ fn a_node_an_hour_behind_refuses_says_so_and_catches_up_once_its_clock_is_set() 
 /// offered, from everybody, for as long as it is wrong" (`BEHIND_BLOCKS` in
 /// `cairn_net::node`).
 ///
-/// A gap, kept failing on purpose. A slow node refuses the first block each
-/// peer offers past its drift, and every block after it arrives with that
-/// parent missing: an orphan, which is never judged against the clock, and on
-/// which the chain is not asked of that peer again until the clock allows the
-/// refused block (`cairn_net::sync::PeerState::clock_allows_at`). So the count
-/// is one per peer, and stays there for as long as the refused block stands
-/// past the drift: fifty minutes for a node an hour behind. Eight peers or
-/// more and it is said, as the test above shows; three, or a wallet's few, and
-/// a machine an hour behind, or a week behind after a flat battery, follows
-/// nothing and says nothing.
+/// It was a gap. A slow node refuses the first block each peer offers past
+/// its drift, and every block after it arrives with that parent missing: an
+/// orphan, which was never judged against the clock, and on which the chain
+/// is not asked of that peer again until the clock allows the refused block
+/// (`cairn_net::sync::PeerState::clock_allows_at`). So the count was one per
+/// peer, and stayed there for as long as the refused block stood past the
+/// drift: fifty minutes for a node an hour behind. Eight peers or more and it
+/// was said; three, or a wallet's few, and a machine an hour behind, or a week
+/// behind after a flat battery, followed nothing and said nothing. A block
+/// hanging on one the clock refused from the same peer, and itself past the
+/// drift, is counted now (`cairn_net::sync::PeerState::clock_refused`).
 ///
 /// A minute: a block on this network, and hundreds of times what reading
 /// eight blocks from three peers takes.
