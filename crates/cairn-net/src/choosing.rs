@@ -336,24 +336,10 @@ pub struct Chooser {
     final_from: u64,
 }
 
+/// A chooser for a network whose nodes undo as deep as any node does, which is
+/// every public one.
 impl Default for Chooser {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Chooser {
-    /// A chooser for a network whose nodes undo as deep as any node does,
-    /// which is every public one.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::reaching(JOIN_RATHER_THAN_READ)
-    }
-
-    /// A chooser for a network whose nodes undo at most `undo_limit` blocks,
-    /// which is what `ChainStore::undo_limit` says of it.
-    #[must_use]
-    pub fn reaching(undo_limit: u64) -> Self {
         Self {
             claims: HashMap::new(),
             unbacked_hosts: HashMap::new(),
@@ -361,7 +347,24 @@ impl Chooser {
             asked: None,
             proven: None,
             done: false,
+            final_from: JOIN_RATHER_THAN_READ,
+        }
+    }
+}
+
+impl Chooser {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A chooser for a network whose nodes undo at most `undo_limit` blocks,
+    /// which is what `ChainStore::undo_limit` says of it.
+    #[must_use]
+    pub fn reaching(undo_limit: u64) -> Self {
+        Self {
             final_from: undo_limit,
+            ..Self::default()
         }
     }
 
