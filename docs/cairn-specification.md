@@ -2226,15 +2226,24 @@ rather than drawn and so a forger chooses it. The window below the pinned
 header comes along because those headers have to chain into it, and a forger
 cannot swap them without having mined the pinned header on top of its own.
 
-Below the pinned header, only the chaining and the version are checked. The
-retarget could judge those difficulties, since it reads only the header below
-and the network's first block, but those headers are there to seed the median
-of the first header above the pinned one, and judging them would be a refusal
-this exchange has never made; it is left to the wave that revisits the
-window. At and above it, each header is held to the same rules a node
-applies to any block it is handed: the difficulty the retarget demands of it, a
-timestamp later than the median of its window, and its own work added to its
-parent's total.
+From the run's second header on, each header is held to the rules a node
+applies to any block it is handed: the difficulty the retarget demands of the
+header below it, its own work added to that header's total, and, where the run
+holds the window, a timestamp later than the median of the eleven headers below
+it. That is the pinned header and the ninety below it as well as everything
+above. The retarget reads only the header below and the network's first block,
+so the run carries everything the difficulty needs, and the pinned header,
+whose difficulty the tie below starts from, states the one its parent demands
+rather than one of its own choosing. The first header of the run has no parent
+in it and is not judged, and nothing here claims the whole run.
+
+The median is asked from the run's twelfth header on, and from its second when
+the run starts at the first block, where the chain had no more headers than
+these and the rule read exactly them. Below the twelfth header of any other run
+a median over fewer headers is not the rule, and over timestamps that do not
+rise it can stand above the real one and refuse an honest weighing, so a node
+MUST NOT ask it there. Above the pinned header it is always asked, since ninety
+headers lie below the pinned one or the run starts at the first block.
 
 The tip is then held to the run. A node MUST refuse a weighing whose tip's
 difficulty, multiplied by 32, is less than the difficulty of the hardest header
@@ -2325,9 +2334,9 @@ to the tip.
     <tr><td class="n">27</td><td>TailWithoutWork</td><td>a header in the run carries no proof of work</td></tr>
     <tr><td class="n">28</td><td>TailWrongVersion</td><td>a header in the run carries a version other than the one its height requires, where the build can judge the tip</td></tr>
     <tr><td class="n">29</td><td>TailNotConsecutive</td><td>a header in the run does not follow the one below it</td></tr>
-    <tr><td class="n">30</td><td>TailAtTheWrongDifficulty</td><td>above the pinned header, not the difficulty the retarget demands</td></tr>
-    <tr><td class="n">31</td><td>TailOutOfTime</td><td>above the pinned header, not later than the median of its window</td></tr>
-    <tr><td class="n">32</td><td>TailWorkDoesNotAddUp</td><td>above the pinned header, not the work below it plus its own</td></tr>
+    <tr><td class="n">30</td><td>TailAtTheWrongDifficulty</td><td>from the run's second header on, not the difficulty the retarget demands of the header below it</td></tr>
+    <tr><td class="n">31</td><td>TailWorkDoesNotAddUp</td><td>from the run's second header on, not the work below it plus its own</td></tr>
+    <tr><td class="n">32</td><td>TailOutOfTime</td><td>where the run holds the eleven headers below it, not later than their median</td></tr>
     <tr><td class="n">33</td><td>TailMissesWhatWasOpened</td><td>the run does not carry the pinned header, or carries a different one at its height</td></tr>
     <tr><td class="n">34</td><td>TailNotConsecutive</td><td>the run does not end at the tip</td></tr>
     <tr><td class="n">35</td><td>TipFellTooFar</td><td>the tip's difficulty is more than 32 times below the hardest header of the run from the pinned header up</td></tr>
@@ -2552,24 +2561,25 @@ This order is normative.
     <tr><td class="n">24</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a recent header belongs elsewhere</td></tr>
     <tr><td class="n">25</td><td>WrongVersion</td><td>a recent header carries a version other than the one its height requires</td></tr>
     <tr><td class="n">26</td><td>RecentWithoutWork</td><td>a recent header carries no proof of work</td></tr>
-    <tr><td class="n">27</td><td>RecentWorkDoesNotAddUp</td><td>a recent header's total is not the one below it plus its own</td></tr>
-    <tr><td class="n">28</td><td>RecentOutOfTime</td><td>where the run holds the eleven headers below it, a recent header is not later than their median</td></tr>
-    <tr><td class="n">29</td><td>RecentNotConsecutive</td><td>the recent run is not one chain</td></tr>
-    <tr><td class="n">30</td><td>BuriedRunWrongLength</td><td>the buried run is not the height difference, or is past the ceiling</td></tr>
-    <tr><td class="n">31</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a buried header belongs elsewhere</td></tr>
-    <tr><td class="n">32</td><td>BuriedRunNotConsecutive</td><td>a buried header does not follow the one below it</td></tr>
-    <tr><td class="n">33</td><td>BuriedWithoutWork</td><td>a buried header carries no proof of work</td></tr>
-    <tr><td class="n">34</td><td>SoftwareTooOld</td><td>the rules at a buried header's height are past what this build knows</td></tr>
-    <tr><td class="n">35</td><td>WrongVersion</td><td>a buried header carries a version other than the one its height requires</td></tr>
-    <tr><td class="n">36</td><td>BuriedAtTheWrongDifficulty</td><td>not what the retarget demands of it</td></tr>
-    <tr><td class="n">37</td><td>BuriedOutOfTime</td><td>not later than the median of the window before it</td></tr>
+    <tr><td class="n">27</td><td>RecentAtTheWrongDifficulty</td><td>from the second recent header on, the anchor included, not the difficulty the retarget demands of the header below it</td></tr>
+    <tr><td class="n">28</td><td>RecentWorkDoesNotAddUp</td><td>a recent header's total is not the one below it plus its own</td></tr>
+    <tr><td class="n">29</td><td>RecentOutOfTime</td><td>where the run holds the eleven headers below it, a recent header is not later than their median</td></tr>
+    <tr><td class="n">30</td><td>RecentNotConsecutive</td><td>the recent run is not one chain</td></tr>
+    <tr><td class="n">31</td><td>BuriedRunWrongLength</td><td>the buried run is not the height difference, or is past the ceiling</td></tr>
+    <tr><td class="n">32</td><td>WrongNetwork, BeforeTheNetworkOpened</td><td>a buried header belongs elsewhere</td></tr>
+    <tr><td class="n">33</td><td>BuriedRunNotConsecutive</td><td>a buried header does not follow the one below it</td></tr>
+    <tr><td class="n">34</td><td>BuriedWithoutWork</td><td>a buried header carries no proof of work</td></tr>
+    <tr><td class="n">35</td><td>SoftwareTooOld</td><td>the rules at a buried header's height are past what this build knows</td></tr>
+    <tr><td class="n">36</td><td>WrongVersion</td><td>a buried header carries a version other than the one its height requires</td></tr>
+    <tr><td class="n">37</td><td>BuriedAtTheWrongDifficulty</td><td>not what the retarget demands of it</td></tr>
     <tr><td class="n">38</td><td>BuriedWorkDoesNotAddUp</td><td>not the work below it plus its own</td></tr>
-    <tr><td class="n">39</td><td>BuriedHistoryMismatch</td><td>a buried header below the tip does not commit to the forest the run has rebuilt below it</td></tr>
-    <tr><td class="n">40</td><td>BuriedRunNotEndingAtTheTip</td><td>the run does not end at the tip</td></tr>
-    <tr><td class="n">41</td><td>NotOnTheWeighedChain</td><td>the forest rebuilt from the run is not the one the tip commits to</td></tr>
-    <tr><td class="n">42</td><td>StateRootMismatch</td><td>the ledger rebuilt from this does not produce the anchor's state root</td></tr>
-    <tr><td class="n">43</td><td>BadGraceProof</td><td>a path for a note in the grace window does not fold to the cold commitment</td></tr>
-    <tr><td class="n">44</td><td>MissingGraceProof</td><td>a note in the grace window has no path</td></tr>
+    <tr><td class="n">39</td><td>BuriedOutOfTime</td><td>not later than the median of the window before it</td></tr>
+    <tr><td class="n">40</td><td>BuriedHistoryMismatch</td><td>a buried header below the tip does not commit to the forest the run has rebuilt below it</td></tr>
+    <tr><td class="n">41</td><td>BuriedRunNotEndingAtTheTip</td><td>the run does not end at the tip</td></tr>
+    <tr><td class="n">42</td><td>NotOnTheWeighedChain</td><td>the forest rebuilt from the run is not the one the tip commits to</td></tr>
+    <tr><td class="n">43</td><td>StateRootMismatch</td><td>the ledger rebuilt from this does not produce the anchor's state root</td></tr>
+    <tr><td class="n">44</td><td>BadGraceProof</td><td>a path for a note in the grace window does not fold to the cold commitment</td></tr>
+    <tr><td class="n">45</td><td>MissingGraceProof</td><td>a note in the grace window has no path</td></tr>
   </tbody>
 </table>
 
@@ -2594,7 +2604,7 @@ free, past every check that ends at the header, and what it buys is not a note
 but a place in the eviction order, which is the one structure a receiver builds
 from the list rather than from the commitment.
 
-Forty-one is what a forest proof alone cannot say. A proof says a header sits
+Forty-two is what a forest proof alone cannot say. A proof says a header sits
 at a position in a forest; it does not say the forest is a chain, and the forest
 belongs to whoever made the tip. The header forest is append only, so the
 receiver does not have to take the proof's word for it: it holds the forest as
@@ -2604,12 +2614,12 @@ forest the tip commits to. Under a swap anywhere below the tip it does not, and
 it does not matter whether any draw would have looked there. The tip is not in
 its own history, so the tip's own leaf is the one leaf that MUST NOT be added.
 
-Thirty-six, thirty-seven and thirty-eight are what make the burial cost
+Thirty-seven, thirty-eight and thirty-nine are what make the burial cost
 something. Before them the sender chose those difficulties and could set them
 all to the floor, so a thousand blocks of burial were a thousand hashes. The
 window they are judged against starts as the recent headers that came with the
 ledger and moves forward with the run, so every step is judged by the rule a
-node applies to any block it is handed. Thirty-nine is the same rule's last
+node applies to any block it is handed. Forty is the same rule's last
 field: a block's `history` is the forest below it, which is the forest the walk
 holds when it reaches that header, so each header below the tip MUST be
 compared with it before its own leaf is added. Without it a sender who mined
@@ -2617,20 +2627,25 @@ the burial could write anything there, and the newcomer would take the ledger
 and then refuse the first block above it for the field the handover let
 through.
 
-**Twenty-eight is asked only where the recent run holds the rule's whole
+**Twenty-nine is asked only where the recent run holds the rule's whole
 window.** The median reads the eleven headers below a block, so from the
 twelfth recent header on it is exactly the rule each of them was accepted
 under, and a run that starts at the first block holds every header the rule
 read from its first. Below the twelfth entry of any other run a median over
 fewer headers is not the rule, and over timestamps that do not rise it can
 stand above the real one and refuse an honest handover, so a node MUST NOT ask
-it there. The retarget is not asked of the recent run. Since the retarget
-became ASERT it could be, from the second header on, because it reads only the
-header below and the network's first block; it is not, because every header of
-the run is the anchor's hash ancestry and was judged as a block by every node
-that holds it, so asking would refuse nothing the chain does not already
-refuse, and a new refusal in this list is left to the wave that revisits the
-window.
+it there.
+
+**Twenty-seven is asked from the second recent header on, the anchor
+included.** The retarget reads only the header below and the network's first
+block, so the run carries everything it needs. The anchor is the header whose
+difficulty seeds the first buried header's demand and the bound of four around
+it, and the buried walk starts above it, so nothing else judges it. The first
+recent header has no parent in the run and is not judged, as its total is not.
+Every header of the run is the anchor's hash ancestry, so a difficulty or a
+total bent anywhere in it also breaks the link above it; twenty-seven and
+twenty-eight come before thirty so that the refusal says what was wrong rather
+than that the run is not one chain.
 
 ### What is pinned by a commitment, and what is not
 

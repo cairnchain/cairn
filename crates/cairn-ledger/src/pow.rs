@@ -105,8 +105,16 @@ pub const MAX_RETARGET_FACTOR: u128 = 4;
 /// ninety gaps, and it stays because the number is on the wire: a handover
 /// carries this many headers ending at its ledger, and the run a newcomer
 /// weighs starts [`crate::sampling::BELOW_THE_PINNED`] below the deepest
-/// header its draw pinned. Shrinking it to the median's eleven changes both
-/// exchanges, and it is an open question rather than part of the rule change.
+/// header its draw pinned.
+///
+/// What it is for now, besides the median's eleven, is the reach of what a
+/// newcomer judges. Every header of both runs from the second on is held to
+/// the retarget and the work sum, so a fork point within the window is one
+/// those checks see, and one below it is not. Shrinking it changes both
+/// exchanges, so old and new nodes could no longer hand each other a ledger or
+/// a weighing: a change for a network that restarts anyway. Its floor would
+/// then be twelve and not eleven, since `sampling` asserts the median's whole
+/// window below the pinned header, one more than the walk reads.
 pub const RECENT_HEADERS: usize = 91;
 
 const _: () = assert!(

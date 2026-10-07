@@ -28,7 +28,9 @@ use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
 use cairn_ledger::note::Note;
 use cairn_ledger::transaction::CoinbaseTransaction;
-use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
+use cairn_ledger::validation::{
+    assemble_block, connect_block, mine_block, mine_header, ConsensusParams,
+};
 use cairn_ledger::LedgerState;
 
 const NOW: u64 = 2_000_000_000;
@@ -223,4 +225,39 @@ fn a_run_spliced_out_of_two_branches_is_refused_though_its_heights_run_on() {
         "the first header that does not name the one before it"
     );
     assert!(joined.is_empty());
+}
+
+/// A run whose header carries a difficulty or a total the one below it does
+/// not demand is refused at that header.
+///
+/// `accept` holds a handover's run to the retarget and the work sum from its
+/// second header on, and this is the door a ledger comes through however it
+/// was obtained, so it asks the same question by the same function. Bent and
+/// mined again without the run being rebuilt above it, the header above no
+/// longer names it, and the refusal used to come one height later for the
+/// broken link; it comes at the header that is wrong.
+#[test]
+fn a_run_carrying_what_its_parents_do_not_demand_is_refused_where_it_does() {
+    let params = ConsensusParams::testnet();
+    let (state, headers) = handed(8);
+    let bends: [fn(&mut BlockHeader); 2] = [
+        |header| {
+            header.difficulty += 1;
+            header.total_work += 1;
+        },
+        |header| header.total_work += 1,
+    ];
+    for bend in bends {
+        let mut run = headers.clone();
+        bend(&mut run[4]);
+        run[4] = mine_header(run[4], ATTEMPTS).unwrap();
+
+        let mut joined = ChainStore::new(params.clone());
+        assert_eq!(
+            joined.adopt(state.clone(), &run),
+            Err(ChainError::BrokenRun { height: 4 }),
+            "the header that does not carry what the one below it demands"
+        );
+        assert!(joined.is_empty());
+    }
 }

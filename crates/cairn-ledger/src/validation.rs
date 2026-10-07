@@ -1624,6 +1624,56 @@ pub fn expected_difficulty(state: &LedgerState, params: &ConsensusParams) -> u64
     }
 }
 
+/// What a header in a run states that the one below it does not demand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Undemanded {
+    /// The header at `at` states difficulty `stated`, and the retarget asks
+    /// `demanded` of the header below it.
+    Difficulty { at: u64, stated: u64, demanded: u64 },
+    /// The total the header at `at` states is not the one below it plus its
+    /// own work.
+    Work { at: u64 },
+}
+
+/// Whether a header carries what the one below it demands: the difficulty the
+/// retarget asks of that parent, against the schedule from the network's first
+/// block, and the parent's total work plus its own.
+///
+/// One question for every run of headers a node takes without having held
+/// them as blocks: the recent run and the buried run of a handover, the whole
+/// of the run a weighing walks, and the run a ledger is adopted with. Each
+/// caller walks its run from the second header on and says in its own words
+/// what came back. The first header of a run has no parent in the run and is
+/// not asked, so a run is judged from its second header, never from its first.
+///
+/// Since the retarget became ASERT a header's difficulty follows from its
+/// parent and the network's origin alone, so nothing outside the run is needed
+/// to ask it. Before this, the buried run asked it, the weighed run only above
+/// its pinned header, and the recent run and an adopted run not at all, each
+/// walk written out where it stood: one rule asked three ways, and a fourth
+/// that did not ask.
+///
+/// The sum is taken without saturating, so a header adding nothing at the most
+/// work a total can state does not meet its parent's total at the ceiling.
+pub fn carries_what_its_parent_demands(
+    parent: &BlockHeader,
+    header: &BlockHeader,
+    params: &ConsensusParams,
+) -> Result<(), Undemanded> {
+    let demanded = next_difficulty(&parent.summary(), params.origin(), params.target_block_time);
+    if header.difficulty != demanded {
+        return Err(Undemanded::Difficulty {
+            at: header.height,
+            stated: header.difficulty,
+            demanded,
+        });
+    }
+    if Some(header.total_work) != parent.total_work.checked_add(work_of(header.difficulty)) {
+        return Err(Undemanded::Work { at: header.height });
+    }
+    Ok(())
+}
+
 /// Searches for a nonce that satisfies the header's difficulty.
 ///
 /// Deliberately the naive loop. A real miner runs it across cores and rolls the
