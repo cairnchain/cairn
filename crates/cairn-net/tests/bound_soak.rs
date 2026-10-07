@@ -126,14 +126,12 @@ fn rss_kb() -> u64 {
         .args(["-o", "rss=", "-p"])
         .arg(std::process::id().to_string())
         .output();
-    out.ok()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .parse()
-                .unwrap_or(0)
-        })
-        .unwrap_or(0)
+    out.ok().map_or(0, |out| {
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    })
 }
 
 /// A coinbase of several notes to one owner, so a block pushes several notes
@@ -381,7 +379,7 @@ fn soak_holds(run: &Run) {
     // The published ceiling is counted in blocks of the largest size the rules
     // allow. These are far smaller, so the same window counted in these blocks
     // is the ceiling that can actually be reached here.
-    let held_block = run.largest_record as usize + HELD_OVERHEAD;
+    let held_block = usize::try_from(run.largest_record).unwrap() + HELD_OVERHEAD;
     let ceiling = ChainStore::held_bytes_ceiling(&params).min(HELD_WINDOW * held_block);
 
     // The chain really ran and the hot set really evicted: the cold set, which
@@ -670,45 +668,37 @@ fn the_pool_at_its_full_ceiling() {
 /// the book past them.
 #[test]
 fn the_address_book_holds_its_ceilings() {
-    // One neighbourhood, flooded. Every address shares a /16, so the book
-    // keeps at most a group's worth of them.
+    // One neighbourhood, flooded four times over. Every address shares a /16,
+    // so the book keeps a group's worth of them: no more, and since every one
+    // is a stranger's that can give way to the next, no fewer.
     let mut one_group = AddressBook::new();
-    for n in 0..(MAX_PER_GROUP as u32 * 4) {
-        let octet_c = (n >> 8) as u8;
-        let octet_d = (n & 0xff) as u8;
+    for n in 0..MAX_PER_GROUP * 4 {
+        let [_, _, octet_c, octet_d] = u32::try_from(n).unwrap().to_be_bytes();
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, octet_c, octet_d)), 8333);
         one_group.insert(address);
     }
-    assert!(
-        one_group.len() <= MAX_PER_GROUP,
-        "one neighbourhood holds {} addresses against a ceiling of {MAX_PER_GROUP}",
+    assert_eq!(
+        one_group.len(),
+        MAX_PER_GROUP,
+        "one neighbourhood offered {} addresses holds {} against a ceiling of {MAX_PER_GROUP}",
+        MAX_PER_GROUP * 4,
         one_group.len()
     );
 
-    // Many neighbourhoods, flooded. Spread across distinct /16s so no group
-    // caps them first, the whole book is what holds.
+    // Many neighbourhoods, flooded twice over. One address to a /16, so no
+    // group caps them first and the whole book is what holds.
     let mut whole = AddressBook::new();
-    let mut spread = 0u32;
-    for first in 1..=254u8 {
-        for second in 0..=254u8 {
-            // Skip the loopback and private ranges the book declines to hold.
-            if first == 127 || first == 10 || (first == 192 && second == 168) {
-                continue;
-            }
-            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(first, second, 0, 1)), 8333);
-            whole.insert(address);
-            spread += 1;
-            if spread >= MAX_ADDRESSES as u32 * 2 {
-                break;
-            }
-        }
-        if spread >= MAX_ADDRESSES as u32 * 2 {
-            break;
-        }
+    for n in 0..MAX_ADDRESSES * 2 {
+        // From 1.0.0.1 up, one /16 apart.
+        let [_, _, first, second] = u32::try_from(n + 256).unwrap().to_be_bytes();
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(first, second, 0, 1)), 8333);
+        whole.insert(address);
     }
-    assert!(
-        whole.len() <= MAX_ADDRESSES,
-        "the book holds {} addresses against a ceiling of {MAX_ADDRESSES}",
+    assert_eq!(
+        whole.len(),
+        MAX_ADDRESSES,
+        "the book offered {} addresses holds {} against a ceiling of {MAX_ADDRESSES}",
+        MAX_ADDRESSES * 2,
         whole.len()
     );
 }
