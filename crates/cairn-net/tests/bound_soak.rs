@@ -19,9 +19,10 @@
 //! block entries against [`HELD_WINDOW`]), and what it keeps on disk (the
 //! block log against the budget it was handed). The pool and the address book
 //! ([`MAX_POOLED`], [`MAX_POOL_BYTES`], [`MAX_ADDRESSES`], [`MAX_PER_GROUP`])
-//! are held on their own structures, filled past their ceilings. And it holds
-//! that the node's own reported figures agree with what it holds, since those
-//! are what an operator reads.
+//! are held on their own structures: the book flooded past both of its
+//! ceilings in the ordinary suite, the pool offered past its count in a run
+//! ignored for its time. And it holds that the node's own reported figures
+//! agree with what it holds, since those are what an operator reads.
 //!
 //! No one chain sits at every bound at once, and the catalogue lists them as a
 //! set of edges to cover rather than a single shape. A chain that evicts a
@@ -220,6 +221,8 @@ fn soak(blocks: usize, directory: &Path) -> Run {
     let mut largest_record = 0u64;
     let (mut most_hot, mut most_grace) = (0usize, 0usize);
     let chunk = (blocks / 12).max(1);
+    // The last two columns are the machine's and are only printed; every
+    // other column is a count the node keeps.
     let started = Instant::now();
 
     println!(
@@ -323,11 +326,13 @@ fn soak(blocks: usize, directory: &Path) -> Run {
         .unwrap()
         .flatten()
         .map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            (
-                name,
-                disk_bytes(&entry.path()).max(entry.metadata().map_or(0, |m| m.len())),
-            )
+            let path = entry.path();
+            let bytes = if path.is_dir() {
+                disk_bytes(&path)
+            } else {
+                disk_bytes_of(&path)
+            };
+            (entry.file_name().to_string_lossy().into_owned(), bytes)
         })
         .collect();
     files.sort();
@@ -465,8 +470,9 @@ fn soak_holds(run: &Run) {
     let begins = run.log_begins_at.unwrap_or(0);
     assert!(
         last.height + 1 - begins > WARM_BODIES,
-        "the budget left {} blocks on disk, not more than the {WARM_BODIES} bodies a node keeps \
-         in memory, so this run measured a node holding its undo window: raise KEEP",
+        "the budget left {} blocks on disk, not more than the {WARM_BODIES} bodies a node \
+         keeps in memory, so this run measured a node holding every body of its undo window: \
+         raise KEEP",
         last.height + 1 - begins
     );
     let bound = disk_bound(&params, run.largest_record);
@@ -490,15 +496,55 @@ fn a_node_soaked_a_short_run() {
 
 /// **The same, long enough to stand for a running node.**
 ///
-/// Twelve thousand blocks of a hot set evicting every block and a log trimmed
-/// every round. Measured on an Apple M-series laptop writing this: the hot set
-/// held at 64 throughout, the block log stayed within a block of the 256 kB
-/// budget while the chain grew past 190 000 blocks of history on disk, the
-/// cold set grew to roughly 190 000 notes, and resident memory moved inside
-/// the noise of the machine. Run it with:
+/// Twelve thousand blocks, which at one a minute is eight days and eight hours
+/// of chain; the catalogue asks for twelve hours, which is seven hundred and
+/// twenty. Run it with:
 ///
 /// `cargo test -p cairn-net --test bound_soak a_node_soaked_for_a_long_run -- \
 ///   --ignored --nocapture`
+///
+/// Measured on 7 October 2026 on an Apple M-series laptop, in under three
+/// minutes a run:
+///
+/// - 191 936 notes fell out of the hot set, sixteen a block. The hot set held
+///   no more than 64 notes after any block, and exactly 64, its cap, from the
+///   fourth on; the grace window held 1 024 after every block once it filled
+///   (64 blocks of 16), against its 8 192.
+/// - What is held in memory in blocks read 94 640 bytes at every mark from
+///   block 77 to the end: 65 bodies of 844 bytes, the tip's and the 64 warm
+///   ones below it, each with its 612 bytes of entry. The undo records and
+///   the block entries reached 1 025, the window, at block 1 025 and stayed
+///   there.
+/// - Once upkeep had caught the last block, the log held 72 080 bytes, 85
+///   blocks from height 11 915, against the 65 536 byte budget and the 73 204
+///   it comes to with the burial. Between rounds of upkeep it read as much as
+///   156 032, since blocks came faster than one round a second.
+/// - The rest of the disk: the headers took 2 184 000 bytes, 182 a block, and
+///   the forest 767 776, 64 a block, which are the two costs the README names
+///   as growing. The ledger file read between 405 029 and 500 001 bytes at
+///   every mark of two runs, in no direction.
+/// - Resident memory read 32.0 MB at block 1 000 and 38.8 MB at block 12 000
+///   in one run, and 32.1 MB and 35.6 MB in another, with 43.4 MB between.
+///   Read from outside with `vmmap --summary` during the second, the
+///   allocator held about 21 000 live allocations from block 1 000 to block
+///   11 000, coming to 21.8 MB until block 3 000 and to between 24.3 and
+///   25.0 MB from block 4 000 on. What resident memory moved beyond that is
+///   the allocator's fragmentation, which the same reading put at 7 to 12 MB.
+///
+/// Against the README these are its terms at toy sizes, not its figures. Its
+/// 68 MB of hot notes is a hot set of 131 072 notes where this one holds 64;
+/// its 8.6 MB of block bodies is the same warm bodies at 128 kB each; its
+/// undo records, 51 MB at 64 payments a block and 400 MB on full blocks, are
+/// the same 1 025 records, here of coinbases alone; and its 129 MB a year of
+/// headers is the 246 bytes a block measured here, at one block a minute. A
+/// run at the real parameters would need the default hot capacity and its
+/// 1 024 evictions a block, blocks filled to 128 kB with signed transfers
+/// (this builder makes coinbases only), the real burial of 1 024 blocks above
+/// the budget, and the real gigabyte budget, which full blocks first exceed
+/// after about 7 600 of them: some sixteen thousand full blocks to see the log
+/// trimmed and held, two gigabytes of disk, and a resident set of a few
+/// hundred megabytes to read against the README's sum. That is a job for a
+/// machine of its own and not for this suite.
 #[test]
 #[ignore = "long soak; see the doc comment to run it and for its figures"]
 fn a_node_soaked_for_a_long_run() {
