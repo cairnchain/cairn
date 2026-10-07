@@ -16,19 +16,26 @@
 //! one, is outranked at its floor by every byte of such filler, for as long
 //! as somebody pays to send it.
 //!
-//! **Measured** on testnet rules with the tier at 2 048 notes, so the place
-//! budget of a full tier, the eviction cap of 1 024 less the coinbase's 16,
-//! is reached in a test. Ten blocks of filler at the floor, three payments
-//! sent with the first:
+//! **Measured** on testnet rules with a quarter of its block and of its
+//! eviction cap, and a full tier of 2 048 notes, so a block has 240 places
+//! for its transfers and no room in the tier on top. Three payments, at one,
+//! two and five times their floor, sent before the first block; then six
+//! blocks of filler, or four of splits buying the places:
 //!
 //! ```text
-//! FIGURES
+//!                         carried by block    the spammer, a block
+//!                         1x    2x    5x      paid        burned     places
+//! filler, no place        none  1     1         317 505          0   0
+//! splits, every place     1     1     1       1 347 202  1 260 000   120 240 240 240
 //! ```
 //!
 //! A payment at twice its floor is carried by the first block, as the
-//! catalogue asks, and at its floor by none while the filler lasts. Buying
-//! every place instead, at the floor, delays nobody: a payment at its floor
-//! ranks above the place buyer's own floor, and is carried first.
+//! catalogue asks, and at its floor by none while the filler lasts, for ten
+//! pebbles a byte: 0.19 CAIRN an hour here, 0.78 at testnet's full block,
+//! all of it to the miners. Buying every place instead, at the floor, delays
+//! nobody: a payment at its floor ranks above the place buyer's own floor,
+//! and its place comes out of the spammer's. Testnet's 1 008 places would
+//! burn 6 048 000 pebbles a block, 3.6 CAIRN an hour.
 
 #![allow(
     clippy::unwrap_used,
@@ -43,7 +50,7 @@
 
 use std::collections::BTreeSet;
 
-use cairn_chain::{fee_floor, places_taken, ChainStore};
+use cairn_chain::{fee_floor, places_taken, ChainStore, MIN_FEE_PER_WEIGHT};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{Address, Note, NoteId};
@@ -56,14 +63,17 @@ use cairn_primitives::{Amount, Hash32};
 
 const ATTEMPTS: u64 = 1 << 20;
 
-/// Testnet's eviction cap and place price, with a tier small enough to fill,
-/// rewards spendable at once, and a quarter of testnet's block.
+/// Testnet's place price, with a tier small enough to fill, rewards
+/// spendable at once, and a quarter of testnet's block and of its eviction
+/// cap.
 ///
 /// The quarter is for the suite's sake: filling a block is a signature a
-/// transfer, and a full testnet block is seven hundred of them. Nothing here
-/// depends on the size but the price, which is ten pebbles a byte of it: at
-/// the full 131 072 bytes the same filler cost 1 300 215 pebbles a block,
-/// 0.78 CAIRN an hour of sixty second blocks.
+/// transfer, and a full testnet block is seven hundred of them. The cap is
+/// cut with the block so the two limits stand as they do on testnet, where a
+/// full tier leaves a block 1 008 places, which outputs fill in about a third
+/// of its bytes: here 240, in about a third of these. At the full 131 072
+/// bytes the filler cost 1 300 215 pebbles a block, 0.78 CAIRN an hour of
+/// sixty second blocks.
 fn params() -> ConsensusParams {
     ConsensusParams {
         max_block_bytes: 32 * 1024,
@@ -71,9 +81,13 @@ fn params() -> ConsensusParams {
             .with_coinbase_maturity(0)
             .with_place_price(PLACE_PRICE)
             .with_hot_capacity(2_048)
-            .with_max_evictions(1_024)
+            .with_max_evictions(256)
     }
 }
+
+/// The outputs of each of the place buyer's splits: a hundred and twenty
+/// places, so two of them take every place a full tier leaves a block.
+const PLACE_BUYER_OUTPUTS: usize = 121;
 
 fn key(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
@@ -235,9 +249,9 @@ fn fee_of(transfer: &Transfer, spent: &Note) -> u64 {
     spent.value.as_pebbles() - transfer.total_output().unwrap().as_pebbles()
 }
 
-/// The chain the spam and the payments run on: the spammer holding
-/// `spam_notes` small hot notes and a coinbase's worth of large ones, the
-/// payer `payer_notes`.
+/// The chain the spam and the payments run on, with a full tier: the spammer
+/// holding `spam_notes` small hot notes and a coinbase's worth of large ones,
+/// the payer `payer_notes`.
 struct Funded {
     chain: Chain,
     small: Vec<(NoteId, Note)>,
@@ -272,7 +286,17 @@ fn funded(spam_notes: usize, payer_notes: usize) -> Funded {
     }
     small.truncate(spam_notes);
 
-    // After the splits, so the tier lets go of them last.
+    // A full tier, so a block has its eviction cap less the coinbase for the
+    // places of its transfers and no room in the tier on top.
+    while chain.store.state().hot_len() < params.hot_capacity {
+        chain.mine_these(&key(97), Vec::new(), Amount::ZERO);
+    }
+    assert_eq!(
+        chain.store.places_for_transfers(),
+        params.max_evictions_per_block - params.max_coinbase_outputs
+    );
+
+    // After everything else, so the tier lets go of them last.
     let block = chain.mine_these(&spammer, Vec::new(), Amount::ZERO);
     let large = paid(&block, &spammer);
     let block = chain.mine_these(&payer, Vec::new(), Amount::ZERO);
@@ -297,6 +321,8 @@ struct Watched {
     blocks: usize,
     /// Transfers the pool refused as needing more places than a block has.
     too_many_places: usize,
+    /// The places the spammer's transfers took in each block.
+    places: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,8 +330,8 @@ enum Spam {
     /// Hot notes spent back to the spammer, one in and one out: no place
     /// taken, so ten pebbles a unit of weight at the floor.
     Bytes,
-    /// Hot notes split in two hundred and fifty six at the floor and the
-    /// burn: every place the next block has.
+    /// Hot notes split in [`PLACE_BUYER_OUTPUTS`] at the floor and the burn:
+    /// every place the next block has.
     Places,
 }
 
@@ -342,10 +368,10 @@ fn under_spam(spam: Spam, blocks: usize, times: &[u64]) -> Watched {
         burned: 0,
         blocks,
         too_many_places: 0,
+        places: Vec::new(),
     };
     let mut spending: std::collections::HashMap<Hash32, Note> = std::collections::HashMap::new();
     for number in 1..=blocks {
-
         // Top the pool up with what fills the next block and then some.
         let hot: BTreeSet<NoteId> = notes
             .iter()
@@ -357,7 +383,10 @@ fn under_spam(spam: Spam, blocks: usize, times: &[u64]) -> Watched {
             .pooled_spenders()
             .map(|(note, _)| *note)
             .collect();
-        for (id, note) in notes.iter().filter(|(id, _)| hot.contains(id) && !spoken_for.contains(id)) {
+        for (id, note) in notes
+            .iter()
+            .filter(|(id, _)| hot.contains(id) && !spoken_for.contains(id))
+        {
             // A split's own outputs are too small to pay another split's
             // burn, so only the notes it was funded with are split.
             if spam == Spam::Places && note.value.as_pebbles() < 100_000_000 {
@@ -365,7 +394,9 @@ fn under_spam(spam: Spam, blocks: usize, times: &[u64]) -> Watched {
             }
             let transfer = match spam {
                 Spam::Bytes => at_floor_times(&params, *id, *note, &spammer, 1, 1),
-                Spam::Places => at_floor_times(&params, *id, *note, &spammer, 256, 1),
+                Spam::Places => {
+                    at_floor_times(&params, *id, *note, &spammer, PLACE_BUYER_OUTPUTS, 1)
+                }
             };
             spending.insert(transfer.id(), *note);
             match chain.store.accept_transfer(transfer) {
@@ -376,6 +407,7 @@ fn under_spam(spam: Spam, blocks: usize, times: &[u64]) -> Watched {
         }
 
         let block = chain.mine_selection();
+        let mut places = 0;
         for transfer in &block.transfers {
             if let Some(at) = ids.iter().position(|id| *id == transfer.id()) {
                 watched.carried[at] = Some(number);
@@ -383,10 +415,11 @@ fn under_spam(spam: Spam, blocks: usize, times: &[u64]) -> Watched {
             }
             let spent = spending[&transfer.id()];
             let fee = fee_of(transfer, &spent);
-            let places = transfer.outputs.len().saturating_sub(1);
-            let burn = params.burn_for(places).unwrap().as_pebbles();
+            // Every spam transfer spends one hot note.
+            let taken = places_taken(transfer, 1);
             watched.paid += fee;
-            watched.burned += burn;
+            watched.burned += params.burn_for(taken).unwrap().as_pebbles();
+            places += taken;
             notes.extend(transfer.created_notes());
         }
         let spent: BTreeSet<NoteId> = block
@@ -395,6 +428,7 @@ fn under_spam(spam: Spam, blocks: usize, times: &[u64]) -> Watched {
             .flat_map(|transfer| transfer.inputs.iter().map(|input| input.note_id))
             .collect();
         notes.retain(|(id, _)| !spent.contains(id));
+        watched.places.push(places);
     }
     watched
 }
@@ -431,37 +465,56 @@ fn a_payment_at_twice_its_floor_goes_through_filler_at_the_floor() {
         "a payment at its floor ranks below filler at the floor, which takes no \
          place: the pool's order is by what a fee leaves per unit of weight"
     );
-    assert_eq!(watched.burned, 0, "filler that takes no place burns nothing");
+    assert_eq!(
+        watched.burned, 0,
+        "filler that takes no place burns nothing"
+    );
+    // Ten pebbles a byte of the room a block has for transfers, less what the
+    // last transfer that would not fit leaves empty.
+    let full = ChainStore::room_for_transfers(params().max_block_bytes) as u64 * MIN_FEE_PER_WEIGHT;
     assert!(
-        per_block > 1_000_000,
-        "keeping a block full costs about ten pebbles a byte: {per_block}"
+        per_block <= full && per_block * 100 > full * 95,
+        "keeping a block full costs about ten pebbles a byte of it, {full}: {per_block}"
     );
 }
 
 /// **Buying every place at the floor holds up no payment.**
 ///
-/// G12: a block has room for its eviction cap less the coinbase's sixteen in
-/// new places, and a sender splitting notes at the floor and the burn can ask
-/// for all of them. It pays the burn on every one, and ranks below a payment
-/// at its own floor, because a split's floor is mostly places the miner cannot
-/// keep and its weight is mostly places.
+/// G12: a full tier leaves a block its eviction cap less the coinbase's
+/// sixteen in new places, and a sender splitting notes at the floor and the
+/// burn can ask for all of them, and gets them in every block nobody else
+/// asks. It pays the burn on every one, and ranks below a payment at its own
+/// floor, because a split's floor is mostly places the miner cannot keep and
+/// its weight is mostly places: so the payments' places come out of the
+/// spammer's, and the split that no longer fits waits.
 #[test]
 fn buying_every_place_at_the_floor_holds_up_no_payment() {
-    let watched = under_spam(Spam::Places, 4, &[1]);
-    let per_block = (watched.paid) / watched.blocks as u64;
+    let watched = under_spam(Spam::Places, 4, &[1, 2, 5]);
+    let per_block = watched.paid / watched.blocks as u64;
+    let burned = watched.burned / watched.blocks as u64;
     println!(
-        "\n  places bought at the floor: a payment at its floor carried by block {:?}",
-        watched.carried[0]
+        "\n  places bought at the floor: payments at 1x, 2x and 5x their floor carried by blocks {:?}",
+        watched.carried
     );
     println!(
-        "  the spammer paid {per_block} pebbles a block, of which {} burned ({:.3} CAIRN a block)\n",
-        watched.burned / watched.blocks as u64,
-        cairn(watched.burned / watched.blocks as u64)
+        "  the spammer took {:?} places a block, paid {per_block} pebbles a block, of which \
+         {burned} burned ({:.4} CAIRN a block)\n",
+        watched.places,
+        cairn(burned)
     );
-    assert_eq!(watched.carried[0], Some(1));
+    let every = params().max_evictions_per_block - params().max_coinbase_outputs;
+    assert_eq!(watched.carried, vec![Some(1); 3]);
     assert_eq!(
         watched.too_many_places, 0,
-        "no transfer of two hundred and fifty six outputs is past one block's places"
+        "no split of {PLACE_BUYER_OUTPUTS} outputs is past one block's places"
     );
-    assert!(watched.burned > 0);
+    assert!(
+        watched.places[1..].iter().all(|taken| *taken == every),
+        "fixture: the spammer did not take every place of the blocks after the payments: {:?}",
+        watched.places
+    );
+    assert!(
+        watched.places[0] < every,
+        "the payments were carried without taking any place the spammer asked for"
+    );
 }

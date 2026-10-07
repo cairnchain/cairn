@@ -77,6 +77,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::fmt::Write;
 
 use cairn_chain::{ChainError, ChainStore};
 use cairn_crypto::{PublicKey, SecretKey};
@@ -886,12 +887,14 @@ fn the_tables_in_the_header() {
         let mut line = format!("{share:<5}");
         for network in &networks {
             let outcome = find(share, Strategy::Selfish, network.name, TIMED);
-            line.push_str(&format!(
+            write!(
+                line,
                 "   {:.2}  {:.3}  {:.3}",
                 outcome.gamma(),
                 outcome.revenue(),
                 eyal_sirer(share, outcome.gamma())
-            ));
+            )
+            .unwrap();
         }
         println!("{line}");
     }
@@ -902,13 +905,15 @@ fn the_tables_in_the_header() {
         for network in &networks {
             let timed = find(share, Strategy::LeadStubborn, network.name, TIMED);
             let flat = find(share, Strategy::LeadStubborn, network.name, FLAT);
-            line.push_str(&format!(
+            write!(
+                line,
                 "   {:.3} {:.2}  {:.3} {:.2}",
                 timed.revenue(),
                 timed.deep_gamma().unwrap_or(f64::NAN),
                 flat.revenue(),
                 flat.deep_gamma().unwrap_or(f64::NAN)
-            ));
+            )
+            .unwrap();
         }
         println!("{line}");
     }
@@ -917,7 +922,7 @@ fn the_tables_in_the_header() {
         let mut line = format!("{share:<5}");
         for network in &networks {
             let outcome = find(share, Strategy::Honest, network.name, TIMED);
-            line.push_str(&format!("   {:.3}", outcome.revenue()));
+            write!(line, "   {:.3}", outcome.revenue()).unwrap();
         }
         println!("{line}");
     }
