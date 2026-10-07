@@ -14666,9 +14666,10 @@ mod peers_and_loops {
     /// It took the claimers' answers as the end of the question: everyone
     /// asked had answered, so it returned with nothing, and the archivist in
     /// its book was dialled only when nobody connected claimed to be one. The
-    /// first look hands in the claimer's empty answer; the next finds the
-    /// archivist dialled and the question still open, and ends it, so the
-    /// test waits on no clock.
+    /// first look hands in the claimer's empty answer. The second finds the
+    /// archivist dialled and the question still open, though everyone asked
+    /// has answered, since the archivist has not introduced itself yet. The
+    /// third ends it, so the test waits on no clock.
     #[test]
     fn a_node_whose_claimers_placed_nothing_reaches_for_an_archivist_it_met() {
         let node = quiet();
@@ -14684,16 +14685,19 @@ mod peers_and_loops {
         let dialled_at_the_second = AtomicUsize::new(0);
         let recovered =
             node.recover_proofs_with(&[(7, Hash32::ZERO)], Duration::from_secs(60), || {
-                if looks.fetch_add(1, Ordering::SeqCst) == 0 {
-                    node.shared.take_placed(1, &nothing_placed());
-                } else {
-                    dialled_at_the_second.store(dialled(&node), Ordering::SeqCst);
-                    node.shared.asking().found.insert(
-                        7,
-                        ForestProof {
-                            siblings: Vec::new(),
-                        },
-                    );
+                match looks.fetch_add(1, Ordering::SeqCst) {
+                    0 => node.shared.take_placed(1, &nothing_placed()),
+                    1 => dialled_at_the_second.store(dialled(&node), Ordering::SeqCst),
+                    2 => {
+                        node.shared.asking().found.insert(
+                            7,
+                            ForestProof {
+                                siblings: Vec::new(),
+                            },
+                        );
+                    }
+                    // Only for a question that does not end once answered.
+                    _ => thread::sleep(RECOVERY_POLL),
                 }
             });
         let reached = node
@@ -14704,11 +14708,15 @@ mod peers_and_loops {
         stop_all(&node);
         assert!(reached, "the archivist it met was not dialled");
         assert_eq!(
+            dialled_at_the_second.load(Ordering::SeqCst),
+            1,
+            "the archivist was not dialled once the claimer had answered"
+        );
+        assert_eq!(
             looks.load(Ordering::SeqCst),
-            2,
+            3,
             "the question ended on the claimer's word, without waiting for the archivist"
         );
-        assert_eq!(dialled_at_the_second.load(Ordering::SeqCst), 1);
         assert_eq!(recovered.answered, 1, "{recovered:?}");
     }
 
