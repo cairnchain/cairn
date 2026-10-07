@@ -1010,7 +1010,7 @@ pub struct Reaction {
     /// branch, unjudged.
     ///
     /// Named so the node can write down who sent it. A body held aside is
-    /// only tried when its branch becomes the heaviest, usually on the
+    /// only tried when the fork choice takes its branch, usually on the
     /// delivery of a later block by somebody else, and by then the one
     /// message that could say whose body it was is long gone.
     pub held_aside: Option<Hash32>,

@@ -2861,8 +2861,9 @@ a node commits to is the one it keeps. Left to the wire, that choice belongs to
 whoever answers first, and the first answer is the one an attacker races to
 give. The choice is therefore made once, against every claim the node has heard,
 by the node itself. A node with a chain of its own, and a node facing a chain
-short enough to be undone, simply asks: following the wrong short branch is
-undone by the fork choice like any other.
+short enough to be undone, asks without that wait, and only for a claim its
+fork choice would follow (see *Fork choice*): following the wrong short branch
+is undone by the fork choice like any other.
 
 ### What a node MUST refuse
 

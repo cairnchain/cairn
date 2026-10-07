@@ -1862,7 +1862,7 @@ struct Shared {
 /// fails a switch costs its sender and nobody else.
 ///
 /// A block that loses the fork choice is held without being applied, and its
-/// body is tried only when its branch becomes the heaviest, which is usually
+/// body is tried only when the fork choice takes its branch, which is usually
 /// the delivery of a later block by some other peer. A body that is not the
 /// one its header names is refused before it is held, so a body that fails is
 /// a mined block that is invalid, and the connection that handed it in
