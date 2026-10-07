@@ -27,31 +27,62 @@
 //! its own reach honest nodes in six), even (one and one), and fast (a tenth
 //! of a second each way). Eight thousand blocks a cell, one seed; run with
 //! `cargo test -p cairn-chain --test withheld_blocks --release -- --ignored
-//! --nocapture`, about twenty minutes.
+//! --nocapture`, about seventeen minutes on ten cores.
 //!
 //! ```text
 //! revenue share of the withholder (main chain blocks it mined), SM1
-//!            slow                even                fast
-//! alpha   gamma  share  ES    gamma  share  ES    gamma  share  ES
-//! FIGURES_SM1
+//!         slow                 even                 fast
+//! alpha   gamma share  ES      gamma share  ES      gamma share  ES
+//! 0.10    0.11  0.043  0.044   0.35  0.060  0.061   0.66  0.085  0.084
+//! 0.20    0.08  0.138  0.138   0.32  0.174  0.163   0.65  0.199  0.198
+//! 0.25    0.08  0.203  0.203   0.34  0.231  0.232   0.65  0.264  0.267
+//! 0.30    0.09  0.280  0.283   0.33  0.304  0.308   0.68  0.345  0.346
+//! 0.33    0.10  0.330  0.337   0.32  0.368  0.360   0.67  0.385  0.396
+//! 0.35    0.09  0.365  0.375   0.33  0.413  0.399   0.68  0.425  0.434
+//! 0.40    0.08  0.490  0.490   0.32  0.504  0.511   0.66  0.515  0.539
+//! 0.45    0.11  0.622  0.658   0.32  0.665  0.670   0.66  0.669  0.690
 //! ```
 //!
 //! ```text
-//! lead stubborn (never overrides, matches instead)
-//! FIGURES_STUBBORN
+//! lead stubborn (never overrides, matches instead): share and deep gamma on
+//! the real retarget, then with every block weighing one
+//!         slow                     even                     fast
+//! alpha   real        flat         real        flat         real        flat
+//! 0.10    0.038 0.87  0.025 0.11   0.062 0.94  0.059 0.53   0.085 0.97  0.083 0.71
+//! 0.20    0.135 0.87  0.093 0.11   0.166 1.00  0.141 0.34   0.206 1.00  0.206 0.66
+//! 0.25    0.219 0.89  0.137 0.07   0.237 0.98  0.211 0.40   0.277 0.99  0.262 0.69
+//! 0.30    0.281 0.88  0.198 0.10   0.322 0.99  0.279 0.32   0.364 1.00  0.353 0.69
+//! 0.33    0.363 0.89  0.237 0.10   0.385 0.98  0.349 0.35   0.436 1.00  0.409 0.65
+//! 0.35    0.398 0.88  0.292 0.09   0.437 0.99  0.384 0.35   0.463 1.00  0.445 0.65
+//! 0.40    0.544 0.90  0.424 0.10   0.578 0.98  0.499 0.33   0.604 1.00  0.566 0.65
+//! 0.45    0.695 0.90  0.596 0.09   0.708 0.99  0.696 0.33   0.714 1.00  0.738 0.69
+//! ```
+//!
+//! ```text
+//! the first share measured that earns more than itself
+//!                              slow   even   fast
+//! Eyal and Sirer at gamma      0.32   0.29   0.20
+//! SM1                          0.35   0.30   0.25
+//! lead stubborn, real          0.33   0.30   0.20
+//! lead stubborn, flat          0.40   0.33   0.20
 //! ```
 //!
 //! `ES` is Eyal and Sirer's formula at the gamma measured in the same run,
-//! counted over races at one height only. The honest control (`alpha` mined
-//! and published at once) earned within a point of `alpha` in every cell.
+//! counted over races at one height only; their threshold is a third at
+//! gamma 0, a quarter at gamma 1/2 and nought at gamma 1. Deep gamma is the
+//! same count over matches two or more blocks deep. The honest control
+//! (`alpha` mined and published at once) earned within a point of `alpha` in
+//! every cell.
 //!
 //! **What it says.** Selfish mining behaves here as the papers say it does on
 //! any chain, and the tie rule does what the threat model claims for it and
 //! no more: at one height the two blocks carry the same work, since the
 //! retarget reads only the parent, so the race goes to whichever block a node
 //! heard first, and gamma is set by where the withholder sits in the network,
-//! not by the rule. A well placed withholder with gamma near three quarters
-//! profits from well under a third of the work.
+//! not by the rule. SM1 earns within noise of the formula in every cell. The
+//! threat model's "from a third" is the badly placed withholder's figure; one
+//! with gamma near two thirds profits from a quarter of the work, and breaks
+//! even at a fifth.
 //!
 //! One thing is Cairn's own. Two branches of the same length that fork two or
 //! more blocks deep do not carry the same work: each block's difficulty
@@ -59,9 +90,16 @@
 //! earlier asks more of the blocks above them and is heavier. Equal length is
 //! a tie only at depth one. A withholder that matches rather than overrides,
 //! as lead stubbornness does, matches with blocks it found earlier, and wins
-//! every one of those matches outright, with gamma one, whoever heard what
-//! first. `a_race_two_blocks_deep_goes_to_the_branch_dated_earlier` holds the
-//! fact; the second table measures what it is worth.
+//! those matches by work rather than by arrival: nine in ten even where it
+//! hears and speaks late, where with every block weighing one it wins one in
+//! ten. Lead stubbornness then pays from a third of the work where SM1 needs
+//! more, against two fifths were work only length, and from a third up it
+//! out-earns SM1 in every placement. The deep matches it loses fall from
+//! about one in ten to nearly none as its blocks reach honest nodes faster,
+//! which is what losing to honest blocks found before the match arrived
+//! looks like.
+//! `a_race_two_blocks_deep_goes_to_the_branch_dated_earlier` holds the fact;
+//! the second table measures what it is worth.
 
 #![allow(
     clippy::unwrap_used,
