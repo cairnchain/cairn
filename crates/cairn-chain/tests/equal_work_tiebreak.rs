@@ -10,6 +10,15 @@
 //! What this holds in place is the size of what that choice costs: the split
 //! lasts one block interval, and the next block that extends either branch
 //! ends it.
+//!
+//! Two tips of one height are a tie a little past equal work too: the branch
+//! followed is kept unless the other carries more than half the followed
+//! tip's difficulty in extra work. Under the retarget a block's difficulty
+//! follows its parent's timestamp, so of two branches of one length forked
+//! two or more blocks deep the earlier-dated one is heavier by a few percent
+//! of a block, and switching on that surplus handed such races to whoever
+//! dated its blocks earlier (T8-4). The band is held here to the unit, and so
+//! is the rule that a branch of any other height is weighed by work alone.
 
 #![allow(
     clippy::unwrap_used,
@@ -19,12 +28,17 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::ChainStore;
+use std::ops::Range;
+
+use cairn_chain::{Accepted, ChainStore};
 use cairn_crypto::SecretKey;
-use cairn_ledger::block::Block;
+use cairn_ledger::block::{Block, HeaderSummary};
 use cairn_ledger::note::Note;
+use cairn_ledger::pow::{median_time_past, next_difficulty};
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
+use cairn_ledger::validation::{
+    assemble_block, connect_block, expected_difficulty, mine_block, ConsensusParams,
+};
 use cairn_ledger::LedgerState;
 
 const NOW: u64 = 2_000_000_000;
@@ -155,5 +169,324 @@ fn an_equal_work_split_lasts_one_block_and_then_resolves() {
         node_b.tip(),
         Some(after.id()),
         "and it is the heavier branch"
+    );
+}
+
+/// An opening difficulty at which one second of a parent's timestamp moves
+/// the difficulty asked of the block after it by less than a unit, so that
+/// every difficulty in reach is asked at some timestamp and a test can set a
+/// surplus to the unit.
+const OPENING: u64 = 1 << 11;
+
+fn timed() -> ConsensusParams {
+    ConsensusParams {
+        genesis_difficulty: OPENING,
+        ..params()
+    }
+}
+
+/// A block on `state` dated `timestamp`, paying `miner`.
+fn block_on(
+    state: &LedgerState,
+    params: &ConsensusParams,
+    miner: &SecretKey,
+    timestamp: u64,
+) -> Block {
+    let height = state.next_height().unwrap();
+    let coinbase = CoinbaseTransaction::new(
+        height,
+        vec![Note::new(params.initial_reward, miner.public_key())],
+    );
+    let block = assemble_block(
+        state,
+        coinbase,
+        Vec::<Transfer>::new(),
+        params,
+        timestamp,
+        0,
+    )
+    .unwrap();
+    mine_block(block, ATTEMPTS).expect("a nonce exists")
+}
+
+/// `block` on `state`, and the ledger it leaves.
+fn after(state: &LedgerState, params: &ConsensusParams, block: &Block) -> LedgerState {
+    let mut state = state.clone();
+    connect_block(&mut state, block, params, NOW).unwrap();
+    state
+}
+
+/// Six blocks dated on the schedule from the first, and the ledger they
+/// leave.
+fn on_schedule(params: &ConsensusParams) -> (Vec<Block>, LedgerState) {
+    let mut state = LedgerState::new();
+    let mut blocks = Vec::new();
+    for height in 0..6 {
+        let block = block_on(&state, params, &wallet(1), height * 60);
+        state = after(&state, params, &block);
+        blocks.push(block);
+    }
+    (blocks, state)
+}
+
+/// The earliest timestamp in `range` at which a parent at `height` carrying
+/// `difficulty` asks exactly `wanted` of the block after it.
+fn dated_for(
+    params: &ConsensusParams,
+    height: u64,
+    difficulty: u64,
+    wanted: u64,
+    range: Range<u64>,
+) -> u64 {
+    range
+        .clone()
+        .find(|timestamp| {
+            let parent = HeaderSummary {
+                height,
+                timestamp: *timestamp,
+                difficulty,
+            };
+            next_difficulty(&parent, params.origin(), params.target_block_time) == wanted
+        })
+        .unwrap_or_else(|| panic!("no timestamp in {range:?} asks for {wanted}"))
+}
+
+/// A node that has taken `blocks` in order.
+fn node_after(params: ConsensusParams, blocks: &[&Block]) -> ChainStore {
+    let mut node = ChainStore::new(params);
+    for block in blocks {
+        node.add_block((*block).clone(), NOW).unwrap();
+    }
+    node
+}
+
+/// The fixture the band is measured on: six blocks on the schedule, and a
+/// followed branch of two more whose first is dated late, so its tip is
+/// asked well under the opening difficulty.
+struct Race {
+    params: ConsensusParams,
+    base: Vec<Block>,
+    state: LedgerState,
+    followed: [Block; 2],
+}
+
+impl Race {
+    const LATE: u64 = 3_000;
+
+    fn new() -> Self {
+        let params = timed();
+        let (base, state) = on_schedule(&params);
+        let first = block_on(&state, &params, &wallet(2), Self::LATE);
+        let second = block_on(
+            &after(&state, &params, &first),
+            &params,
+            &wallet(2),
+            Self::LATE + 60,
+        );
+        Self {
+            params,
+            base,
+            state,
+            followed: [first, second],
+        }
+    }
+
+    fn tip(&self) -> &Block {
+        &self.followed[1]
+    }
+
+    /// Half the followed tip's difficulty, the most extra work a rival of
+    /// its height can carry and still be a tie.
+    fn band(&self) -> u64 {
+        self.tip().header.difficulty / 2
+    }
+
+    /// The first timestamp a block on the fork point may carry.
+    fn earliest(&self) -> u64 {
+        median_time_past(self.state.recent_headers()).unwrap() + 1
+    }
+
+    /// A node that has followed the branch, block by block.
+    fn node(&self) -> ChainStore {
+        let blocks: Vec<&Block> = self.base.iter().chain(&self.followed).collect();
+        node_after(self.params, &blocks)
+    }
+
+    /// A rival of the followed tip's height, carrying exactly `surplus` more
+    /// work: its first block is dated earlier, so its second is asked more.
+    fn rival_of_its_height(&self, surplus: u64) -> [Block; 2] {
+        let params = &self.params;
+        let fork = self.state.tip().unwrap();
+        let wanted = self.tip().header.difficulty + surplus;
+        let opening = expected_difficulty(&self.state, params);
+        let dated = dated_for(
+            params,
+            fork.height + 1,
+            opening,
+            wanted,
+            self.earliest()..Self::LATE,
+        );
+        let first = block_on(&self.state, params, &wallet(3), dated);
+        let second = block_on(
+            &after(&self.state, params, &first),
+            params,
+            &wallet(3),
+            Self::LATE + 60,
+        );
+        assert_eq!(
+            second.header.total_work - self.tip().header.total_work,
+            u128::from(surplus),
+            "fixture: the rival carries the surplus asked for"
+        );
+        [first, second]
+    }
+}
+
+/// **Two tips of one height are a tie until one carries more than half the
+/// followed tip's difficulty in extra work.**
+///
+/// The rival is built to carry exactly half the tip's difficulty more, which
+/// is kept aside, and then one unit more, which is taken.
+#[test]
+fn two_tips_of_one_height_are_a_tie_until_one_carries_half_a_block_more() {
+    let race = Race::new();
+    let band = race.band();
+    assert!(
+        band > 100,
+        "fixture: a band of {band} units leaves room on both sides of it"
+    );
+
+    for (surplus, taken) in [(1, false), (band, false), (band + 1, true)] {
+        let rival = race.rival_of_its_height(surplus);
+        let mut node = race.node();
+        assert_eq!(
+            node.add_block(rival[0].clone(), NOW).unwrap(),
+            Accepted::SideBranch
+        );
+        let answer = node.add_block(rival[1].clone(), NOW).unwrap();
+        if taken {
+            assert!(
+                matches!(answer, Accepted::Reorganised { .. }),
+                "a rival of the tip's height {surplus} heavier, past half its difficulty \
+                 {band}, was answered {answer:?}"
+            );
+            assert_eq!(node.tip(), Some(rival[1].id()));
+        } else {
+            assert_eq!(
+                answer,
+                Accepted::SideBranch,
+                "a rival of the tip's height {surplus} heavier, within half its difficulty \
+                 {band}, was not kept aside"
+            );
+            assert_eq!(node.tip(), Some(race.tip().id()));
+        }
+    }
+}
+
+/// **A rival one block longer is taken on any surplus of work, even one a
+/// rival of the tip's own height would be kept aside for.**
+///
+/// The band is about two tips of one height and nothing else. The rival here
+/// is three blocks to the followed branch's two, dated late so that it
+/// carries exactly half the tip's difficulty more in all, which at the tip's
+/// height would be a tie.
+#[test]
+fn a_longer_rival_is_taken_on_any_surplus() {
+    let race = Race::new();
+    let params = &race.params;
+    let band = race.band();
+
+    // The followed branch is dated late, so its tip is light; the rival's
+    // first block is dated later still, so the two blocks above it together
+    // can come to the followed tip and the band, to the unit.
+    let first = block_on(&race.state, params, &wallet(4), Race::LATE + 1_200);
+    let on_first = after(&race.state, params, &first);
+    let second_difficulty = expected_difficulty(&on_first, params);
+    let wanted = race.tip().header.difficulty + band - second_difficulty;
+    let dated = dated_for(
+        params,
+        first.header.height + 1,
+        second_difficulty,
+        wanted,
+        race.earliest()..Race::LATE * 4,
+    );
+    let second = block_on(&on_first, params, &wallet(4), dated);
+    let third = block_on(
+        &after(&on_first, params, &second),
+        params,
+        &wallet(4),
+        Race::LATE * 4,
+    );
+    assert_eq!(
+        third.header.height,
+        race.tip().header.height + 1,
+        "fixture: the rival is one block longer"
+    );
+    assert_eq!(
+        third.header.total_work - race.tip().header.total_work,
+        u128::from(band),
+        "fixture: the rival carries half the tip's difficulty more"
+    );
+
+    let mut node = race.node();
+    for block in [&first, &second] {
+        assert_eq!(
+            node.add_block(block.clone(), NOW).unwrap(),
+            Accepted::SideBranch,
+            "fixture: the rival's lower blocks are lighter than the tip"
+        );
+    }
+    let answer = node.add_block(third.clone(), NOW).unwrap();
+    assert!(
+        matches!(answer, Accepted::Reorganised { .. }),
+        "a rival one block longer and {band} heavier was answered {answer:?}"
+    );
+    assert_eq!(node.tip(), Some(third.id()));
+}
+
+/// **The fork choice, asked directly, over a table of rivals around one
+/// tip.**
+///
+/// The one question every comparison on a node asks, `cairn-net`'s included:
+/// the tip's height and the band at it, and work everywhere else. Equal work
+/// is never taken at any height, more work always is at any other height,
+/// and at the tip's height only past half its difficulty.
+#[test]
+fn the_fork_choice_over_rivals_around_one_tip() {
+    let race = Race::new();
+    let node = race.node();
+    let height = race.tip().header.height;
+    let work = race.tip().header.total_work;
+    let band = u128::from(race.band());
+    let table = [
+        (height, work - 1, false),
+        (height, work, false),
+        (height, work + 1, false),
+        (height, work + band, false),
+        (height, work + band + 1, true),
+        (height + 1, work - 1, false),
+        (height + 1, work, false),
+        (height + 1, work + 1, true),
+        (height - 1, work, false),
+        (height - 1, work + 1, true),
+        (height + 5, work + band * 8, true),
+    ];
+    for (rival_height, rival_work, taken) in table {
+        assert_eq!(
+            node.outweighed_by(rival_height, rival_work),
+            taken,
+            "a rival at height {rival_height} worth {rival_work}, against a tip at {height} \
+             worth {work} with a band of {band}"
+        );
+    }
+
+    let empty = ChainStore::new(race.params);
+    assert!(
+        empty.outweighed_by(0, 1),
+        "a node holding nothing takes any work"
+    );
+    assert!(
+        !empty.outweighed_by(0, 0),
+        "a node holding nothing takes no branch carrying none"
     );
 }

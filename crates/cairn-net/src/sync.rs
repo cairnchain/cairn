@@ -49,6 +49,18 @@ pub struct PeerState {
     /// Whether the peer has introduced itself. Nothing else is answered until
     /// it has.
     pub greeted: bool,
+    /// The height of the chain this peer claims, read beside
+    /// [`Self::total_work`]: what it said in its greeting, moved with the work
+    /// whenever a block it delivers claims more. See [`Self::claims`].
+    ///
+    /// The fork choice reads both. Two tips of one height are a tie unless
+    /// one carries more than half the other's difficulty in extra work (see
+    /// `ChainStore::outweighed_by`), so a peer claiming a little more work
+    /// than this node at this node's own height has nothing this node would
+    /// take, and a peer claiming the same work a block higher has. Read
+    /// against the work alone, a node keeping the lighter of two tips of one
+    /// height would see the peer claim more on every round and ask it for its
+    /// chain on every round, for blocks it already held.
     pub height: u64,
     /// The most work this peer has claimed for its chain: what it wrote in
     /// its greeting, raised by any block it delivers above what this node
@@ -719,6 +731,19 @@ impl PeerState {
         }
     }
 
+    /// Takes a block this peer delivered as its word about the chain it
+    /// holds, the height with the work, when it claims more work than the
+    /// peer has claimed so far.
+    ///
+    /// A claim of no more work leaves the one already heard, whatever its
+    /// height, as a branch of no more work leaves the branch a node follows.
+    fn claims(&mut self, height: u64, total_work: u128) {
+        if total_work > self.total_work {
+            self.total_work = total_work;
+            self.height = height;
+        }
+    }
+
     /// Takes `cost` from this peer's allowance, saying whether it was there.
     ///
     /// The window is the address's rather than the connection's, so what a
@@ -1198,7 +1223,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
             local.nonce,
         )));
     }
-    if theirs.total_work > local.chain.total_work() {
+    if local.chain.outweighed_by(theirs.height, theirs.total_work) {
         // A node with no chain of its own facing one long enough to be final
         // does not ask here at all. Whatever it starts following first is
         // what it keeps, so the choice of whom to ask is made once, by the
@@ -1508,6 +1533,13 @@ fn request_announced(
 /// This is what drives a sync forward: each answer produces the next question,
 /// and the questions stop when the node has caught up.
 ///
+/// Behind is what the fork choice says it is: the peer's claim, its height
+/// with its work, is a branch this node's store would leave its own for
+/// ([`ChainStore::outweighed_by`]). A claim it would not take is not asked
+/// for, so a node keeping the lighter of two tips of one height, within the
+/// band that makes them a tie, does not ask round after round for blocks it
+/// would only hold aside.
+///
 /// The one exception is a batch that never arrives. A peer answering
 /// everything else while quietly never sending the blocks it was asked for
 /// looks perfectly healthy and stalls the sync all the same, so an outstanding
@@ -1524,10 +1556,10 @@ fn follow_up(chain: &ChainStore, peer: &mut PeerState, now: u64) -> Reaction {
         }
         peer.clock_allows_at = None;
     }
-    if peer.awaiting.is_empty() && peer.total_work > chain.total_work() {
+    if peer.awaiting.is_empty() && chain.outweighed_by(peer.height, peer.total_work) {
         let now_work = chain.total_work();
         // The discount only for a peer whose last round moved this node's
-        // chain. `total_work` above is the peer's word and gates the asking;
+        // chain. The claim above is the peer's word and gates the asking;
         // this is this node's own and gates the price.
         peer.chain_asked = peer.work_when_asked.is_none_or(|before| now_work > before);
         peer.work_when_asked = Some(now_work);
@@ -1721,7 +1753,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         Err(ChainError::UnknownParent(_) | ChainError::NotGenesis) => {
             let out_of_reach = below_everything_held(chain, height);
             if !out_of_reach {
-                peer.total_work = peer.total_work.max(claimed);
+                peer.claims(height, claimed);
             }
             let mut reaction = follow_up(chain, peer, now);
             if out_of_reach {
@@ -1852,7 +1884,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             source: BlockError::TimestampTooFarAhead { timestamp, drift },
             ..
         }) => {
-            peer.total_work = peer.total_work.max(claimed);
+            peer.claims(height, claimed);
             let allowed = timestamp.saturating_sub(drift);
             peer.clock_allows_at = Some(peer.clock_allows_at.map_or(allowed, |at| at.max(allowed)));
             peer.clock_refused = Some(id);
@@ -1882,7 +1914,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // it only a peer greeted as ahead was asked, and every long-lived
         // connection of a node at the tip was greeted as an equal.
         Err(ChainError::InvalidBlock { id: failed, source }) if failed != id => {
-            peer.total_work = peer.total_work.max(claimed);
+            peer.claims(height, claimed);
             let mut reaction = follow_up(chain, peer, now);
             reaction.failed_below = dropped_for(&source, failed)
                 .is_misbehaviour()

@@ -9309,8 +9309,11 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
         // node took was held off while it chose, and gets the ordinary
         // question now: their chains arrive as branches, and the fork choice
         // weighs branches for a living.
-        choosing::Step::Nudge(peers) => {
-            let locator = shared.chain().locator();
+        choosing::Step::Nudge(claims) => {
+            let (locator, peers) = {
+                let chain = shared.chain();
+                (chain.locator(), still_ahead(&chain, &claims))
+            };
             for peer in peers {
                 shared.send_to(
                     peer,
@@ -9321,6 +9324,23 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
             }
         }
     }
+}
+
+/// Of the peers a finished choice names as still claiming more work than
+/// the chain this node took, the ones whose claim that chain would give way
+/// to.
+///
+/// Asked of the fork choice, as every other question for a peer's chain is
+/// in [`crate::sync`]: a claim at this node's own height within the band
+/// that makes two tips a tie is a branch this node would only hold aside,
+/// and a claim a block higher with the same work is one it would take. See
+/// [`ChainStore::outweighed_by`].
+fn still_ahead(chain: &ChainStore, claims: &[choosing::Claimed]) -> Vec<PeerId> {
+    claims
+        .iter()
+        .filter(|claimed| chain.outweighed_by(claimed.height, claimed.work))
+        .map(|claimed| claimed.peer)
+        .collect()
 }
 
 /// Whether a peer last heard from at `last_heard` has been silent for

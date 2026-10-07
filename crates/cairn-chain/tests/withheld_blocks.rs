@@ -116,6 +116,8 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt::Write;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Mutex;
 
 use cairn_chain::{ChainError, ChainStore};
 use cairn_crypto::{PublicKey, SecretKey};
@@ -188,22 +190,24 @@ fn stamp(state: &LedgerState, clock: u64) -> u64 {
 // The fact the measurement turns on.
 // ---------------------------------------------------------------------------
 
-/// **A race two blocks deep goes to the branch dated earlier, whoever saw it
-/// first.**
+/// **A race two blocks deep goes to the branch heard first, as a race at one
+/// height does.**
 ///
-/// At one height the tie rule decides: both blocks sit on one parent, the
-/// retarget reads only the parent, so both carry the same difficulty and a
-/// node keeps the one it heard first. One block further on it no longer
-/// does. The second block of each branch is asked a difficulty set by the
-/// first block's timestamp, and the branch whose first block is dated earlier
-/// stands further ahead of the schedule, is asked more, and is heavier. A
-/// node that followed the later branch switches.
+/// The two branches do not carry the same work. Both first blocks sit on one
+/// parent and are asked the same difficulty, but the second block of each is
+/// asked a difficulty set by the first block's timestamp, and the branch
+/// whose first block is dated earlier stands further ahead of the schedule,
+/// is asked more, and is heavier. Under a fork choice that switched on any
+/// surplus, a node that followed the later branch switched to the earlier
+/// one, and a withholder matching with blocks it had found, and so dated,
+/// before the honest ones won such matches by its dates wherever it sat in
+/// the network (T8-4).
 ///
-/// This is what lets a withholder that matches two blocks deep win the match
-/// outright: the blocks it kept were found, and dated, before the honest ones
-/// they race.
+/// The two tips stand at one height and the surplus is a few hundredths of a
+/// block, inside the half of the tip's difficulty that makes two tips of one
+/// height a tie, so each node keeps the branch it heard first.
 #[test]
-fn a_race_two_blocks_deep_goes_to_the_branch_dated_earlier() {
+fn a_race_two_blocks_deep_goes_to_the_branch_heard_first() {
     let params = rules();
     let mut state = LedgerState::new();
     let mut base = Vec::new();
@@ -230,32 +234,33 @@ fn a_race_two_blocks_deep_goes_to_the_branch_dated_earlier() {
         early_first.header.total_work, late_first.header.total_work,
         "one block deep the two branches carry the same work"
     );
+    let surplus = early_second.header.total_work - late_second.header.total_work;
+    let band = u128::from(late_second.header.difficulty) / 2;
     assert!(
-        early_second.header.total_work > late_second.header.total_work,
-        "two blocks deep the branch dated earlier is heavier: {} against {}",
-        early_second.header.total_work,
-        late_second.header.total_work
+        surplus > 0 && surplus <= band,
+        "two blocks deep the branch dated earlier is heavier, by {surplus}, and within \
+         half the tip's difficulty, {band}"
     );
 
-    // A node that hears the late branch first, block by block.
-    let mut node = ChainStore::new(params);
-    for block in &base {
-        node.add_block(block.clone(), now).unwrap();
-    }
-    node.add_block(late_first.clone(), now).unwrap();
-    node.add_block(early_first.clone(), now).unwrap();
-    assert_eq!(
-        node.tip(),
-        Some(late_first.id()),
-        "at one height the block heard first is kept"
-    );
-    node.add_block(late_second.clone(), now).unwrap();
-    node.add_block(early_second.clone(), now).unwrap();
-    assert_eq!(
-        node.tip(),
-        Some(early_second.id()),
-        "at two heights the branch dated earlier wins, though it was heard last"
-    );
+    // Two nodes, each hearing one branch first, block by block.
+    let heard = |first: [&Block; 2], then: [&Block; 2]| {
+        let mut node = ChainStore::new(params);
+        for block in &base {
+            node.add_block(block.clone(), now).unwrap();
+        }
+        for at in 0..2 {
+            node.add_block(first[at].clone(), now).unwrap();
+            node.add_block(then[at].clone(), now).unwrap();
+            assert_eq!(
+                node.tip(),
+                Some(first[at].id()),
+                "at depth {} the block heard first is kept",
+                at + 1
+            );
+        }
+    };
+    heard([&late_first, &late_second], [&early_first, &early_second]);
+    heard([&early_first, &early_second], [&late_first, &late_second]);
 }
 
 // ---------------------------------------------------------------------------
@@ -800,9 +805,10 @@ fn simulate(run: Run) -> Outcome {
 ///
 /// The control publishes at once and earns its share. SM1 with nearly half of
 /// the work earns well over it, and with a tenth earns under it: the curve the
-/// papers draw, crossing where they say. And the deep matches, settled by
-/// work rather than by arrival, go to the withholder almost every time on the
-/// real retarget, and stop doing so when every block weighs the same.
+/// papers draw, crossing where they say. And the deep matches are settled by
+/// arrival on the real retarget as they are when every block weighs the same,
+/// so a withholder that hears late and speaks late loses most of them. Before
+/// the band they were settled by work, and went its way nine times in ten.
 #[test]
 fn a_withholding_miner_earns_what_the_papers_say() {
     let run = |share, strategy, opening| {
@@ -851,10 +857,10 @@ fn a_withholding_miner_earns_what_the_papers_say() {
     let timed_deep = timed.deep_gamma().expect("deep matches happened");
     let flat_deep = flat.deep_gamma().expect("deep matches happened");
     assert!(
-        timed_deep > 0.75,
-        "on the real retarget a match two or more blocks deep is won by the \
-         blocks dated earlier, which are the withholder's: {timed_deep:.2} of \
-         {} went its way",
+        timed_deep < 0.5,
+        "on the real retarget a match two or more blocks deep is a tie, the \
+         blocks dated earlier being heavier by less than half a block, so \
+         arrival settles it: {timed_deep:.2} of {} went the withholder's way",
         timed.deep_races
     );
     assert!(
@@ -865,71 +871,113 @@ fn a_withholding_miner_earns_what_the_papers_say() {
     );
 }
 
+/// The share at which revenue crosses the miner's own share, between the
+/// two grid points either side of the last crossing from under to over.
+fn crossing(points: &[(f64, f64)]) -> Option<f64> {
+    points
+        .windows(2)
+        .filter_map(|pair| {
+            let ((low, under), (high, over)) = (pair[0], pair[1]);
+            (under <= 0.0 && over > 0.0).then(|| low + (high - low) * -under / (over - under))
+        })
+        .last()
+}
+
 /// The tables at the top of this file.
 ///
-/// Every cell on a thread of its own, from one seed, so the figures come back
-/// the same on a rerun on the same platform.
+/// Every cell from `SEEDS` seeds, on a pool of one thread a core, so the
+/// figures come back the same on a rerun on the same platform. The control
+/// is run from the first seed alone: what it shows is that nothing in the
+/// simulation pays a miner that withholds nothing.
 #[test]
-#[ignore = "about twenty minutes; fills the tables in the header"]
+#[ignore = "about an hour and a half on ten cores; fills the tables in the header"]
 fn the_tables_in_the_header() {
     const BLOCKS: u64 = 8_000;
-    let shares = [0.1, 0.2, 0.25, 0.3, 0.33, 0.35, 0.4, 0.45];
+    const SEEDS: u64 = 4;
+    let shares = [
+        0.10, 0.15, 0.20, 0.25, 0.28, 0.30, 0.33, 0.35, 0.38, 0.40, 0.45,
+    ];
     let networks = [SLOW, EVEN, FAST];
-    let cells: Vec<(f64, Strategy, Network, u64)> = shares
-        .iter()
-        .flat_map(|share| {
-            networks.iter().flat_map(move |network| {
-                [
-                    (*share, Strategy::Honest, *network, TIMED),
-                    (*share, Strategy::Selfish, *network, TIMED),
-                    (*share, Strategy::LeadStubborn, *network, TIMED),
-                    (*share, Strategy::LeadStubborn, *network, FLAT),
-                ]
-            })
-        })
-        .collect();
-    let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
-        let handles: Vec<_> = cells
-            .iter()
-            .map(|(share, strategy, network, opening)| {
-                scope.spawn(move || {
-                    simulate(Run {
+    let lanes = [
+        (Strategy::Selfish, TIMED),
+        (Strategy::LeadStubborn, TIMED),
+        (Strategy::LeadStubborn, FLAT),
+        (Strategy::Honest, TIMED),
+    ];
+    let mut cells: Vec<Run> = Vec::new();
+    for share in shares.iter().rev() {
+        for network in networks {
+            for (strategy, opening) in lanes {
+                let seeds = if strategy == Strategy::Honest {
+                    1
+                } else {
+                    SEEDS
+                };
+                for seed in 0..seeds {
+                    cells.push(Run {
                         share: *share,
-                        strategy: *strategy,
-                        network: *network,
+                        strategy,
+                        network,
                         blocks: BLOCKS,
-                        seed: 20,
-                        opening: *opening,
-                    })
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect()
+                        seed: 20 + seed,
+                        opening,
+                    });
+                }
+            }
+        }
+    }
+    let next = AtomicUsize::new(0);
+    let done: Mutex<Vec<Option<Outcome>>> = Mutex::new(vec![None; cells.len()]);
+    let workers = std::thread::available_parallelism().map_or(4, usize::from);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let at = next.fetch_add(1, AtomicOrdering::Relaxed);
+                let Some(run) = cells.get(at) else {
+                    break;
+                };
+                let outcome = simulate(*run);
+                done.lock().unwrap()[at] = Some(outcome);
+            });
+        }
     });
+    let done: Vec<Outcome> = done.into_inner().unwrap().into_iter().flatten().collect();
+    assert_eq!(done.len(), cells.len(), "every cell ran");
+
+    // The seeds of one cell together: revenue averaged, races pooled.
     let find = |share: f64, strategy, network: &str, opening| {
-        cells
+        let runs: Vec<&Outcome> = cells
             .iter()
-            .zip(&outcomes)
-            .find(|((s, st, n, o), _)| {
-                (*s - share).abs() < 1e-9 && *st == strategy && n.name == network && *o == opening
+            .zip(&done)
+            .filter(|(run, _)| {
+                (run.share - share).abs() < 1e-9
+                    && run.strategy == strategy
+                    && run.network.name == network
+                    && run.opening == opening
             })
-            .map(|(_, outcome)| *outcome)
-            .unwrap()
+            .map(|(_, outcome)| outcome)
+            .collect();
+        let revenue = runs.iter().map(|outcome| outcome.revenue()).sum::<f64>() / runs.len() as f64;
+        let mut pooled = Outcome::default();
+        for outcome in &runs {
+            pooled.shallow_races += outcome.shallow_races;
+            pooled.shallow_to_withholder += outcome.shallow_to_withholder;
+            pooled.deep_races += outcome.deep_races;
+            pooled.deep_to_withholder += outcome.deep_to_withholder;
+        }
+        (revenue, pooled)
     };
 
     println!("\nSM1: alpha, then per network gamma, share, Eyal-Sirer at that gamma");
     for share in shares {
         let mut line = format!("{share:<5}");
         for network in &networks {
-            let outcome = find(share, Strategy::Selfish, network.name, TIMED);
+            let (revenue, outcome) = find(share, Strategy::Selfish, network.name, TIMED);
             write!(
                 line,
                 "   {:.2}  {:.3}  {:.3}",
                 outcome.gamma(),
-                outcome.revenue(),
+                revenue,
                 eyal_sirer(share, outcome.gamma())
             )
             .unwrap();
@@ -941,15 +989,15 @@ fn the_tables_in_the_header() {
     for share in shares {
         let mut line = format!("{share:<5}");
         for network in &networks {
-            let timed = find(share, Strategy::LeadStubborn, network.name, TIMED);
-            let flat = find(share, Strategy::LeadStubborn, network.name, FLAT);
+            let (timed, timed_races) = find(share, Strategy::LeadStubborn, network.name, TIMED);
+            let (flat, flat_races) = find(share, Strategy::LeadStubborn, network.name, FLAT);
             write!(
                 line,
                 "   {:.3} {:.2}  {:.3} {:.2}",
-                timed.revenue(),
-                timed.deep_gamma().unwrap_or(f64::NAN),
-                flat.revenue(),
-                flat.deep_gamma().unwrap_or(f64::NAN)
+                timed,
+                timed_races.deep_gamma().unwrap_or(f64::NAN),
+                flat,
+                flat_races.deep_gamma().unwrap_or(f64::NAN)
             )
             .unwrap();
         }
@@ -959,9 +1007,38 @@ fn the_tables_in_the_header() {
     for share in shares {
         let mut line = format!("{share:<5}");
         for network in &networks {
-            let outcome = find(share, Strategy::Honest, network.name, TIMED);
-            write!(line, "   {:.3}", outcome.revenue()).unwrap();
+            let (revenue, _) = find(share, Strategy::Honest, network.name, TIMED);
+            write!(line, "   {revenue:.3}").unwrap();
         }
         println!("{line}");
     }
+    println!("\nthe share where revenue crosses the share, per network");
+    let threshold = |strategy, network: &str, opening| {
+        let points: Vec<(f64, f64)> = shares
+            .iter()
+            .map(|share| (*share, find(*share, strategy, network, opening).0 - share))
+            .collect();
+        crossing(&points).unwrap_or(f64::NAN)
+    };
+    for (name, strategy, opening) in [
+        ("SM1", Strategy::Selfish, TIMED),
+        ("lead stubborn, real", Strategy::LeadStubborn, TIMED),
+        ("lead stubborn, flat", Strategy::LeadStubborn, FLAT),
+    ] {
+        let mut line = format!("{name:<22}");
+        for network in &networks {
+            write!(line, "   {:.3}", threshold(strategy, network.name, opening)).unwrap();
+        }
+        println!("{line}");
+    }
+    let mut line = format!("{:<22}", "best of the two, real");
+    for network in &networks {
+        let best = threshold(Strategy::Selfish, network.name, TIMED).min(threshold(
+            Strategy::LeadStubborn,
+            network.name,
+            TIMED,
+        ));
+        write!(line, "   {best:.3}").unwrap();
+    }
+    println!("{line}");
 }

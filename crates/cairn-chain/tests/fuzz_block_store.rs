@@ -41,8 +41,13 @@
 //! 1. Nothing panics.
 //! 2. The tip is an honest block, the ledger is the one that block commits
 //!    to, and the branch the store calls active is that block's ancestry.
-//! 3. No branch the store holds in full, every block of it valid, carries
-//!    more work than the branch it follows.
+//! 3. No branch the store holds in full, every block of it valid, is one
+//!    the fork choice takes over the branch it follows: more work, and at
+//!    the followed tip's own height more than half that tip's difficulty
+//!    more. Save one the store kept aside as a tie when it last weighed it,
+//!    since a branch is weighed when a block of it arrives: the branch
+//!    followed can grow past a tie's height by a block lighter than the
+//!    tie's margin, and the tie stays aside until its next block comes.
 //! 4. What the store keeps off its branch stays within `MAX_SIDE_BLOCKS` and
 //!    `MAX_SIDE_BYTES`, counted here from the bodies it holds, and the count
 //!    it keeps of its own bytes is that count.
@@ -54,7 +59,8 @@
 //!    the same tip at every step.
 //!
 //! And once the heaviest honest branch has been handed over in order, the
-//! store follows a branch that heavy. That is the catalogue's own statement
+//! store follows a branch it does not take over: that one, or one of its
+//! height within half a block of it. That is the catalogue's own statement
 //! of what E05 breaks, "an honest heavier branch delivered in order is
 //! followed whatever else is interleaved", and the six above cannot see it:
 //! a block dropped by the sweep is not held, so a branch missing it is not
@@ -83,7 +89,7 @@
     clippy::too_many_lines
 )]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -187,9 +193,36 @@ struct Network {
     heaviest: usize,
 }
 
+/// Whether the fork choice takes a branch ending at `rival` over one ending
+/// at `followed`: more work, and at the followed tip's own height more than
+/// half its difficulty more.
+///
+/// Written out here rather than asked of the store, so that the store is held
+/// to the rule and not to itself.
+fn takes(rival: &BlockHeader, followed: &BlockHeader) -> bool {
+    rival.total_work > followed.total_work
+        && (rival.height != followed.height
+            || rival.total_work - followed.total_work > u128::from(followed.difficulty) / 2)
+}
+
+/// Whether a branch ending at `rival` carries more work than one ending at
+/// `followed` and is still a tie: the same height, within half the followed
+/// tip's difficulty.
+fn ties(rival: &BlockHeader, followed: &BlockHeader) -> bool {
+    rival.total_work > followed.total_work && !takes(rival, followed)
+}
+
 impl Network {
     fn max_work(&self) -> u128 {
         self.honest[self.heaviest].work
+    }
+
+    /// The header of the honest block the store follows, if it follows one.
+    fn followed(&self, store: &ChainStore) -> Option<&BlockHeader> {
+        store
+            .tip()
+            .and_then(|tip| self.honest_by_id.get(&tip))
+            .map(|index| &self.honest[*index].block.header)
     }
 
     /// Whether `body` is the honest block minted under `id`.
@@ -663,6 +696,9 @@ struct Tally {
     /// Cases whose closing delivery moved the tip.
     closing_moved: usize,
     closing_moved_after_a_flood: usize,
+    /// Honest blocks kept aside as a tie: heavier than the tip followed, at
+    /// its height, by no more than half its difficulty.
+    ties_kept: usize,
 }
 
 /// The name of an answer, without what it carries.
@@ -700,6 +736,9 @@ struct Run<'a> {
     junk: Vec<Block>,
     /// Every body handed over under each identifier, with its encoded size.
     known: HashMap<Hash32, Vec<(Source, usize)>>,
+    /// Honest blocks the store kept aside, the last time it weighed them, as
+    /// a tie with the branch it then followed. See property 3.
+    tied: HashSet<Hash32>,
     trace: Vec<String>,
 }
 
@@ -717,6 +756,7 @@ impl<'a> Run<'a> {
             store: ChainStore::new(network.params),
             junk: Vec::new(),
             known,
+            tied: HashSet::new(),
             trace: Vec::new(),
         }
     }
@@ -839,11 +879,11 @@ impl<'a> Run<'a> {
             }
         }
 
-        // 3. The heaviest valid branch held in full is not heavier than the
-        // one followed. Parents are minted before children, so one pass in
-        // that order decides each.
+        // 3. No valid branch held in full is one the fork choice takes over
+        // the one followed, save a tie kept aside at its last weighing.
+        // Parents are minted before children, so one pass in that order
+        // decides each.
         let mut whole = vec![false; network.honest.len()];
-        let mut heaviest_held: Option<usize> = None;
         for (index, other) in network.honest.iter().enumerate() {
             let id = other.block.id();
             let valid = self.store.contains(&id)
@@ -854,20 +894,20 @@ impl<'a> Run<'a> {
             whole[index] = valid
                 && (self.store.is_active(&id) || other.parent.is_some_and(|parent| whole[parent]));
             if whole[index]
-                && heaviest_held.is_none_or(|best| other.work > network.honest[best].work)
+                && takes(&other.block.header, &minted.block.header)
+                && !self.tied.contains(&id)
             {
-                heaviest_held = Some(index);
-            }
-        }
-        if let Some(best) = heaviest_held {
-            if network.honest[best].work > self.store.total_work() {
                 return Err(fail(
-                    "no valid branch held in full outweighs the one followed",
+                    "no valid branch held in full is one the fork choice takes",
                     format!(
-                        "honest block {best}, worth {}, is held with every block under it and \
-                         every one valid, and the store follows honest block {at}, worth {}",
-                        network.honest[best].work,
-                        self.store.total_work()
+                        "honest block {index}, worth {} at height {}, is held with every block \
+                         under it and every one valid, and the store follows honest block {at}, \
+                         worth {} at height {} and difficulty {}",
+                        other.work,
+                        other.block.header.height,
+                        minted.work,
+                        minted.block.header.height,
+                        minted.block.header.difficulty
                     ),
                 ));
             }
@@ -1022,7 +1062,22 @@ impl<'a> Run<'a> {
             said,
         })?;
         let height_before = self.store.height();
+        let followed_before = self.network.followed(&self.store).copied();
         let answer = self.store.add_block(block.clone(), NOW);
+        let id = block.id();
+        // Weighed by its header, so a twin offered under an honest identifier
+        // weighs the honest block held under it.
+        if matches!(answer, Ok(Accepted::SideBranch)) && self.network.honest_by_id.contains_key(&id)
+        {
+            if followed_before.is_some_and(|followed| ties(&block.header, &followed)) {
+                self.tied.insert(id);
+                if let Some(tally) = tally.as_deref_mut() {
+                    tally.ties_kept += 1;
+                }
+            } else {
+                self.tied.remove(&id);
+            }
+        }
         self.trace
             .push(format!("{answer:?} -> {:?}", self.store.tip()));
         let after = self.held().map_err(|said| Failure {
@@ -1228,7 +1283,11 @@ fn run(
     for (offset, what) in closing.iter().enumerate() {
         run.step(steps.len() + offset, what, &mut tally)?;
     }
-    if run.store.total_work() != network.max_work() {
+    let heaviest = &network.honest[network.heaviest].block.header;
+    if network
+        .followed(&run.store)
+        .is_none_or(|followed| takes(heaviest, followed))
+    {
         return Err(Failure {
             property: "an honest heavier branch delivered in order is followed",
             step: steps.len() + closing.len(),
@@ -1494,5 +1553,10 @@ fn the_block_store_follows_the_heaviest_valid_branch_whatever_order_it_hears_it_
     assert!(
         tally.closing_moved > 0,
         "the closing delivery never moved the tip, so it asked nothing"
+    );
+    assert!(
+        tally.ties_kept > 0,
+        "no honest block came within half a block of the tip at its height, so the \
+         tie that makes was never asked"
     );
 }
