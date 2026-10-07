@@ -3382,3 +3382,375 @@ mod a_newcomer {
         );
     }
 }
+
+/// What a node asks a peer for when two tips of one height are a tie.
+///
+/// The store keeps the tip it follows against a rival of its height carrying
+/// no more than half the tip's difficulty in extra work, and the asks here
+/// read the same predicate, with the peer's height beside its work. Read
+/// against the work alone they would ask, round after round, for a branch the
+/// store holds aside; read against the height alone they would miss a longer
+/// one it takes.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+mod a_tie_at_one_height {
+    use super::{follow_up, on_block, on_message, tick, Local, Message, PeerState, Reaction};
+    use crate::message::{Handshake, Keeps, PROTOCOL_VERSION};
+    use cairn_chain::ChainStore;
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::block::{Block, HeaderSummary};
+    use cairn_ledger::note::Note;
+    use cairn_ledger::pow::{median_time_past, next_difficulty};
+    use cairn_ledger::transaction::CoinbaseTransaction;
+    use cairn_ledger::validation::{
+        assemble_block, connect_block, expected_difficulty, mine_block, ConsensusParams,
+    };
+    use cairn_ledger::LedgerState;
+    use cairn_primitives::Hash32;
+
+    const NOW: u64 = 2_000_000_000;
+
+    /// Where the followed branch's first block is dated: late, so its tip is
+    /// asked well under the opening difficulty and an earlier-dated rival of
+    /// its height is heavier.
+    const LATE: u64 = 3_000;
+
+    /// Testnet rules opening at a difficulty where a second of a parent's
+    /// timestamp moves the next difficulty by under a unit, so that a rival
+    /// can be dated to carry any surplus asked for, to the unit.
+    fn params() -> ConsensusParams {
+        ConsensusParams {
+            genesis_difficulty: 1 << 11,
+            ..ConsensusParams::testnet()
+        }
+    }
+
+    fn block_on(state: &LedgerState, miner: u8, dated: u64) -> Block {
+        let params = params();
+        let height = state.next_height().unwrap();
+        let coinbase = CoinbaseTransaction::new(
+            height,
+            vec![Note::new(
+                params.reward_at(height),
+                SecretKey::from_bytes(&[miner; 32]).public_key(),
+            )],
+        );
+        let block = assemble_block(state, coinbase, Vec::new(), &params, dated, 0).unwrap();
+        mine_block(block, 1 << 24).unwrap()
+    }
+
+    fn after(state: &LedgerState, block: &Block) -> LedgerState {
+        let mut state = state.clone();
+        connect_block(&mut state, block, &params(), NOW).unwrap();
+        state
+    }
+
+    /// Six blocks on the schedule, and a followed branch of two more whose
+    /// first is dated late.
+    struct Fixture {
+        base: Vec<Block>,
+        fork: LedgerState,
+        followed: [Block; 2],
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let mut fork = LedgerState::new();
+            let mut base = Vec::new();
+            for height in 0..6 {
+                let block = block_on(&fork, 1, height * 60);
+                fork = after(&fork, &block);
+                base.push(block);
+            }
+            let first = block_on(&fork, 2, LATE);
+            let second = block_on(&after(&fork, &first), 2, LATE + 60);
+            Self {
+                base,
+                fork,
+                followed: [first, second],
+            }
+        }
+
+        fn tip(&self) -> &Block {
+            &self.followed[1]
+        }
+
+        fn band(&self) -> u64 {
+            self.tip().header.difficulty / 2
+        }
+
+        fn node(&self) -> ChainStore {
+            let mut node = ChainStore::new(params());
+            for block in self.base.iter().chain(&self.followed) {
+                node.add_block(block.clone(), NOW).unwrap();
+            }
+            node
+        }
+
+        /// A rival of the tip's height whose first block is dated `dated`.
+        fn rival_dated(&self, dated: u64) -> Vec<Block> {
+            let first = block_on(&self.fork, 3, dated);
+            let second = block_on(&after(&self.fork, &first), 3, LATE + 60);
+            vec![first, second]
+        }
+
+        /// A rival of the tip's height carrying exactly `surplus` more work.
+        fn rival_of_its_height(&self, surplus: u64) -> Vec<Block> {
+            let params = params();
+            let opening = expected_difficulty(&self.fork, &params);
+            let wanted = self.tip().header.difficulty + surplus;
+            let earliest = median_time_past(self.fork.recent_headers()).unwrap() + 1;
+            let dated = (earliest..=LATE)
+                .find(|dated| {
+                    let parent = HeaderSummary {
+                        height: self.fork.tip().unwrap().height + 1,
+                        timestamp: *dated,
+                        difficulty: opening,
+                    };
+                    next_difficulty(&parent, params.origin(), params.target_block_time) == wanted
+                })
+                .unwrap_or_else(|| panic!("no date asks for {wanted}"));
+            let rival = self.rival_dated(dated);
+            assert_eq!(
+                rival[1].header.total_work - self.tip().header.total_work,
+                u128::from(surplus),
+                "fixture: the rival carries the surplus asked for"
+            );
+            rival
+        }
+
+        /// A rival one block longer than the followed branch, dated late
+        /// enough to carry less extra work than half the tip's difficulty.
+        fn longer_rival(&self) -> Vec<Block> {
+            let first = block_on(&self.fork, 4, LATE + 600);
+            let on_first = after(&self.fork, &first);
+            let second = block_on(&on_first, 4, LATE + 3_600);
+            let third = block_on(&after(&on_first, &second), 4, LATE + 7_200);
+            vec![first, second, third]
+        }
+    }
+
+    fn asks_for_the_chain(reaction: &Reaction) -> bool {
+        reaction
+            .reply
+            .iter()
+            .any(|message| matches!(message, Message::GetChain { .. }))
+    }
+
+    /// What the greeting of a peer claiming `height` and `total_work`
+    /// answers, and the peer as it leaves it.
+    fn greeted_by(chain: &mut ChainStore, height: u64, total_work: u128) -> (PeerState, Reaction) {
+        let theirs = Handshake {
+            version: PROTOCOL_VERSION,
+            network: chain.params().network,
+            genesis: Hash32::ZERO,
+            height,
+            total_work,
+            listen: 0,
+            nonce: 99,
+            keeps: Keeps::default(),
+        };
+        let mut local = Local {
+            chain,
+            keeps: Keeps::default(),
+            listen: 4242,
+            nonce: 1,
+        };
+        let mut peer = PeerState::default();
+        let reaction = on_message(&mut local, &mut peer, Message::Welcome(theirs), NOW);
+        (peer, reaction)
+    }
+
+    /// A block under a parent nobody holds, claiming `total_work` at
+    /// `height`: free to make, and refused for its parent, which is where a
+    /// node takes a block as the peer's word about its chain.
+    fn claim(template: &Block, height: u64, total_work: u128, salt: u8) -> Block {
+        let mut block = template.clone();
+        block.header.height = height;
+        block.header.previous = Hash32::from_bytes([salt; 32]);
+        block.header.difficulty = 1;
+        block.header.total_work = total_work;
+        block
+    }
+
+    /// **The store and both asks agree, over a table of rivals.**
+    ///
+    /// For every rival: whether a node following the branch switches when
+    /// the rival's blocks arrive, whether a peer greeting it with the rival's
+    /// tip is asked for its chain, and whether `follow_up` asks a peer known
+    /// to hold that tip. The three are one answer, and the table says which.
+    #[test]
+    fn the_store_and_the_asks_agree_on_every_rival() {
+        let fixture = Fixture::new();
+        let band = fixture.band();
+        let rivals = [
+            (
+                "lighter, of its height",
+                fixture.rival_dated(LATE + 600),
+                false,
+            ),
+            (
+                "equal, of its height",
+                fixture.rival_of_its_height(0),
+                false,
+            ),
+            ("one unit heavier", fixture.rival_of_its_height(1), false),
+            (
+                "heavier by the band",
+                fixture.rival_of_its_height(band),
+                false,
+            ),
+            (
+                "heavier by the band and one",
+                fixture.rival_of_its_height(band + 1),
+                true,
+            ),
+            (
+                "heavier by the band and a hundred",
+                fixture.rival_of_its_height(band + 100),
+                true,
+            ),
+            ("a block longer", fixture.longer_rival(), true),
+        ];
+        let longer = &rivals[6].1;
+        let surplus = longer[2].header.total_work - fixture.tip().header.total_work;
+        assert!(
+            surplus > 0 && surplus <= u128::from(band),
+            "fixture: the longer rival carries {surplus} more, within the band {band}"
+        );
+
+        for (name, rival, taken) in &rivals {
+            let tip = rival.last().unwrap();
+            let (height, work) = (tip.header.height, tip.header.total_work);
+
+            let mut store = fixture.node();
+            for block in rival {
+                store.add_block(block.clone(), NOW).unwrap();
+            }
+            let switched = store.tip() == Some(tip.id());
+
+            let mut greeting = fixture.node();
+            let (_, reaction) = greeted_by(&mut greeting, height, work);
+            let asked_at_the_greeting = asks_for_the_chain(&reaction);
+
+            let following = fixture.node();
+            let mut peer = PeerState {
+                greeted: true,
+                height,
+                total_work: work,
+                ..PeerState::default()
+            };
+            let asked_after = asks_for_the_chain(&follow_up(&following, &mut peer, NOW));
+
+            assert_eq!(
+                (switched, asked_at_the_greeting, asked_after),
+                (*taken, *taken, *taken),
+                "a rival {name}, at height {height} worth {work} against a tip at {} worth {}: \
+                 the store switching, the greeting asking, the follow up asking",
+                fixture.tip().header.height,
+                fixture.tip().header.total_work
+            );
+        }
+    }
+
+    /// **A node on the lighter of two tips of one height does not ask for
+    /// the other, round after round.**
+    ///
+    /// A peer holding the heavier tip, within the band, greets the node,
+    /// pushes both blocks of its branch twice, and is ticked every second for
+    /// a minute. Not one `GetChain` goes out, where a node reading the work
+    /// alone would ask after every block. A peer holding a tip one block
+    /// higher, treated the same way, is asked.
+    #[test]
+    fn a_node_on_the_lighter_tip_of_a_tie_does_not_ask_round_after_round() {
+        let fixture = Fixture::new();
+        let tie = fixture.rival_of_its_height(fixture.band());
+        let longer = fixture.longer_rival();
+
+        let asks = |rival: &[Block]| {
+            let tip = rival.last().unwrap();
+            let mut chain = fixture.node();
+            let (mut peer, reaction) =
+                greeted_by(&mut chain, tip.header.height, tip.header.total_work);
+            let mut asked = usize::from(asks_for_the_chain(&reaction));
+            for second in 0..60 {
+                let now = NOW + second;
+                if second % 30 == 0 {
+                    for block in rival {
+                        let reaction = on_block(&mut chain, &mut peer, block.clone(), now);
+                        asked += usize::from(asks_for_the_chain(&reaction));
+                    }
+                }
+                asked += usize::from(asks_for_the_chain(&tick(&chain, &mut peer, now)));
+            }
+            (asked, chain.tip() == Some(tip.id()))
+        };
+
+        let (asked, switched) = asks(&tie);
+        assert_eq!(
+            (asked, switched),
+            (0, false),
+            "a node keeping its tip against a tie asked for the chain {asked} times"
+        );
+        let (asked, switched) = asks(&longer);
+        assert!(
+            asked > 0 && switched,
+            "a node facing a longer heavier branch asked {asked} times and switched: {switched}"
+        );
+    }
+
+    /// **A peer's height moves with its work, and only with more work.**
+    ///
+    /// Blocks under parents nobody holds are the peer's word about its
+    /// chain. One claiming a little more work at this node's own height is a
+    /// tie and asks nothing; the same work a block higher is a branch this
+    /// node would take, but a claim of no more work than the last leaves the
+    /// last one standing, whatever its height; and more work a block higher
+    /// is asked for.
+    #[test]
+    fn a_peer_claims_its_height_with_its_work() {
+        let fixture = Fixture::new();
+        let mut chain = fixture.node();
+        let tip = fixture.tip().header;
+        let template = &fixture.base[1];
+        let below = fixture.base.last().unwrap().header;
+        let (mut peer, reaction) = greeted_by(&mut chain, below.height, below.total_work);
+        assert!(
+            !asks_for_the_chain(&reaction),
+            "fixture: a peer greeting from below is not asked"
+        );
+
+        let small = tip.total_work + 1;
+        let steps = [
+            ("a tie at this node's height", tip.height, small, false),
+            ("the same work a block higher", tip.height + 1, small, false),
+            ("more work a block higher", tip.height + 1, small + 1, true),
+        ];
+        for (salt, (name, height, work, asked)) in (10u8..).zip(steps) {
+            let reaction = on_block(
+                &mut chain,
+                &mut peer,
+                claim(template, height, work, salt),
+                NOW,
+            );
+            assert_eq!(
+                asks_for_the_chain(&reaction),
+                asked,
+                "{name}: claimed {work} at height {height}, and the peer now stands at \
+                 height {} worth {}",
+                peer.height,
+                peer.total_work
+            );
+        }
+        assert_eq!(
+            (peer.height, peer.total_work),
+            (tip.height + 1, small + 1),
+            "the claim kept is the last that claimed more"
+        );
+    }
+}

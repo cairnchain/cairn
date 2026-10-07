@@ -459,10 +459,16 @@ the chain run half again as slowly as its target.
 ### Fork choice
 
 By cumulative work, not length. Ties keep the branch already followed, so
-churning the tip costs work rather than nothing. A switch is applied
-atomically: each applied block records its own inverse, and a bad block
-discovered partway through a switch returns the node exactly where it
-was.
+churning the tip costs work rather than nothing, and two tips of one
+height are a tie until one carries more than half a block of extra work.
+The band is there because a block's difficulty follows its parent's
+timestamp: of two branches of one length, the one dated earlier is asked a
+little more above its first block and so weighs a little more, and
+switching on that surplus would hand every such race to whoever dated its
+blocks earliest, a withholding miner above all, rather than to the block
+heard first. A switch is applied atomically: each applied block records
+its own inverse, and a bad block discovered partway through a switch
+returns the node exactly where it was.
 
 Undo records are kept for the most recent
 `MAX_REORG_DEPTH = 1 024` blocks. The switch is refused at the

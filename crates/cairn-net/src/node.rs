@@ -9343,6 +9343,72 @@ fn still_ahead(chain: &ChainStore, claims: &[choosing::Claimed]) -> Vec<PeerId> 
         .collect()
 }
 
+/// Whom a finished choice asks for their chains.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::arithmetic_side_effects)]
+mod a_finished_choice {
+    use super::still_ahead;
+    use crate::choosing::Claimed;
+    use cairn_chain::ChainStore;
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::note::Note;
+    use cairn_ledger::transaction::CoinbaseTransaction;
+    use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
+    use cairn_ledger::LedgerState;
+
+    /// **Of the peers still claiming more work, only the ones whose claim the
+    /// fork choice would take are asked.**
+    ///
+    /// A chain of blocks at difficulty sixteen, so two tips of its height are
+    /// a tie within eight units. A peer claiming eight more at that height is
+    /// left alone, nine more is asked, and one more a block higher is asked.
+    #[test]
+    fn a_finished_choice_asks_whom_the_fork_choice_would_follow() {
+        let params = ConsensusParams {
+            genesis_difficulty: 16,
+            ..ConsensusParams::testnet()
+        };
+        let mut state = LedgerState::new();
+        let mut chain = ChainStore::new(params);
+        for height in 0..4u64 {
+            let coinbase = CoinbaseTransaction::new(
+                height,
+                vec![Note::new(
+                    params.reward_at(height),
+                    SecretKey::from_bytes(&[5; 32]).public_key(),
+                )],
+            );
+            let block =
+                assemble_block(&state, coinbase, Vec::new(), &params, height * 60, 0).unwrap();
+            let block = mine_block(block, 1 << 20).unwrap();
+            connect_block(&mut state, &block, &params, 2_000_000_000).unwrap();
+            chain.add_block(block, 2_000_000_000).unwrap();
+        }
+        let tip = state.recent_headers().last().copied().unwrap();
+        assert_eq!(tip.difficulty, 16, "fixture: the tip is at the opening");
+        let (height, work) = (tip.height, chain.total_work());
+
+        let claims = [
+            Claimed {
+                peer: 1,
+                height,
+                work: work + 8,
+            },
+            Claimed {
+                peer: 2,
+                height,
+                work: work + 9,
+            },
+            Claimed {
+                peer: 3,
+                height: height + 1,
+                work: work + 1,
+            },
+        ];
+        assert_eq!(still_ahead(&chain, &claims), vec![2, 3]);
+    }
+}
+
 /// Whether a peer last heard from at `last_heard` has been silent for
 /// [`PEER_SILENCE`] by `now`.
 ///

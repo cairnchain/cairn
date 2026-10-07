@@ -1718,28 +1718,57 @@ halving the floor would need about 170 000 years to add the difference.
 
 ### Fork choice
 
-What is compared is one number, the `total_work` the tip of a branch states in
-its header. On a valid branch that number is the sum of the difficulties of
-every block up to and including the tip, and the header rules check it against
-the parent's, so it is not a field a miner can choose. A node follows the
-branch whose tip states the greatest `total_work`.
+What is compared is two numbers, the `height` and the `total_work` the tip of a
+branch states in its header. On a valid branch the work is the sum of the
+difficulties of every block up to and including the tip, and the header rules
+check it against the parent's, so it is not a field a miner can choose.
 
-The comparison is strict. A branch whose tip states work less than **or equal
-to** the followed branch's is recorded and not followed, so a tie keeps the
-branch already followed.
+When a block arrives that ends a branch other than the one followed, a node
+switches to that branch if its tip states more `total_work` than the followed
+tip, with one exception: if the two tips state the same `height`, the other
+tip's `total_work` must exceed the followed tip's by more than `floor(D / 2)`,
+where `D` is the difficulty the followed tip states. Otherwise the block is
+recorded and not followed. So equal work keeps the branch already followed at
+any height, and so does a rival of the followed tip's height carrying up to
+half that tip's difficulty more. A rival of any other height is compared by
+work alone. A node following nothing yet, such as a newcomer choosing between
+chains it has weighed, takes the one stating the most work.
+
+The band exists because the retarget reads the parent's timestamp. Two blocks
+on one parent are asked the same difficulty, but of two branches of one length
+forked two or more blocks deep, the one whose blocks are dated earlier is asked
+more above them and states more work, by about one percent of a block for each
+minute between their dates. Compared on any surplus, such a race is settled by
+the dates the miners wrote rather than by the order the blocks arrived in: a
+miner that withholds blocks and releases them to match an honest branch wins
+nearly every such match, since its blocks were found and dated first, and every
+miner gains by dating its blocks as early as the median allows.
+
+This is a node's choice between valid branches and not a rule of validity. No
+block is judged by it, and two nodes that weigh differently agree on every block
+and in the ordinary case meet again at the next one, as two nodes that heard a
+race in opposite orders do. A node SHOULD ask a peer for its
+chain only when the tip the peer claims, by its height and its work, would be
+followed under this rule, so that it neither asks again and again for a branch
+it would hold aside nor waits for one it would take.
 
 **This is not a total order and a second implementation MUST NOT assume it
 is.** Two miners finding a block at the same height is ordinary and produces
-two branches of exactly equal work. Two honest nodes that heard them in
-opposite orders follow different tips, and neither is wrong: what settles it
-is the arrival order, which is a fact about each node and not about the
-chain. The split stands until a further block makes one branch heavier, which
-is one block interval in the ordinary case. This document defines no order
-between branches of equal work, and in particular defines none on the block
-identifier. Breaking the tie on the lower identifier settles it sooner and
-costs more than it buys, because a node catching up along a rival branch
+two branches of exactly equal work, or of work within the band. Two honest
+nodes that heard them in opposite orders follow different tips, and neither is
+wrong: what settles it is the arrival order, which is a fact about each node
+and not about the chain. The split stands until a further block makes one
+branch longer, which is one block interval in the ordinary case. This document
+defines no order between tips that tie, and in particular defines none on the
+block identifier. Breaking the tie on the lower identifier settles it sooner
+and costs more than it buys, because a node catching up along a rival branch
 passes through equal work on the way and reorganises there, doing extra
 rewinding to arrive one block later at the same place.
+
+Nor is the rule transitive. A rival kept aside as a tie is compared again only
+when a block of its branch arrives, so a node that has since moved to a tip of
+another height may hold it aside while it states more work than the tip
+followed, until its branch grows or is offered again.
 
 Before a branch can be compared its blocks have to be held, and a node SHOULD
 refuse to hold a block whose identifier does not meet the target for the
@@ -2729,8 +2758,8 @@ know how many bytes to skip.
 <table>
   <thead><tr><th class="n">Tag</th><th>Message</th><th>Carries</th><th>Answered with</th></tr></thead>
   <tbody>
-    <tr><td class="n">0</td><td>Hello</td><td>handshake</td><td>Welcome, then GetChain when the peer claims more work, then GetPeers</td></tr>
-    <tr><td class="n">1</td><td>Welcome</td><td>handshake</td><td>GetChain when the peer claims more work, then GetPeers</td></tr>
+    <tr><td class="n">0</td><td>Hello</td><td>handshake</td><td>Welcome, then GetChain when the fork choice would follow the tip the peer claims, then GetPeers</td></tr>
+    <tr><td class="n">1</td><td>Welcome</td><td>handshake</td><td>GetChain when the fork choice would follow the tip the peer claims, then GetPeers</td></tr>
     <tr><td class="n">2</td><td>Ping</td><td>u64</td><td>Pong, carrying the same number</td></tr>
     <tr><td class="n">3</td><td>Pong</td><td>u64</td><td>nothing</td></tr>
     <tr><td class="n">4</td><td>GetChain</td><td>sequence of (u64, hash)</td><td>Chain</td></tr>
