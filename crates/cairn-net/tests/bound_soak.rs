@@ -41,18 +41,19 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use cairn_chain::{ChainStore, MAX_POOLED, MAX_POOL_BYTES};
+use cairn_chain::{ChainStore, HELD_OVERHEAD, HELD_WINDOW, MAX_POOLED, MAX_POOL_BYTES};
 use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Note, NoteId};
+use cairn_ledger::state::GRACE_NOTES;
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
 use cairn_net::book::{AddressBook, MAX_ADDRESSES, MAX_PER_GROUP};
 use cairn_net::Node;
-use cairn_primitives::Amount;
+use cairn_primitives::{Amount, Encode};
 
 const NOW: u64 = 2_000_000_000;
 /// At this network's floor difficulty a nonce is found at once, so the cost of
@@ -110,7 +111,12 @@ fn rss_kb() -> u64 {
         .arg(std::process::id().to_string())
         .output();
     out.ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0))
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        })
         .unwrap_or(0)
 }
 
@@ -128,6 +134,27 @@ fn coinbase(height: u64, reward: Amount, owner: &SecretKey) -> CoinbaseTransacti
     CoinbaseTransaction::new(height, outputs)
 }
 
+/// Bytes every file under `directory` takes, the block log included.
+fn disk_bytes(directory: &Path) -> u64 {
+    std::fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| match entry.metadata() {
+                    Ok(meta) if meta.is_dir() => disk_bytes(&entry.path()),
+                    Ok(meta) => meta.len(),
+                    Err(_) => 0,
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Bytes one file takes, nought while it does not exist.
+fn disk_bytes_of(file: &Path) -> u64 {
+    std::fs::metadata(file).map_or(0, |meta| meta.len())
+}
+
 /// One mark of what a node holds, every one of it a number no machine has a
 /// say in.
 #[derive(Clone, Copy, Debug)]
@@ -135,22 +162,37 @@ struct Mark {
     height: u64,
     cold: u64,
     hot: usize,
+    grace: usize,
+    entries: usize,
     held_bytes: usize,
     undo: usize,
     kept: u64,
+    disk: u64,
 }
 
-/// What the soak returns: the marks it took, and where the block log began
-/// after the run, which is above zero once trimming has dropped the start.
+/// What the soak returns: the marks it took, the most the hot set and the
+/// grace window held after any block of the run and not only at a mark, where
+/// the block log began once upkeep had caught the last block, and the largest
+/// record the log was handed, which is what the disk bound is counted in.
 struct Run {
     marks: Vec<Mark>,
+    most_hot: usize,
+    most_grace: usize,
     log_begins_at: Option<u64>,
+    largest_record: u64,
+}
+
+/// What the block log may hold once upkeep has caught the tip: the budget, the
+/// blocks above the burial that the ledger it writes cannot yet stand in for,
+/// and one record for a budget that does not divide evenly into blocks.
+fn disk_bound(params: &ConsensusParams, largest_record: u64) -> u64 {
+    KEEP + (params.burial + 1) * largest_record
 }
 
 /// Drives a disk-backed node `blocks` blocks forward, coinbase only, with the
 /// hot set at its cap and the block log trimmed to [`KEEP`], and returns what
 /// it held at each mark.
-fn soak(blocks: usize, directory: &std::path::Path) -> Run {
+fn soak(blocks: usize, directory: &Path) -> Run {
     let params = params();
     let miner = wallet(1);
     let (node, _restored) = Node::open(params, loopback(), directory).unwrap();
@@ -160,12 +202,27 @@ fn soak(blocks: usize, directory: &std::path::Path) -> Run {
     // beside it only so blocks can be built without reaching into the node.
     let mut state = LedgerState::new();
     let mut clock = 1_000u64;
+    let mut largest_record = 0u64;
+    let (mut most_hot, mut most_grace) = (0usize, 0usize);
     let chunk = (blocks / 12).max(1);
+    let started = Instant::now();
 
     println!(
         "\n== a node soaked {blocks} blocks, hot cap {}, log budget {KEEP} ==\n\
-         {:>8} {:>10} {:>5} {:>10} {:>6} {:>10} {:>9}",
-        params.hot_capacity, "height", "cold", "hot", "held B", "undo", "kept B", "rss kB"
+         {:>6} {:>7} {:>3} {:>5} {:>5} {:>7} {:>5} {:>7} {:>8} {:>8} {:>6} {:>5}",
+        params.hot_capacity,
+        "height",
+        "cold",
+        "hot",
+        "grace",
+        "held",
+        "held B",
+        "undo",
+        "kept B",
+        "ledger B",
+        "disk B",
+        "rss kB",
+        "secs"
     );
 
     let mut marks = Vec::new();
@@ -182,42 +239,86 @@ fn soak(blocks: usize, directory: &std::path::Path) -> Run {
         )
         .unwrap();
         let block = mine_block(block, ATTEMPTS).expect("a nonce exists at the floor difficulty");
+        // A record is the block behind a four byte length.
+        largest_record = largest_record.max(block.encode().len() as u64 + 4);
         connect_block(&mut state, &block, &params, NOW).unwrap();
         node.submit_block(block).unwrap();
 
+        // Every block, since the counts are cheap to read: a ceiling crossed
+        // for one block and back under it by the next mark is still crossed.
+        let mark = node.with_chain(|chain| Mark {
+            height: chain.height().unwrap_or(0),
+            cold: chain.state().cold_len(),
+            hot: chain.state().hot_len(),
+            grace: chain.state().grace_len(),
+            entries: chain.len(),
+            held_bytes: chain.held_bytes(),
+            undo: chain.undo_records(),
+            kept: 0,
+            disk: 0,
+        });
+        most_hot = most_hot.max(mark.hot);
+        most_grace = most_grace.max(mark.grace);
+
         if (at + 1) % chunk == 0 || at + 1 == blocks {
-            // The log is trimmed by upkeep, which runs on its own cadence, so
-            // give it a moment to catch the chain before the disk is read.
-            std::thread::sleep(Duration::from_millis(50));
-            let mark = node.with_chain(|chain| Mark {
-                height: chain.height().unwrap_or(0),
-                cold: chain.state().cold_len(),
-                hot: chain.state().hot_len(),
-                held_bytes: chain.held_bytes(),
-                undo: chain.undo_records(),
-                kept: 0,
-            });
             let mark = Mark {
                 kept: node.kept_bytes(),
+                disk: disk_bytes(directory),
                 ..mark
             };
             println!(
-                "{:>8} {:>10} {:>5} {:>10} {:>6} {:>10} {:>9}",
-                mark.height, mark.cold, mark.hot, mark.held_bytes, mark.undo, mark.kept, rss_kb()
+                "{:>6} {:>7} {:>3} {:>5} {:>5} {:>7} {:>5} {:>7} {:>8} {:>8} {:>6} {:>5}",
+                mark.height,
+                mark.cold,
+                mark.hot,
+                mark.grace,
+                mark.entries,
+                mark.held_bytes,
+                mark.undo,
+                mark.kept,
+                disk_bytes_of(&directory.join("ledger.dat")),
+                mark.disk,
+                rss_kb(),
+                started.elapsed().as_secs()
             );
             marks.push(mark);
         }
     }
 
-    // A last round of upkeep, so the final disk figure is the trimmed one and
-    // not a log the last block grew a moment ago.
-    std::thread::sleep(Duration::from_secs(2));
-    let settled = node.kept_bytes();
+    // The log is trimmed by upkeep, once a second on its own thread, and the
+    // blocks above came faster than that. Wait for a round to catch the last
+    // of them rather than for a fixed time, so a slow machine is only slower.
+    let bound = disk_bound(&params, largest_record);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while node.kept_bytes() > bound && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
     if let Some(last) = marks.last_mut() {
-        last.kept = settled;
+        last.kept = node.kept_bytes();
+        last.disk = disk_bytes(directory);
     }
     let log_begins_at = node.blocks_from();
-    println!("  the block log begins at height {log_begins_at:?} after trimming");
+    println!(
+        "  once upkeep caught up: the block log begins at {log_begins_at:?} and holds {} bytes, \
+         the directory {} bytes",
+        node.kept_bytes(),
+        disk_bytes(directory)
+    );
+    let mut files: Vec<(String, u64)> = std::fs::read_dir(directory)
+        .unwrap()
+        .flatten()
+        .map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (
+                name,
+                disk_bytes(&entry.path()).max(entry.metadata().map_or(0, |m| m.len())),
+            )
+        })
+        .collect();
+    files.sort();
+    for (name, bytes) in files {
+        println!("    {bytes:>10}  {name}");
+    }
 
     // What the operator reads has to be what the node holds. Read once, under
     // the node's own lock, against what the same lock reports.
@@ -243,7 +344,10 @@ fn soak(blocks: usize, directory: &std::path::Path) -> Run {
     drop(node);
     Run {
         marks,
+        most_hot,
+        most_grace,
         log_begins_at,
+        largest_record,
     }
 }
 
@@ -252,9 +356,13 @@ fn soak(blocks: usize, directory: &std::path::Path) -> Run {
 fn soak_holds(run: &Run) {
     let params = params();
     let marks = &run.marks;
-    let ceiling = ChainStore::held_bytes_ceiling(&params);
     let settled = marks[marks.len() / 2];
     let last = *marks.last().unwrap();
+    // The published ceiling is counted in blocks of the largest size the rules
+    // allow. These are far smaller, so the same window counted in these blocks
+    // is the ceiling that can actually be reached here.
+    let held_block = run.largest_record as usize + HELD_OVERHEAD;
+    let ceiling = ChainStore::held_bytes_ceiling(&params).min(HELD_WINDOW * held_block);
 
     // The chain really ran and the hot set really evicted: the cold set, which
     // a plain node commits to in its roots and does not hold, went on growing.
@@ -265,12 +373,31 @@ fn soak_holds(run: &Run) {
         last.cold
     );
 
+    // After every block, not only at the marks.
+    assert!(
+        run.most_hot <= params.hot_capacity,
+        "the hot set held {} notes against a capacity of {}",
+        run.most_hot,
+        params.hot_capacity
+    );
+    assert!(
+        run.most_grace <= GRACE_NOTES,
+        "the grace window held {} notes against a ceiling of {GRACE_NOTES}",
+        run.most_grace
+    );
+
     for mark in marks {
         assert!(
-            mark.hot <= params.hot_capacity,
-            "the hot set holds {} notes against a capacity of {}",
-            mark.hot,
-            params.hot_capacity
+            mark.undo <= HELD_WINDOW,
+            "the node holds {} undo records against a window of {HELD_WINDOW}",
+            mark.undo
+        );
+        // No rival branch is offered here, so the side store's share of the
+        // ceiling is nought and what is held is the window and nothing else.
+        assert!(
+            mark.entries <= HELD_WINDOW,
+            "the node holds {} block entries against a window of {HELD_WINDOW}",
+            mark.entries
         );
         assert!(
             mark.held_bytes <= ceiling,
@@ -280,15 +407,29 @@ fn soak_holds(run: &Run) {
     }
 
     // The bounded holdings do not grow with the chain: none is larger at the
-    // end than at the settled midpoint, allowing a block's slack for a mark
-    // caught between evictions.
-    for (name, from, to) in [
-        ("the hot set", settled.hot as u64, last.hot as u64),
-        ("the undo window", settled.undo as u64, last.undo as u64),
-        ("what is held in memory", settled.held_bytes as u64, last.held_bytes as u64),
-    ] {
+    // end than at the settled midpoint. The hot set is at its cap and the
+    // grace window full, so neither may move at all; what is held in memory
+    // may move by one block, for a body caught between being written and
+    // being let go. The undo records and the block entries reach their width
+    // only once the chain is longer than the window, so they are read here
+    // only by a run whose midpoint is past it, which the short run is not.
+    let mut bounded = vec![
+        ("the hot set", settled.hot, last.hot, 0),
+        ("the grace window", settled.grace, last.grace, 0),
+        (
+            "what is held in memory",
+            settled.held_bytes,
+            last.held_bytes,
+            held_block,
+        ),
+    ];
+    if settled.undo == HELD_WINDOW {
+        bounded.push(("the undo window", settled.undo, last.undo, 0));
+        bounded.push(("the block entries", settled.entries, last.entries, 0));
+    }
+    for (name, from, to, slack) in bounded {
         assert!(
-            to <= from + params.max_block_bytes as u64,
+            to <= from + slack,
             "{name} held {from} at {} notes of cold set and {to} at {}, so it grows with \
              the chain",
             settled.cold,
@@ -298,7 +439,7 @@ fn soak_holds(run: &Run) {
 
     // The disk is bounded by the budget and not merely slow to grow. Trimming
     // really ran: the log no longer begins at the start of the chain, and what
-    // it holds is within the budget and nothing like the whole chain's length.
+    // it holds is the budget and the blocks the burial keeps above it.
     assert!(
         run.log_begins_at.is_some_and(|begins| begins > 0),
         "the block log still begins at the chain's start, so the budget never trimmed it: \
@@ -306,9 +447,10 @@ fn soak_holds(run: &Run) {
         run.log_begins_at,
         last.height
     );
+    let bound = disk_bound(&params, run.largest_record);
     assert!(
-        last.kept <= KEEP * 2,
-        "the block log holds {} bytes against a budget of {KEEP}",
+        last.kept <= bound,
+        "the block log holds {} bytes against a budget of {KEEP}, {bound} with the burial",
         last.kept
     );
 }
@@ -384,12 +526,18 @@ fn a_pool_of(target: usize) -> ChainStore {
         connect_block(&mut state, &block, &rules, NOW).unwrap();
         store.add_block(block.clone(), NOW).unwrap();
         for (index, note) in outputs.into_iter().enumerate() {
-            notes.push((NoteId::new(block.coinbase.id(), u32::try_from(index).unwrap()), note));
+            notes.push((
+                NoteId::new(block.coinbase.id(), u32::try_from(index).unwrap()),
+                note,
+            ));
         }
     }
 
     for (id, note) in notes.into_iter().take(target) {
-        let paid = note.value.checked_sub(Amount::from_pebbles(10_000).unwrap()).unwrap();
+        let paid = note
+            .value
+            .checked_sub(Amount::from_pebbles(10_000).unwrap())
+            .unwrap();
         let mut transfer = Transfer::new(
             vec![Input::hot(id)],
             vec![Note::new(paid, wallet(2).public_key())],
@@ -422,7 +570,11 @@ fn pool_holds(store: &ChainStore) {
 #[test]
 fn the_pool_holds_what_it_is_filled_with() {
     let store = a_pool_of(512);
-    assert_eq!(store.pool_len(), 512, "the pool took every transfer offered");
+    assert_eq!(
+        store.pool_len(),
+        512,
+        "the pool took every transfer offered"
+    );
     pool_holds(&store);
 }
 
@@ -456,8 +608,7 @@ fn the_address_book_holds_its_ceilings() {
     for n in 0..(MAX_PER_GROUP as u32 * 4) {
         let octet_c = (n >> 8) as u8;
         let octet_d = (n & 0xff) as u8;
-        let address =
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, octet_c, octet_d)), 8333);
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, octet_c, octet_d)), 8333);
         one_group.insert(address);
     }
     assert!(
