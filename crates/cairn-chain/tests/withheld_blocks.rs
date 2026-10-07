@@ -4,43 +4,51 @@
 //! Lab scenario R20 (attacks A04 and A05 of the 3 October catalogue). A miner
 //! with less than half of the work keeps the blocks it finds to itself and
 //! releases them to orphan honest ones. The threat model says this is
-//! untreated, "as on every Nakamoto chain", that it pays from a third of the
-//! work upwards, and that the one lever taken is the tie rule: a branch of
-//! equal work does not displace the one a node already follows. Eyal and
-//! Sirer give the share a withholding miner earns as a function of its own
-//! share `alpha` and of `gamma`, the part of the honest work that ends up
-//! mining on the withholder's block when two blocks race at one height; it
-//! pays above `alpha` once `alpha > (1 - gamma) / (3 - 2 gamma)`, a third at
-//! `gamma = 0` and a quarter at `gamma = 1/2`.
+//! untreated, "as on every Nakamoto chain", and that the one lever taken is
+//! the tie rule: a branch of equal work does not displace the one a node
+//! already follows, and nor does a rival tip of its height carrying no more
+//! than half the followed tip's difficulty in extra work. Eyal and Sirer give
+//! the share a withholding miner earns as a function of its own share `alpha`
+//! and of `gamma`, the part of the honest work that ends up mining on the
+//! withholder's block when two blocks race at one height; it pays above
+//! `alpha` once `alpha > (1 - gamma) / (3 - 2 gamma)`, a third at `gamma = 0`
+//! and a quarter at `gamma = 1/2`.
 //!
 //! Nothing here is a model of the fork choice. Every honest node is a real
 //! [`ChainStore`], every block is assembled, mined and validated, and what a
-//! node follows is whatever `add_block` decided. Around them sits a small
-//! discrete event simulation: each miner finds blocks as a Poisson process at
-//! a rate set by its share and by the difficulty its own tip asks, blocks
-//! travel with exponential delays, and the withholder follows a strategy from
-//! the papers, written by length as they are.
+//! node follows is whatever `add_block` decided. The withholder's view of the
+//! public chain is a real store as well, so it weighs branches as every node
+//! does. Around them sits a small discrete event simulation: each miner finds
+//! blocks as a Poisson process at a rate set by its share and by the
+//! difficulty its own tip asks, blocks travel with exponential delays, and the
+//! withholder follows a strategy from the papers, written by length as they
+//! are.
 //!
 //! **What was measured.** Four honest nodes of equal share, a 60 second
 //! block, honest blocks two seconds apart on average, and three ways the
 //! withholder can be placed: slow (it hears honest blocks in two seconds and
 //! its own reach honest nodes in six), even (one and one), and fast (a tenth
-//! of a second each way). Eight thousand blocks a cell, one seed; run with
-//! `cargo test -p cairn-chain --test withheld_blocks --release -- --ignored
-//! --nocapture`, about seventeen minutes on ten cores.
+//! of a second each way). Eight thousand blocks a cell, on the eleven shares
+//! of the testnet-9 study, every cell from four seeds (the control from one),
+//! revenue averaged and races pooled; run with `cargo test -p cairn-chain
+//! --test withheld_blocks --release -- --ignored --nocapture`, an hour and a
+//! half on ten cores shared with other work.
 //!
 //! ```text
 //! revenue share of the withholder (main chain blocks it mined), SM1
 //!         slow                 even                 fast
 //! alpha   gamma share  ES      gamma share  ES      gamma share  ES
-//! 0.10    0.11  0.043  0.044   0.35  0.060  0.061   0.66  0.085  0.084
-//! 0.20    0.08  0.138  0.138   0.32  0.174  0.163   0.65  0.199  0.198
-//! 0.25    0.08  0.203  0.203   0.34  0.231  0.232   0.65  0.264  0.267
-//! 0.30    0.09  0.280  0.283   0.33  0.304  0.308   0.68  0.345  0.346
-//! 0.33    0.10  0.330  0.337   0.32  0.368  0.360   0.67  0.385  0.396
-//! 0.35    0.09  0.365  0.375   0.33  0.413  0.399   0.68  0.425  0.434
-//! 0.40    0.08  0.490  0.490   0.32  0.504  0.511   0.66  0.515  0.539
-//! 0.45    0.11  0.622  0.658   0.32  0.665  0.670   0.66  0.669  0.690
+//! 0.10    0.09  0.041  0.043   0.31  0.057  0.059   0.67  0.086  0.085
+//! 0.15    0.09  0.079  0.085   0.33  0.109  0.107   0.67  0.138  0.139
+//! 0.20    0.09  0.134  0.140   0.34  0.167  0.165   0.68  0.205  0.201
+//! 0.25    0.09  0.193  0.205   0.33  0.235  0.231   0.67  0.267  0.269
+//! 0.28    0.09  0.243  0.250   0.33  0.268  0.276   0.68  0.313  0.314
+//! 0.30    0.09  0.269  0.283   0.33  0.306  0.309   0.67  0.344  0.345
+//! 0.33    0.09  0.328  0.336   0.33  0.355  0.361   0.68  0.394  0.397
+//! 0.35    0.08  0.361  0.375   0.34  0.406  0.400   0.67  0.430  0.433
+//! 0.38    0.09  0.425  0.441   0.32  0.450  0.462   0.68  0.498  0.495
+//! 0.40    0.10  0.482  0.492   0.33  0.509  0.511   0.67  0.534  0.539
+//! 0.45    0.09  0.636  0.657   0.33  0.650  0.671   0.66  0.683  0.690
 //! ```
 //!
 //! ```text
@@ -48,58 +56,72 @@
 //! the real retarget, then with every block weighing one
 //!         slow                     even                     fast
 //! alpha   real        flat         real        flat         real        flat
-//! 0.10    0.038 0.87  0.025 0.11   0.062 0.94  0.059 0.53   0.085 0.97  0.083 0.71
-//! 0.20    0.135 0.87  0.093 0.11   0.166 1.00  0.141 0.34   0.206 1.00  0.206 0.66
-//! 0.25    0.219 0.89  0.137 0.07   0.237 0.98  0.211 0.40   0.277 0.99  0.262 0.69
-//! 0.30    0.281 0.88  0.198 0.10   0.322 0.99  0.279 0.32   0.364 1.00  0.353 0.69
-//! 0.33    0.363 0.89  0.237 0.10   0.385 0.98  0.349 0.35   0.436 1.00  0.409 0.65
-//! 0.35    0.398 0.88  0.292 0.09   0.437 0.99  0.384 0.35   0.463 1.00  0.445 0.65
-//! 0.40    0.544 0.90  0.424 0.10   0.578 0.98  0.499 0.33   0.604 1.00  0.566 0.65
-//! 0.45    0.695 0.90  0.596 0.09   0.708 0.99  0.696 0.33   0.714 1.00  0.738 0.69
+//! 0.10    0.027 0.12  0.027 0.12   0.051 0.36  0.053 0.37   0.083 0.64  0.083 0.69
+//! 0.15    0.058 0.10  0.057 0.10   0.092 0.31  0.093 0.32   0.139 0.70  0.137 0.70
+//! 0.20    0.090 0.09  0.095 0.09   0.142 0.34  0.144 0.34   0.194 0.64  0.201 0.65
+//! 0.25    0.141 0.09  0.141 0.09   0.209 0.33  0.208 0.34   0.266 0.66  0.266 0.69
+//! 0.28    0.173 0.09  0.176 0.09   0.245 0.32  0.252 0.33   0.315 0.67  0.316 0.68
+//! 0.30    0.203 0.09  0.205 0.10   0.279 0.33  0.280 0.33   0.358 0.67  0.360 0.67
+//! 0.33    0.250 0.10  0.244 0.09   0.337 0.32  0.343 0.33   0.420 0.65  0.420 0.67
+//! 0.35    0.292 0.11  0.290 0.09   0.381 0.33  0.383 0.33   0.466 0.67  0.455 0.67
+//! 0.38    0.354 0.11  0.339 0.09   0.453 0.33  0.457 0.33   0.524 0.66  0.543 0.68
+//! 0.40    0.407 0.12  0.417 0.09   0.507 0.34  0.503 0.33   0.564 0.67  0.573 0.66
+//! 0.45    0.600 0.16  0.581 0.09   0.665 0.35  0.713 0.34   0.737 0.67  0.740 0.69
 //! ```
 //!
 //! ```text
-//! the first share measured that earns more than itself
-//!                              slow   even   fast
-//! Eyal and Sirer at gamma      0.32   0.29   0.20
-//! SM1                          0.35   0.30   0.25
-//! lead stubborn, real          0.33   0.30   0.20
-//! lead stubborn, flat          0.40   0.33   0.20
+//! the share at which revenue crosses the share, linear between grid points
+//!                              slow    even    fast
+//! Eyal and Sirer at gamma      0.323   0.286   0.199
+//! SM1                          0.333   0.294   0.186
+//! lead stubborn, real          0.396   0.323   0.213
+//! lead stubborn, flat          0.394   0.318   0.196
+//! best of the two, real        0.333   0.294   0.186
+//! best of the two, before      0.301   0.266   0.177
 //! ```
 //!
 //! `ES` is Eyal and Sirer's formula at the gamma measured in the same run,
 //! counted over races at one height only; their threshold is a third at
-//! gamma 0, a quarter at gamma 1/2 and nought at gamma 1. Deep gamma is the
+//! gamma 0, a quarter at gamma 1/2 and nought at gamma 1, and its first line
+//! above is taken at the gamma measured here, 0.09 / 0.33 / 0.67. Deep gamma is the
 //! same count over matches two or more blocks deep. The honest control
-//! (`alpha` mined and published at once) earned within a point of `alpha` in
-//! every cell.
+//! (`alpha` mined and published at once) earned within a hundredth of `alpha`
+//! in every cell. The last line is the study's figure for the fork choice
+//! before the band (`sims/q1-results.txt` of the testnet-9 study, sixteen
+//! seeds), which this file measured as 0.33 / 0.30 / 0.20 from one seed on a
+//! coarser grid; the study puts the band at 0.333 / 0.284 / 0.181.
 //!
 //! **What it says.** Selfish mining behaves here as the papers say it does on
 //! any chain, and the tie rule does what the threat model claims for it and
-//! no more: at one height the two blocks carry the same work, since the
+//! no more. At one height the two blocks carry the same work, since the
 //! retarget reads only the parent, so the race goes to whichever block a node
 //! heard first, and gamma is set by where the withholder sits in the network,
-//! not by the rule. SM1 earns within noise of the formula in every cell. The
-//! threat model's "from a third" is the badly placed withholder's figure; one
-//! with gamma near two thirds profits from a quarter of the work, and breaks
-//! even at a fifth.
+//! not by the rule. SM1 earns within noise of the formula in every cell and
+//! sets the threshold: a third for a withholder that hears and speaks late,
+//! under three tenths for one as quick as the honest nodes, under a fifth for
+//! one that reaches them first.
 //!
-//! One thing is Cairn's own. Two branches of the same length that fork two or
-//! more blocks deep do not carry the same work: each block's difficulty
-//! follows its parent's timestamp, so the branch whose blocks are dated
-//! earlier asks more of the blocks above them and is heavier. Equal length is
-//! a tie only at depth one. A withholder that matches rather than overrides,
-//! as lead stubbornness does, matches with blocks it found earlier, and wins
-//! those matches by work rather than by arrival: nine in ten even where it
-//! hears and speaks late, where with every block weighing one it wins one in
-//! ten. Lead stubbornness then pays from a third of the work where SM1 needs
-//! more, against two fifths were work only length, and from a third up it
-//! out-earns SM1 in every placement. The deep matches it loses fall from
-//! about one in ten to nearly none as its blocks reach honest nodes faster,
-//! which is what losing to honest blocks found before the match arrived
-//! looks like.
-//! `a_race_two_blocks_deep_goes_to_the_branch_dated_earlier` holds the fact;
-//! the second table measures what it is worth.
+//! Two branches of the same length that fork two or more blocks deep do not
+//! carry the same work. Each block's difficulty follows its parent's
+//! timestamp, so the branch whose blocks are dated earlier asks more of the
+//! blocks above them and is heavier, by a few hundredths of a block. That is
+//! inside the band, so such a match is a tie and arrival settles it, as at
+//! one height: the deep gamma of lead stubbornness on the real retarget is the
+//! flat lane's, a tenth, a third and two thirds by placement, and so, within
+//! noise, are its revenue and its threshold. It pays from a higher share than
+//! SM1 in every placement; past two fifths of the work in the fast placement
+//! it earns more than SM1 does, which is the papers' own finding for a
+//! withholder that wins two races in three, and owes nothing to the dates.
+//!
+//! Before the band the fork choice switched on any surplus. A withholder that
+//! matches rather than overrides matches with blocks it found, and dated,
+//! earlier, so it won those matches by work rather than by arrival: deep gamma
+//! 0.87 to 1.00 in every placement, against a tenth to two thirds when every
+//! block weighed one. Lead stubbornness then paid from 0.30 / 0.27 / 0.18 of
+//! the work, at or below SM1 and below the papers' figure at the measured
+//! gamma, and every miner gained by dating its blocks early (T8-4 of the
+//! testnet-8 findings). `a_race_two_blocks_deep_goes_to_the_branch_heard_first` holds
+//! the fact the band turns on; the tables measure what it is worth.
 
 #![allow(
     clippy::unwrap_used,
