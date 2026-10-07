@@ -54,13 +54,14 @@ pub struct PeerState {
     /// whenever a block it delivers claims more. See [`Self::claims`].
     ///
     /// The fork choice reads both. Two tips of one height are a tie unless
-    /// one carries more than half the other's difficulty in extra work (see
-    /// `ChainStore::outweighed_by`), so a peer claiming a little more work
-    /// than this node at this node's own height has nothing this node would
-    /// take, and a peer claiming the same work a block higher has. Read
-    /// against the work alone, a node keeping the lighter of two tips of one
-    /// height would see the peer claim more on every round and ask it for its
-    /// chain on every round, for blocks it already held.
+    /// the other carries more than half the followed tip's difficulty in
+    /// extra work (see `ChainStore::outweighed_by`), so a peer claiming a
+    /// little more work than this node at this node's own height has nothing
+    /// this node would take, and a peer claiming the same work a block higher
+    /// has. Read against the work alone, a node keeping the lighter of two
+    /// tips of one height would see the peer claim more on every round and
+    /// ask it for its chain on every round, for a branch it would only hold
+    /// aside.
     pub height: u64,
     /// The most work this peer has claimed for its chain: what it wrote in
     /// its greeting, raised by any block it delivers above what this node
