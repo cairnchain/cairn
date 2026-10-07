@@ -1286,6 +1286,7 @@ fn a_wallet_that_has_not_checked_its_chain_says_so_before_anything_smaller() {
             stranded: None,
             unwritten: None,
             clock_behind: None,
+            out_of_reach: 0,
             opening: None,
             unjudged: None,
             unweighable: None,

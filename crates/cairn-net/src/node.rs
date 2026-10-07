@@ -4968,6 +4968,7 @@ impl Node {
         };
         // The anchors a book was read back with are the ones on the disk.
         let anchors_written_at = book.anchor_changes();
+        let choosing = Chooser::reaching(chain.undo_limit());
 
         let shared = Arc::new(Shared {
             params,
@@ -4978,7 +4979,7 @@ impl Node {
             chain: Mutex::new(chain),
             log: Arc::new(Mutex::new(log)),
             book: Mutex::new(book),
-            choosing: Mutex::new(Chooser::new()),
+            choosing: Mutex::new(choosing),
             seed_names: Mutex::new(Vec::new()),
             names_looked_up_at: AtomicU64::new(0),
             book_written_at: AtomicU64::new(u64::MAX),
