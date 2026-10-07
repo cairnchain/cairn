@@ -23,6 +23,15 @@
 //! honest archivist is never dialled. A wallet asks again every fifteen
 //! seconds and gets the same, for as long as the claimers stay connected:
 //! never, against five minutes.
+//!
+//! **What changed.** Once every connected claimer has answered and a place
+//! is still not placed, the node reaches for archivists in its book as it
+//! does with nobody claiming, and waits for them until its patience runs out
+//! rather than ending on the claimers' word. Among the book's archivists it
+//! tries first the addresses that once handed over a path that folded, since
+//! the claimers are the addresses it heard from last. With six claimers
+//! connected it now dials the honest archivist and has the path in that
+//! same round.
 
 #![allow(
     clippy::unwrap_used,
@@ -300,10 +309,10 @@ fn a_node_with_no_archivist_connected_reaches_the_one_it_met() {
 /// **A node that knows an honest archivist gets the path though six
 /// connected peers claim the archive and place nothing.**
 ///
-/// R11's pass mark, asked of one round. It fails: the node reaches for an
-/// archivist only when no connected peer claims to be one, so it asks the
-/// six, takes their six empty answers, and stops, and the honest archivist,
-/// up and in its book, is never dialled. Every later round is the same
+/// R11's pass mark, asked of one round. It failed: the node reached for an
+/// archivist only when no connected peer claimed to be one, so it asked the
+/// six, took their six empty answers, and stopped, and the honest archivist,
+/// up and in its book, was never dialled. Every later round was the same
 /// round.
 #[test]
 fn a_node_that_knows_an_honest_archivist_gets_the_path_past_peers_that_only_claim_it() {

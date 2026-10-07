@@ -4358,6 +4358,7 @@ impl Shared {
             return;
         }
         let mut kept = false;
+        let mut handed_a_path = false;
         for (position, proof, holds) in folded {
             if asking.wanted.get(&position) != checked_against.get(&position) {
                 continue;
@@ -4365,12 +4366,25 @@ impl Shared {
             kept = true;
             if holds {
                 asking.found.insert(position, proof);
+                handed_a_path = true;
             } else {
                 asking.refused = asking.refused.saturating_add(1);
             }
         }
         if kept {
             asking.answered.insert(from);
+        }
+        drop(asking);
+        // Against the address it listens at, which is what its claim to keep
+        // the set was written against, so that a node reaching for archivists
+        // it met tries this one before any that only claimed: see
+        // `AddressBook::archivists`. Once the question is let go of, which is
+        // a leaf.
+        if handed_a_path {
+            let listens = self.peers().get(&from).and_then(|peer| peer.advertised);
+            if let Some(address) = listens {
+                self.book().handed_over_a_path(&address);
+            }
         }
     }
 
@@ -5845,7 +5859,9 @@ impl Node {
     /// address at the other end of the connection. It is because nobody else
     /// could answer. With no such peer connected, nobody is asked: the node
     /// reaches for one it has heard of, and if none arrives in time the answer
-    /// says that nobody was asked.
+    /// says that nobody was asked. When every such peer connected has
+    /// answered and a place is still not placed, it reaches past them the
+    /// same way, archivists that once handed over a path that folded first.
     ///
     /// Nothing here trusts anybody. A path is folded from the place named up
     /// to a commitment this node worked out for itself, block by block, and
@@ -5889,9 +5905,14 @@ impl Node {
         // Nobody here keeps the set, so reach for somebody this node has met
         // who said they did. A claim heard on an earlier connection is the
         // only lead there is, and following it costs a dial.
+        let mut reached = false;
         if self.archiving_peers() == 0 {
             self.reach_for_an_archivist();
+            reached = true;
         }
+        // Answers in when the node reached past the peers that gave them, so
+        // that what it reached for is waited on and not ended by those.
+        let mut answered_before = 0;
 
         let deadline = Instant::now().checked_add(patience);
         loop {
@@ -5908,13 +5929,31 @@ impl Node {
                 self.shared
                     .send_to(peer, Message::GetProofs(positions.clone()));
             }
-            {
+            let everyone_answered = {
                 let mut asking = self.shared.asking();
-                // Every place answered for, or everyone asked has answered and
-                // there is nothing further to wait on.
-                if asking.satisfied()
-                    || (!asking.asked.is_empty() && asking.answered.len() >= asking.asked.len())
-                {
+                let answered = asking.answered.len();
+                let everyone = answered > answered_before && answered >= asking.asked.len();
+                // Every place answered for, or everyone asked has answered
+                // after the node reached for whoever else it could, and there
+                // is nothing further to wait on.
+                if asking.satisfied() || (everyone && reached) {
+                    return finished(&mut asking, archivists);
+                }
+                everyone.then_some(answered)
+            };
+            // Every peer here that says it keeps the set has answered, and a
+            // place is still not placed. A claim is a bit in a handshake, and
+            // six peers making it and answering every place with nothing kept
+            // a node from an honest archivist in its book for as long as they
+            // stayed: it asked them, took their word, and never dialled. So
+            // it reaches past them as it does with nobody connected, and
+            // waits for what it reached until its patience runs out. With
+            // nobody left to dial, there is nothing to wait on.
+            if let Some(answered) = everyone_answered {
+                reached = true;
+                answered_before = answered;
+                if self.reach_for_an_archivist() == 0 {
+                    let mut asking = self.shared.asking();
                     return finished(&mut asking, archivists);
                 }
             }
@@ -5926,14 +5965,17 @@ impl Node {
         }
     }
 
-    /// Opens a connection to an address that said it keeps the cold set.
+    /// Opens a connection to an address that said it keeps the cold set, and
+    /// says how many it opened.
     ///
     /// Only reached by a node that needs a path and is connected to nobody who
-    /// can build one, which for a wallet is the moment its owner is looking at
-    /// money it cannot move. One address at a time and only ones already in
-    /// the book, so this is an ordinary dial made a few seconds early rather
-    /// than a second way of choosing who this node talks to.
-    fn reach_for_an_archivist(&self) {
+    /// can build one, or only to peers that said they could and did not,
+    /// which for a wallet is the moment its owner is looking at money it
+    /// cannot move. One address at a time and only ones already in the book,
+    /// in the order the book gives, so this is an ordinary dial made a few
+    /// seconds early rather than a second way of choosing who this node talks
+    /// to.
+    fn reach_for_an_archivist(&self) -> usize {
         let known: Vec<SocketAddr> = self.shared.book().archivists();
         let connected: Vec<SocketAddr> = self
             .shared
@@ -5941,13 +5983,12 @@ impl Node {
             .values()
             .filter_map(|peer| peer.advertised.or(peer.dialled_to))
             .collect();
-        for address in known
+        known
             .into_iter()
             .filter(|address| !connected.contains(address))
             .take(REACH_FOR_ARCHIVISTS)
-        {
-            let _ = self.connect(address);
-        }
+            .filter(|address| self.connect(*address).is_ok())
+            .count()
     }
 
     /// Transfers waiting for a block.
@@ -14595,6 +14636,165 @@ mod peers_and_loops {
         assert!(
             after.answered.is_empty(),
             "the peer was counted as answering a question its answer was not checked against"
+        );
+    }
+
+    /// A peer in the table that says it keeps the cold set.
+    fn a_claimer(socket: &TcpStream, listens: Option<SocketAddr>) -> Peer {
+        Peer {
+            advertised: listens,
+            keeps: Keeps {
+                cold_set: true,
+                ..Keeps::default()
+            },
+            ..stand_in(socket, true)
+        }
+    }
+
+    /// An answer placing nothing, which is what a peer that only claims the
+    /// archive gives.
+    fn nothing_placed() -> [Placed; 1] {
+        [Placed {
+            position: 7,
+            proof: None,
+        }]
+    }
+
+    /// **A node whose connected claimers answered with nothing reaches for an
+    /// archivist it met, and waits for it.**
+    ///
+    /// It took the claimers' answers as the end of the question: everyone
+    /// asked had answered, so it returned with nothing, and the archivist in
+    /// its book was dialled only when nobody connected claimed to be one. The
+    /// first look hands in the claimer's empty answer; the next finds the
+    /// archivist dialled and the question still open, and ends it, so the
+    /// test waits on no clock.
+    #[test]
+    fn a_node_whose_claimers_placed_nothing_reaches_for_an_archivist_it_met() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        node.shared.peers().insert(1, a_claimer(&socket, None));
+        let door = a_door();
+        let archivist = door.local_addr().unwrap();
+        node.shared.book().insert(archivist);
+        node.shared.book().keeps_the_cold_set(&archivist, true);
+        node.shared.running.store(true, Ordering::SeqCst);
+
+        let looks = AtomicUsize::new(0);
+        let dialled_at_the_second = AtomicUsize::new(0);
+        let recovered =
+            node.recover_proofs_with(&[(7, Hash32::ZERO)], Duration::from_secs(60), || {
+                if looks.fetch_add(1, Ordering::SeqCst) == 0 {
+                    node.shared.take_placed(1, &nothing_placed());
+                } else {
+                    dialled_at_the_second.store(dialled(&node), Ordering::SeqCst);
+                    node.shared.asking().found.insert(
+                        7,
+                        ForestProof {
+                            siblings: Vec::new(),
+                        },
+                    );
+                }
+            });
+        let reached = node
+            .shared
+            .peers()
+            .values()
+            .any(|peer| peer.dialled_to == Some(archivist));
+        stop_all(&node);
+        assert!(reached, "the archivist it met was not dialled");
+        assert_eq!(
+            looks.load(Ordering::SeqCst),
+            2,
+            "the question ended on the claimer's word, without waiting for the archivist"
+        );
+        assert_eq!(dialled_at_the_second.load(Ordering::SeqCst), 1);
+        assert_eq!(recovered.answered, 1, "{recovered:?}");
+    }
+
+    /// A node whose connected claimers answered with nothing, and that knows
+    /// nobody else who keeps the set, ends the question there.
+    ///
+    /// Nothing is on its way, so waiting out the patience would only keep a
+    /// wallet waiting on nobody.
+    #[test]
+    fn a_node_whose_claimers_placed_nothing_and_that_knows_nobody_else_stops() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        node.shared.peers().insert(1, a_claimer(&socket, None));
+
+        let looks = AtomicUsize::new(0);
+        let recovered =
+            node.recover_proofs_with(&[(7, Hash32::ZERO)], Duration::from_secs(60), || {
+                if looks.fetch_add(1, Ordering::SeqCst) == 0 {
+                    node.shared.take_placed(1, &nothing_placed());
+                } else {
+                    // Ended here rather than at the patience, should it wait.
+                    node.shared.asking().found.insert(
+                        7,
+                        ForestProof {
+                            siblings: Vec::new(),
+                        },
+                    );
+                }
+            });
+        assert_eq!(
+            looks.load(Ordering::SeqCst),
+            1,
+            "with nobody to reach for, the node went on waiting"
+        );
+        assert!(recovered.proofs.is_empty(), "{recovered:?}");
+        assert_eq!(recovered.answered, 1, "{recovered:?}");
+    }
+
+    /// A peer whose path folded is written down as having handed one over,
+    /// against the address it listens at, and one whose paths did not fold
+    /// is not.
+    ///
+    /// That mark is what a node reaching for archivists it met goes by
+    /// first, past peers that are newer in its book and only claimed.
+    #[test]
+    fn a_peer_whose_path_folded_is_reached_for_before_peers_that_only_claimed() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let honest: SocketAddr = "203.0.113.1:9000".parse().unwrap();
+        let claimer: SocketAddr = "198.51.100.2:9000".parse().unwrap();
+        node.shared
+            .peers()
+            .insert(1, a_claimer(&socket, Some(honest)));
+        node.shared
+            .peers()
+            .insert(2, a_claimer(&socket, Some(claimer)));
+        for (address, heard) in [(honest, 100), (claimer, 200)] {
+            let mut book = node.shared.book();
+            book.insert(address);
+            book.answered(&address, heard);
+            book.keeps_the_cold_set(&address, true);
+        }
+        *node.shared.asking() = Asking {
+            wanted: BTreeMap::from([(7, Hash32::ZERO), (9, Hash32::ZERO)]),
+            asked: HashSet::from([1, 2]),
+            ..Asking::default()
+        };
+
+        node.shared
+            .take_placed_with(2, &an_answer_about_seven_and_nine(), |checking| {
+                checking
+                    .into_iter()
+                    .map(|(position, _, proof)| (position, proof, false))
+                    .collect()
+            });
+        assert_eq!(
+            node.shared.book().archivists(),
+            vec![claimer, honest],
+            "a peer none of whose paths folded was written down as handing one over"
+        );
+        node.shared
+            .take_placed_with(1, &an_answer_about_seven_and_nine(), only_seven_folds);
+        assert_eq!(
+            node.shared.book().archivists(),
+            vec![honest, claimer],
+            "a peer whose path folded was not written down as handing one over"
         );
     }
 
