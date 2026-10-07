@@ -446,8 +446,9 @@ fn follow(scene: &mut Scene, fee: Amount, blocks: usize, spam: usize, stale: boo
 /// note would stop freeing if it fell before a block. What a pool ranks is
 /// what a fee leaves its miner per unit of weight, and that place's price,
 /// 6 000 pebbles, is more than the 512 units of weight the place adds at ten
-/// pebbles each: the quote ranks above filler at the floor, by luck of the
-/// two numbers rather than by design.
+/// pebbles each: the quote ranks above filler at the floor, though the margin
+/// is there for a falling note and not for this. Filler paying about 1.12
+/// times its floor would outrank it.
 #[test]
 fn a_payment_from_a_hot_note_at_the_wallets_quote_goes_through_filler_at_the_floor() {
     let mut scene = Scene::new("hot", false);
