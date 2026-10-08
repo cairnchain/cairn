@@ -4,8 +4,8 @@
 //! thing the draw pinned, because that is where a forger's cheap run would have
 //! to live, and since the testnet-9 wave the difficulty and the work sum from
 //! the run's second header on, the pinned header and the ninety below it
-//! included: `a_weighing_judges_its_whole_run.rs` holds that half. Two of the
-//! rules above the pinned header had no test that reached them,
+//! included: `a_weighing_judges_from_its_second_header.rs` holds that half.
+//! Two of the rules above the pinned header had no test that reached them,
 //! `TailAtTheWrongDifficulty` and `TailOutOfTime`, and the reason was the
 //! same one that hid three defects elsewhere: every chain in this workspace
 //! carried one difficulty from end to end, so the difficulty a header stated
@@ -170,10 +170,10 @@ fn solve(mut candidate: BlockHeader) -> BlockHeader {
 ///
 /// Two conditions. It has to sit above the header the draw pinned, where every
 /// rule applies, the median included, and this file asks about that part of
-/// the run; below it is `a_weighing_judges_its_whole_run.rs`. And it must not
-/// be the tip, whose identifier the draw itself is made from: changing that is
-/// refused for the samples landing in the wrong place, long before the tail is
-/// read.
+/// the run; below it is `a_weighing_judges_from_its_second_header.rs`. And it
+/// must not be the tip, whose identifier the draw itself is made from:
+/// changing that is refused for the samples landing in the wrong place, long
+/// before the tail is read.
 ///
 /// The deepest one that also carries a difficulty its parent did not, so that
 /// putting the parent's number on it is a change. Where the draw lands is not

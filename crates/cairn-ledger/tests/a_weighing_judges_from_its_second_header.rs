@@ -381,3 +381,40 @@ fn only_a_run_from_the_first_block_is_judged_before_its_twelfth_header() {
         Err(StartError::TailOutOfTime { at: height })
     );
 }
+
+/// The specification says where each run is judged from, and what it leaves.
+///
+/// Its weighing passage said the run is judged from its second header on and
+/// then that this "is the pinned header and the ninety below it as well as
+/// everything above", which names the first header the next sentence says is
+/// not judged. Its handover passage said twenty-seven is asked "the anchor
+/// included", and a recent run that is the anchor alone has no header the
+/// anchor could be judged against (G2-04 of the testnet-9 audit), so the
+/// anchor is judged only when it is not the run's first header.
+#[test]
+fn the_specification_says_each_run_is_judged_from_its_second_header() {
+    let specification = include_str!("../../../docs/cairn-specification.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for stated in [
+        "That reaches the pinned header and the ninety below it as well as everything above, \
+         from the run's second header on.",
+        "**Twenty-seven is asked from the second recent header on, the anchor included unless \
+         it is the run's only header.**",
+    ] {
+        assert!(
+            specification.contains(stated),
+            "the specification does not say \"{stated}\""
+        );
+    }
+    for retired in [
+        "That is the pinned header and the ninety below it",
+        "the anchor included.**",
+    ] {
+        assert!(
+            !specification.contains(retired),
+            "the specification still says \"{retired}\""
+        );
+    }
+}

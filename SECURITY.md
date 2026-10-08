@@ -65,14 +65,18 @@ under a tip at the band the draw leaves unresolved over 2^18, whatever the
 retarget: measured, 2^18.9 hashes on testnet-8 and 2^13.9 on the devnet at
 their opening difficulties of 2^28 and 2^23 (2^18.0 at testnet-7's 2^27 under
 the old retarget), where tying the tip to the pinned header alone
-would have left 2^11.9 and 2^8.1. The
-40% figure is quoted against a budget: 2^-161.9 a tip, which holds under
-2^-128 against 2^33 tips and not 2^34, and nothing at all at the measured
-42.96%. The specification's section on what the bound is worth says so and
-says what the tie costs an honest chain that loses hash rate;
-`crates/cairn-ledger/tests/the_price_of_a_seed.rs` measures the price with and
-without the tie, and `crates/cairn-ledger/tests/grinding_at_the_floor.rs`
-holds it on chains that were mined.
+would have left 2^11.9 and 2^8.1. The testnet-8 and devnet prices are lower
+bounds on what a forger pays, not the price itself: the measurement lets the
+run below the pinned header start wherever on its schedule the forger likes,
+which the rules no longer allow since every header after a run's first is
+judged against its parent. The 40% figure is quoted against a budget:
+2^-161.9 a tip, which holds under 2^-128 against 2^33 tips and not 2^34, and
+nothing at all at the measured 42.96%. The specification's section on what
+the bound is worth says so and says what the tie costs an honest chain that
+loses hash rate; `crates/cairn-ledger/tests/the_price_of_a_seed.rs` measures
+the price with and without the tie, and
+`crates/cairn-ledger/tests/grinding_at_the_floor.rs` holds it on chains that
+were mined.
 
 What is worth knowing about that measurement is that it was itself wrong until
 recently, and in a way no test caught: it built a forgery by re-mining headers

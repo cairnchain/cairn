@@ -518,6 +518,62 @@ fn a_tip_held_to_the_hardest_header_of_its_run_costs_what_the_documents_state() 
     );
 }
 
+/// Every other place that states the price of a seed, by name.
+const PRICED_ELSEWHERE: [(&str, &str); 5] = [
+    ("SECURITY.md", SECURITY),
+    (
+        "the specification",
+        include_str!("../../../docs/cairn-specification.md"),
+    ),
+    (
+        "the whitepaper",
+        include_str!("../../../docs/cairn-whitepaper.md"),
+    ),
+    ("sampling.rs", include_str!("../src/sampling.rs")),
+    (
+        "audit_a_burial_from_three_fork_ages.rs",
+        include_str!("audit_a_burial_from_three_fork_ages.rs"),
+    ),
+];
+
+/// The prices measured here are lower bounds on what a forger pays (see
+/// [`Walk`]), and this file was the only place that said so: seven others
+/// stated 2^18.9 or 2^13.9 as the price, one of them calling it "the minimum
+/// cost" after this file had withdrawn that reading. The one argument that
+/// could be relaxed on the figure, the value of `MOST_FALL` or `MOST_TAIL`,
+/// would be relaxed by somebody reading one of the seven. So every statement
+/// of either figure says it is a lower bound within three hundred characters,
+/// the sentence it is in or the next.
+#[test]
+fn every_place_that_states_the_price_says_it_is_a_lower_bound() {
+    const NEAR: usize = 300;
+    const SAID: &[u8] = b"lower bound";
+    for (name, text) in PRICED_ELSEWHERE {
+        let text = text
+            .split_whitespace()
+            .filter(|word| !matches!(*word, "///" | "//!" | "//"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let bytes = text.as_bytes();
+        let mut stated = 0usize;
+        for figure in ["2^18.9", "2<sup>18.9</sup>", "2^13.9", "2<sup>13.9</sup>"] {
+            for (at, _) in text.match_indices(figure) {
+                stated += 1;
+                let around = &bytes[at.saturating_sub(NEAR)..(at + NEAR).min(bytes.len())];
+                assert!(
+                    around.windows(SAID.len()).any(|window| window == SAID),
+                    "{name} states {figure} as the price of a seed and does not say it is a \
+                     lower bound"
+                );
+            }
+        }
+        assert!(
+            stated > 0,
+            "{name} no longer states the price of a seed, so it does not belong in this list"
+        );
+    }
+}
+
 /// A deterministic source of uniform numbers, so that the honest chains
 /// below come out the same on every run.
 struct Dice(u64);

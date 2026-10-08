@@ -265,6 +265,53 @@ class FastRun(unittest.TestCase):
         self.assertEqual(watch.check_fast_run(blocks, 60).state, ALARM)
 
 
+class FloorRun(unittest.TestCase):
+    def test_the_live_listing_is_nowhere_near_the_floor(self):
+        blocks = watch.parse_blocks(fixture("blocks.json"))
+        self.assertEqual(watch.check_floor_run(blocks).state, OK)
+
+    def test_ten_blocks_in_a_row_at_the_floor_is_an_alarm(self):
+        # The run after a departure: honest blocks, then the floor.
+        blocks = chain(60) + chain(10, first=61, difficulty=1, start=1_000_000 + 60 * 60)
+        verdict = watch.check_floor_run(blocks)
+        self.assertEqual(verdict.state, ALARM)
+        self.assertIn("heights 61 to 70", verdict.detail)
+        self.assertIn("alarm threshold: 10 consecutive blocks at the floor", verdict.facts)
+
+    def test_nine_in_a_row_is_not(self):
+        blocks = chain(60) + chain(9, first=61, difficulty=1, start=1_000_000 + 60 * 60)
+        self.assertEqual(watch.check_floor_run(blocks).state, OK)
+
+    def test_a_run_at_the_floor_is_found_whatever_its_pace(self):
+        # Dated an hour apart, so the block pace says nothing, and the difficulty is
+        # not moving, so the swing says nothing either.
+        blocks = chain(12, gap=3600, difficulty=1)
+        self.assertEqual(watch.check_fast_run(blocks, 60).state, OK)
+        self.assertEqual(watch.check_difficulty(blocks).state, OK)
+        self.assertEqual(watch.check_floor_run(blocks).state, ALARM)
+
+    def test_floor_blocks_broken_by_one_above_it_are_two_runs(self):
+        blocks = chain(19, difficulty=1)
+        blocks[9] = blocks[9]._replace(difficulty=2)
+        self.assertEqual(watch.check_floor_run(blocks).state, OK)
+
+    def test_floor_blocks_with_a_gap_in_the_listing_are_not_one_run(self):
+        blocks = chain(12, difficulty=1)
+        blocks[6:] = [b._replace(height=b.height + 5) for b in blocks[6:]]
+        self.assertEqual(watch.check_floor_run(blocks).state, OK)
+
+    def test_a_run_that_fills_the_listing_says_it_may_have_begun_lower(self):
+        inside = watch.check_floor_run(chain(20, difficulty=1))
+        self.assertIn("the listing begins inside the run, so it may have begun lower", inside.facts)
+        after = watch.check_floor_run(chain(5) + chain(20, first=6, difficulty=1))
+        self.assertNotIn("the listing begins inside the run, so it may have begun lower", after.facts)
+
+    def test_the_level_rises_as_the_run_grows(self):
+        short = watch.check_floor_run(chain(12, difficulty=1))
+        long = watch.check_floor_run(chain(128, difficulty=1))
+        self.assertLess(short.level, long.level)
+
+
 class Supply(unittest.TestCase):
     def setUp(self):
         self.status = fixture("status.json")
@@ -702,7 +749,7 @@ class Analysing(unittest.TestCase):
         self.assertEqual(analysis.state["blocks"], first["blocks"])
         self.assertEqual(by_kind(analysis)[watch.UNREACHABLE].members, ("explorer",))
 
-    def test_an_unreachable_seed_alone_is_alarm_seven_and_the_rest_still_runs(self):
+    def test_an_unreachable_seed_alone_is_the_unreachable_alarm_and_the_rest_still_runs(self):
         analysis = watch.analyse(self.seen(seed_error="refused"), self.empty, self.now)
         states = {v.kind: v.state for v in analysis.verdicts}
         self.assertEqual(states[watch.UNREACHABLE], ALARM)
@@ -712,6 +759,15 @@ class Analysing(unittest.TestCase):
     def test_both_unreachable_names_both(self):
         verdict = watch.check_reachability("a", "b", "", "")
         self.assertEqual(verdict.members, ("explorer", "seed"))
+
+    def test_a_run_at_the_floor_trips_its_alarm_through_the_whole_path(self):
+        top = self.blocks[-1]
+        floor = [
+            Block(top.height + 1 + i, f"f{i:04d}", top.timestamp + 60 * (i + 1), 1, top.miner)
+            for i in range(watch.FLOOR_RUN_BLOCKS)
+        ]
+        analysis = watch.analyse(self.seen(blocks=self.blocks + floor), self.empty, self.now)
+        self.assertEqual(by_kind(analysis)[watch.FLOOR].state, ALARM)
 
     def test_a_stopped_chain_trips_the_stale_check_through_the_whole_path(self):
         analysis = watch.analyse(self.seen(), self.empty, self.now + 3 * 3600)
@@ -898,7 +954,7 @@ class Network(unittest.TestCase):
         self.assertNotIn("ALARM", text)
         self.assertIn("no gh call was made", text)
 
-    def test_a_dead_network_is_alarm_seven_and_the_job_still_succeeds(self):
+    def test_a_dead_network_is_the_unreachable_alarm_and_the_job_still_succeeds(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as folder:

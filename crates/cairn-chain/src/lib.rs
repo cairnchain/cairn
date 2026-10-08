@@ -1308,9 +1308,13 @@ impl ChainStore {
     /// the honest ones won nine in ten of them wherever it sat in the
     /// network, which lowered the share withholding pays from, and every
     /// miner gained by dating its blocks as early as the median allows (T8-4
-    /// of the testnet-8 findings). The lean is a few percent of a block; half
-    /// a block is well clear of it, and short of anything a branch that is
-    /// truly a block ahead carries.
+    /// of the testnet-8 findings). Between branches dated by their clocks the
+    /// lean is a few percent of a block; half a block is well clear of it,
+    /// and short of anything a branch that is truly a block ahead carries. It
+    /// grows with the depth of the match and with how early a branch is
+    /// dated, so a withholder that dates its blocks as early as the median
+    /// allows takes matches seven or more blocks deep, and loses more to the
+    /// difficulty than it gains (G1-3 of the testnet-9 audit).
     ///
     /// A choice between valid branches and not a rule of validity: no block
     /// is judged by it, so nodes that weigh differently agree on every block

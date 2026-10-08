@@ -1462,9 +1462,9 @@ floor's edge, and the blocks after it are asked the floor until the chain has
 caught up to that edge: measured on testnet-8's rules, 3 455 blocks at the
 floor after a departure from 4 096 times and 9 191 after 8 192 when every block
 takes the mean time its difficulty asks, and a median of 2 244 and 7 793 over
-sixty four seeds of random block times. It stays because the weighing reasons from it: a run of
-blocks implies a least and a most work only because no step moves the
-difficulty further than this.
+sixty four seeds of random block times. It stays because the weighing reasons
+from it: a run of blocks implies a least and a most work only because no step
+moves the difficulty further than this.
 
 These are vectors from an independent reference written with unbounded
 integers; `crates/cairn-ledger/tests/asert_vectors.txt` holds 50 of them, and an
@@ -1743,7 +1743,10 @@ minute between their dates. Compared on any surplus, such a race is settled by
 the dates the miners wrote rather than by the order the blocks arrived in: a
 miner that withholds blocks and releases them to match an honest branch wins
 nearly every such match, since its blocks were found and dated first, and every
-miner gains by dating its blocks as early as the median allows.
+miner gains by dating its blocks as early as the median allows. That surplus
+grows with the depth of the match, so even within the band a withholder that
+dates its blocks as early as the median allows takes matches seven or more
+blocks deep, and loses more to the difficulty than it gains.
 
 This is a node's choice between valid branches and not a rule of validity. No
 block is judged by it, and two nodes that weigh differently agree on every block
@@ -1782,17 +1785,26 @@ its height asks for, the difficulty the retarget demands of the parent, the
 total work, and the drift bound against the node's own clock, asked in the
 order the header rules ask them. The retarget reads the parent alone, so a
 block claiming less than its parent demands is otherwise held at the price of
-the work it claims, which for difficulty one is one hash. None of these
-refusals changes a verdict: each is a rule the block fails when its branch is
-applied, and it is answered and charged as that failure would be.
+the work it claims, which for difficulty one is one hash. None of the first
+five refusals changes a verdict: each is a rule the block fails when its branch
+is applied, and it is answered and charged as that failure would be. The drift
+bound is read against the node's own clock, so it is the one refusal here that
+two honest nodes can disagree about and that a node reverses by waiting: a node
+MUST NOT remember it against the block, and SHOULD NOT charge the peer that
+offered it.
 
 What a node holds off the followed branch it SHOULD bound, by count and by
 bytes. When a bound is passed it SHOULD let go only of blocks no other held
 block builds on, those whose branch no longer reaches the followed one first,
-and then the lightest by the total work of the branch the block ends. Letting
-go by height or by arrival lets junk lighter than an honest branch push that
+then the lightest by the total work of the branch the block ends, and of two
+that weigh the same the one that arrived first. Letting go by height, or by
+arrival before work, lets junk lighter than an honest branch push that
 branch's first block out as it arrives, and the node then never assembles the
-heavier branch.
+heavier branch. Keeping the earlier of two that weigh the same does it too:
+two blocks on one parent are asked the same difficulty, so junk hung where an
+honest branch leaves the followed one ties that branch's first block exactly.
+Letting the earlier go means that displacing a block takes as many blocks of
+its work, sent after it, as the store holds.
 
 ### Burial
 
@@ -2260,9 +2272,10 @@ From the run's second header on, each header is held to the rules a node
 applies to any block it is handed: the difficulty the retarget demands of the
 header below it, its own work added to that header's total, and, where the run
 holds the window, a timestamp later than the median of the eleven headers below
-it. That is the pinned header and the ninety below it as well as everything
-above. The retarget reads only the header below and the network's first block,
-so the run carries everything the difficulty needs, and the pinned header,
+it. That reaches the pinned header and the ninety below it as well as
+everything above, from the run's second header on. The retarget reads only
+the header below and the network's first block, so the run carries everything
+the difficulty needs, and the pinned header,
 whose difficulty the tie below starts from, states the one its parent demands
 rather than one of its own choosing. The first header of the run has no parent
 in it and is not judged, and nothing here claims the whole run.
@@ -2439,15 +2452,17 @@ over 2<sup>18</sup>, which on a chain that ran to schedule is at least a
 thousandth of an average block. Measured on a thirty year chain at the two
 networks' opening difficulties, the cheapest tip a forger can present costs
 2<sup>18.9</sup> hashes on testnet-8 and 2<sup>13.9</sup> on the devnet; held to
-the pinned header alone it would cost 2<sup>11.9</sup> and 2<sup>8.1</sup>. The
-faster walk moved the price by a tenth of a halving from what the moving average
-gave at the same opening difficulty, 2<sup>18.0</sup> at testnet-7's
-2<sup>27</sup> and 2<sup>14.0</sup> on the devnet, because the floor rests on
-the run's ceiling and the tie, not on the walk; testnet-8's opening at
-2<sup>28</sup> doubled it, since the band is counted in blocks at that
-difficulty. It does not cost the chain's
-difficulty, and no tie of this kind can make it: a run whose tip fell by the
-tie is what an honest chain looks like after a loss.
+the pinned header alone it would cost 2<sup>11.9</sup> and 2<sup>8.1</sup>.
+These are lower bounds on what a forger pays: the measurement lets the run
+below the pinned header start anywhere on its schedule, which the run's own
+rules no longer allow. The faster walk moved the price by a tenth of a halving
+from what the moving average gave at the same opening difficulty,
+2<sup>18.0</sup> at testnet-7's 2<sup>27</sup> and 2<sup>14.0</sup> on the
+devnet, because the floor rests on the run's ceiling and the tie, not on the
+walk; testnet-8's opening at 2<sup>28</sup> doubled it, since the band is
+counted in blocks at that difficulty. It does not cost the chain's difficulty,
+and no tie of this kind can make it: a run whose tip fell by the tie is what an
+honest chain looks like after a loss.
 
 So the figure MUST be quoted against a grinding budget. At 40 per cent the
 inequality above gives 2^-161.9 a tip, which stays under 2^-128 against
@@ -2666,16 +2681,16 @@ fewer headers is not the rule, and over timestamps that do not rise it can
 stand above the real one and refuse an honest handover, so a node MUST NOT ask
 it there.
 
-**Twenty-seven is asked from the second recent header on, the anchor
-included.** The retarget reads only the header below and the network's first
-block, so the run carries everything it needs. The anchor is the header whose
-difficulty seeds the first buried header's demand and the bound of four around
-it, and the buried walk starts above it, so nothing else judges it. The first
-recent header has no parent in the run and is not judged, as its total is not.
-Every header of the run is the anchor's hash ancestry, so a difficulty or a
-total bent anywhere in it also breaks the link above it; twenty-seven and
-twenty-eight come before thirty so that the refusal says what was wrong rather
-than that the run is not one chain.
+**Twenty-seven is asked from the second recent header on, the anchor included
+unless it is the run's only header.** The retarget reads only the header below
+and the network's first block, so the run carries everything it needs. The
+anchor is the header whose difficulty seeds the first buried header's demand and
+the bound of four around it, and the buried walk starts above it, so nothing
+else judges it. The first recent header has no parent in the run and is not
+judged, as its total is not. Every header of the run is the anchor's hash
+ancestry, so a difficulty or a total bent anywhere in it also breaks the link
+above it; twenty-seven and twenty-eight come before thirty so that the refusal
+says what was wrong rather than that the run is not one chain.
 
 ### What is pinned by a commitment, and what is not
 
