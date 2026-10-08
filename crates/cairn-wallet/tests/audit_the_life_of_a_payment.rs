@@ -712,7 +712,8 @@ fn a_wallet_waits_while_a_peer_says_its_chain_has_more_work() {
         waited,
         Waited::Behind {
             ours: Some(1),
-            theirs: 1_000
+            theirs: 1_000,
+            out_of_reach: 0,
         },
         "the wallet stopped waiting while a peer said its chain had more work, or did not \
          say so when it did stop"

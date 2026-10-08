@@ -2052,6 +2052,7 @@ impl Wallet {
             peers: self.node.peers_introduced(),
             joining: self.node.joining(),
             claim: self.node.claim_ahead(),
+            out_of_reach: self.node.out_of_reach(),
         }
     }
 
@@ -3652,7 +3653,16 @@ pub enum Waited {
     /// chain had. `ours` is where this wallet's chain stands and `theirs` is
     /// the height that peer gave. A number in a handshake, so a reason to
     /// say so rather than a verdict.
-    Behind { ours: Option<u64>, theirs: u64 },
+    ///
+    /// `out_of_reach` is `Node::out_of_reach` as the wait ended. A claim
+    /// weighs by work alone, so a node offered a chain it cannot switch to
+    /// still hears it as one ahead, and the line for this said a longer wait
+    /// reads the rest, where no wait does.
+    Behind {
+        ours: Option<u64>,
+        theirs: u64,
+        out_of_reach: u64,
+    },
     /// The wait ran out with nobody to ask.
     Alone,
 }
@@ -3666,6 +3676,9 @@ struct Look {
     /// The heaviest claim a peer made that this wallet's node would follow,
     /// if any: see `Node::claim_ahead`.
     claim: Option<(u64, u128)>,
+    /// Blocks offered from a chain this wallet's node cannot switch to:
+    /// `Node::out_of_reach`.
+    out_of_reach: u64,
 }
 
 impl Look {
@@ -3711,6 +3724,7 @@ fn ran_out(look: &Look, still: Duration, moved: bool) -> Waited {
         Some(theirs) => Waited::Behind {
             ours: look.height,
             theirs,
+            out_of_reach: look.out_of_reach,
         },
         None => Waited::Settled,
     }
@@ -5098,6 +5112,7 @@ mod tests {
             peers: 1,
             joining: Joined::No,
             claim: None,
+            out_of_reach: 0,
         };
         assert!(
             settled(&calm, long),
@@ -5147,9 +5162,24 @@ mod tests {
             ran_out(&ahead, long, false),
             Waited::Behind {
                 ours: Some(0),
-                theirs: 90
+                theirs: 90,
+                out_of_reach: 0,
             },
             "held still below what a peer says is behind, and says so"
+        );
+        let and_out_of_reach = super::Look {
+            out_of_reach: 14,
+            ..ahead
+        };
+        assert_eq!(
+            ran_out(&and_out_of_reach, long, false),
+            Waited::Behind {
+                ours: Some(0),
+                theirs: 90,
+                out_of_reach: 14,
+            },
+            "the blocks from a chain out of reach are not carried to the line that says \
+             what a longer wait would do"
         );
         assert_eq!(
             ran_out(&ahead, short, false),
