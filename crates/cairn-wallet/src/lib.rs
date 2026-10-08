@@ -6180,6 +6180,7 @@ mod tests {
     /// Asked of every line `warning` can give, so a line that says it later
     /// is held as well.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn every_line_that_says_to_delete_files_names_both_files_to_keep() {
         use crate::history::Discarded;
 
