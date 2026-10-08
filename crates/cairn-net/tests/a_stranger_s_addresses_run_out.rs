@@ -41,9 +41,11 @@ const STRANGER_WORK: u128 = 2_000;
 /// A chain long enough to be worth settling on every public network.
 const LONG: u64 = 2_000;
 
-/// Seconds a stranger's connection stays once asked: its answering window,
-/// which the chooser gives up on, and the second after it.
-const STAYS: u64 = 31;
+/// Seconds a stranger's connection stays once asked: its answering window.
+/// It hangs up as the window ends and its next address is connected in the
+/// same second, before the round that gives up on it hands out the next turn,
+/// which is the arrangement that took every turn.
+const STAYS: u64 = 30;
 
 /// Seconds the simulation runs: seven days of the newcomer's clock.
 const HORIZON: u64 = 7 * 24 * 60 * 60;

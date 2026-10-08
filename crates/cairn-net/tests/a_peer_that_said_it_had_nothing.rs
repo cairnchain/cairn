@@ -137,11 +137,14 @@ fn the_two_chains() -> (Vec<Block>, Vec<Block>) {
 /// Dials `newcomer`, introduces itself as holding nought blocks with `work`
 /// behind them, and pushes the first `pushed` of `blocks` one message each, as
 /// a peer may: the first block, then a pause long enough for the newcomer to
-/// have run its choice since taking it, then the rest. It serves them like any
-/// peer, a chain asked for offered from the block after the first and the
-/// heights asked for sent, and serves the rest of `blocks` too once `all` is
-/// set: until then it is a peer whose chain is as long as it pushed, so if the
-/// newcomer's choice settles on it afterwards, it is given what it asks for.
+/// have run its choice since taking it, then the rest. Once `all` is set it
+/// serves the whole of `blocks` like any peer, a chain asked for offered from
+/// the block after the first and the heights asked for sent, so if the
+/// newcomer's choice settles on it, it is given what it asks for. It answers a
+/// request for its chain no oftener than once a second, under the ceiling on
+/// messages a node holds a peer to: a newcomer asking it again after every
+/// block would otherwise have it hang up for flooding, which is a rescue this
+/// test must not rest on.
 fn visit(
     newcomer: SocketAddr,
     work: u128,
@@ -179,12 +182,8 @@ fn visit(
     let mut reading = socket.try_clone().unwrap();
     let held = blocks.to_vec();
     let all = Arc::clone(all);
+    let mut answered: Option<Instant> = None;
     thread::spawn(move || loop {
-        let serving = if all.load(Ordering::SeqCst) {
-            &held[..]
-        } else {
-            &held[..pushed]
-        };
         let message = match read_message(&mut reading, network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(message)) => message,
             Ok(Incoming::Quiet) => continue,
@@ -193,13 +192,19 @@ fn visit(
         let answers = match message {
             Message::GetPeers => vec![Message::Peers(Vec::new())],
             Message::Ping(nonce) => vec![Message::Pong(nonce)],
-            Message::GetChain { .. } => vec![Message::Chain {
-                from: 1,
-                count: u64::try_from(serving.len()).unwrap() - 1,
-            }],
+            Message::GetChain { .. }
+                if all.load(Ordering::SeqCst)
+                    && answered.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) =>
+            {
+                answered = Some(Instant::now());
+                vec![Message::Chain {
+                    from: 1,
+                    count: u64::try_from(held.len()).unwrap() - 1,
+                }]
+            }
             Message::GetBlocks(heights) => heights
                 .iter()
-                .filter_map(|at| serving.get(usize::try_from(*at).ok()?))
+                .filter_map(|at| held.get(usize::try_from(*at).ok()?))
                 .map(|block| Message::Block(Box::new(block.clone())))
                 .collect(),
             _ => continue,
