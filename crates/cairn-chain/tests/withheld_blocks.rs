@@ -1184,3 +1184,35 @@ fn the_threat_model_quotes_the_tables_in_the_header() {
         "nine in ten no longer rounds the least deep gamma the header states, {least:.2}"
     );
 }
+
+/// **The manifest names every test that uses `cairn-fuzz`, this one
+/// included.**
+///
+/// The comment beside the dev-dependency named two of the four files that
+/// use it, and gave a reason, campaigns for the nightly run, that this file
+/// does not have: it takes only the seeded generator. Somebody pruning the
+/// dependency on the comment's word would break two targets, one of them in
+/// the nightly list.
+#[test]
+fn every_test_here_that_uses_the_fuzz_crate_is_named_in_the_manifest() {
+    let manifest = include_str!("../Cargo.toml");
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut using = Vec::new();
+    for entry in std::fs::read_dir(&tests).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "rs")
+            && std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("use cairn_fuzz")
+        {
+            using.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    assert!(using.contains(&"withheld_blocks.rs".to_owned()));
+    for file in using {
+        assert!(
+            manifest.contains(&format!("`tests/{file}`")),
+            "tests/{file} uses cairn-fuzz and the manifest does not say so"
+        );
+    }
+}
