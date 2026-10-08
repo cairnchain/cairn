@@ -457,6 +457,20 @@ fn honest_in_book(victim: &Node, honest: &[Node]) -> usize {
         .count()
 }
 
+/// The honest nodes the file of anchors in `directory` names, which is what a
+/// start dials before the book's order.
+fn honest_anchored(directory: &Path, honest: &[Node]) -> usize {
+    let written = std::fs::read_to_string(directory.join(ANCHOR_FILE)).unwrap_or_default();
+    let anchors: HashSet<SocketAddr> = written
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect();
+    honest
+        .iter()
+        .filter(|node| anchors.contains(&node.address()))
+        .count()
+}
+
 /// The victim dials the first honest node, learns the other two from it and
 /// dials them, and only then does the stranger arrive: every honest address
 /// in the book answered a dial before any of the stranger's.
@@ -563,6 +577,15 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
         "the honest block reached the victim during the flood"
     );
 
+    // What the restart below dials first is the file, so it is asked as well
+    // as the slots: written as the outbound peers change, it names the three
+    // honest peers the victim has held all along.
+    assert!(
+        wait_until(PATIENCE, || honest_anchored(&directory, &honest) == HONEST),
+        "the anchors on the victim's disk name {} of its {HONEST} honest outbound peers",
+        honest_anchored(&directory, &honest)
+    );
+
     // A clean restart: the node is asked to stop, writes its anchors, and is
     // started again on the same directory.
     drop(inbound);
@@ -578,6 +601,11 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
     assert_eq!(
         honest_out, HONEST,
         "a clean restart did not dial every honest anchor again"
+    );
+    assert_eq!(
+        honest_anchored(&directory, &honest),
+        HONEST,
+        "the restarted victim wrote over its anchors without the honest peers it holds"
     );
     assert!(
         wait_until(PATIENCE, || restarted.id_at(3) == Some(next.id())),
