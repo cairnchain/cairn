@@ -165,10 +165,12 @@ const DIAL_BUDGET: Duration = Duration::from_secs(3);
 const DIALS_AT_ONCE: usize = 2 * TARGET_PEERS;
 /// How long a read waits before the loop looks up to check on things.
 ///
-/// Also how long a connection this node has shut can go on being read, on
-/// Windows. Shutting a socket wakes a read already waiting on it on Linux and
-/// macOS, and not on Windows: there the read goes on until the far end
-/// closes or this deadline passes, and the one after it fails at once.
+/// Also how long a connection this node has let go of can go on being read,
+/// on Windows. Shutting a socket wakes a read already waiting on it on Linux
+/// and macOS, and not on Windows: there the read goes on until something
+/// arrives or this deadline passes, and the loop then leaves because the
+/// connection is marked, whether or not the shutdown was taken. See
+/// [`Peer::let_go`].
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a write may block before the peer is treated as gone.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1376,6 +1378,10 @@ struct Outbound {
     /// a push: seven blocks at nine units each against a window holding
     /// seven, refused in silence, the heights left outstanding.
     asked_for_the_chain: Arc<AtomicBool>,
+    /// Set when this node has ended the connection from outside its own
+    /// loop, and looked at by that loop whenever a read returns: see
+    /// [`Peer::let_go`].
+    let_go: Arc<AtomicBool>,
 }
 
 impl Outbound {
@@ -1384,7 +1390,13 @@ impl Outbound {
             sender,
             waiting: Arc::new(AtomicUsize::new(0)),
             asked_for_the_chain: Arc::new(AtomicBool::new(false)),
+            let_go: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether this node has ended the connection from outside its loop.
+    fn was_let_go(&self) -> bool {
+        self.let_go.load(Ordering::SeqCst)
     }
 
     /// Queues a message this node composed outside the connection's own
@@ -1461,7 +1473,9 @@ impl Outbound {
 #[allow(clippy::struct_excessive_bools)]
 struct Peer {
     outbound: Outbound,
-    /// Kept so a shutdown can unblock the thread reading from it.
+    /// A copy of the socket, kept so that letting go of the connection can
+    /// wake the thread reading from it where a shutdown does that: see
+    /// [`Peer::let_go`].
     stream: TcpStream,
     /// Where the connection came from, which is the only address about this
     /// peer that it did not choose itself.
@@ -1558,6 +1572,36 @@ impl Peer {
     /// queues its introduction before putting it there.
     const fn worth_speaking_to(&self) -> bool {
         self.dialled || self.greeted
+    }
+
+    /// Ends this connection from outside its own loop.
+    ///
+    /// Marked as well as shut, because shutting it is not enough on Windows,
+    /// in two ways. A shutdown there does not wake a read already waiting.
+    /// And [`Peer::stream`] is a copy of the socket made by `try_clone`, which
+    /// Winsock can take for unconnected when the socket was dialled: it then
+    /// refuses the shutdown with `WSAENOTCONN`, does nothing, and the copy
+    /// goes on sending and receiving as if nothing had been asked. On the
+    /// windows-latest runner that was 30 hang-ups of a dialled peer in 320,
+    /// each refused again when tried once more, and each one a connection
+    /// still carrying a message a second both ways. The shutdown's answer was
+    /// thrown away, so nothing knew.
+    ///
+    /// The mark is what the loop looks at whenever a read returns, so it
+    /// leaves at its next read, [`READ_TIMEOUT`] at the latest. As it leaves
+    /// it shuts the socket through its own handle, the one the connection was
+    /// made on, and then the writer and the table let go of their copies: the
+    /// connection closes once the last handle has gone, whatever any shutdown
+    /// did. What the shutdown here still does is end the connection at once
+    /// where it can, waking the read on Linux and macOS, and telling the far
+    /// end now rather than at the loop's next read on Windows when it is
+    /// taken. Its answer is not needed for any of that, which is why nothing
+    /// reads it.
+    ///
+    /// Marked first, so a read the shutdown wakes finds the mark.
+    fn let_go(&self) {
+        self.outbound.let_go.store(true, Ordering::SeqCst);
+        let _ = self.stream.shutdown(Shutdown::Both);
     }
 }
 
@@ -2539,11 +2583,11 @@ fn room_made_in(peers: &mut HashMap<PeerId, Peer>, host: IpAddr, salt: u64) -> b
 /// ceiling left it still full, and the visitor was turned away after somebody
 /// had been let go of for it. And one at a time. The connection chosen stops
 /// holding a slot the moment it is chosen, and leaves the table once its
-/// threads have wound down: a matter of moments once its socket is shut, and
-/// up to [`READ_TIMEOUT`] on Windows, where shutting it does not wake the read
-/// waiting on it. Until it has, nobody else is let go of, so the connections
-/// holding a place are at most one more than [`MAX_PEERS`], and only for that
-/// long.
+/// threads have wound down: a matter of moments on Linux and macOS, and up to
+/// [`READ_TIMEOUT`] on Windows, where shutting its socket does not wake the
+/// read waiting on it: see [`Peer::let_go`]. Until it has, nobody else is let
+/// go of, so the connections holding a place are at most one more than
+/// [`MAX_PEERS`], and only for that long.
 ///
 /// Which one goes is [`to_let_go`], and it may be none. A visitor waiting for
 /// its own introduction is never one: it holds no place to give up.
@@ -2575,7 +2619,7 @@ fn make_room_in(peers: &mut HashMap<PeerId, Peer>, visitor: IpAddr, salt: u64) -
         return false;
     };
     peer.leaving = true;
-    let _ = peer.stream.shutdown(Shutdown::Both);
+    peer.let_go();
     true
 }
 
@@ -3473,15 +3517,15 @@ impl Shared {
 
     /// Ends one connection, leaving its own threads to clear it up.
     ///
-    /// The socket is shut rather than the entry taken out of the table, so
-    /// what happens next is what happens to any peer that goes away: the
-    /// reading loop fails, the writer is freed, and the slot is given up once
-    /// both are finished with it. At once on Linux and macOS; on Windows the
-    /// read already waiting ends at the far end's answer or at
-    /// [`READ_TIMEOUT`], so the slot can stay taken that long.
+    /// The connection is let go of rather than the entry taken out of the
+    /// table, so what happens next is what happens to any peer that goes
+    /// away: the reading loop ends, the writer is freed, and the slot is given
+    /// up once both are finished with it. At once on Linux and macOS; on
+    /// Windows at the loop's next read, [`READ_TIMEOUT`] at the latest, so the
+    /// slot can stay taken that long. See [`Peer::let_go`].
     fn hang_up(&self, id: PeerId) {
         if let Some(peer) = self.peers().get(&id) {
-            let _ = peer.stream.shutdown(Shutdown::Both);
+            peer.let_go();
         }
     }
 
@@ -6105,7 +6149,7 @@ impl Node {
         // joining, which adds its thread after the table was taken.
         loop {
             for peer in self.shared.peers().values() {
-                let _ = peer.stream.shutdown(Shutdown::Both);
+                peer.let_go();
             }
             let handles = std::mem::take(&mut *self.shared.threads());
             if handles.is_empty() {
@@ -9928,12 +9972,16 @@ fn tie_keys(shared: &Shared, their_nonce: u64) -> (u64, u64) {
 /// reached from here by a different road: there the machine is out of
 /// descriptors, here it is out of threads, and both are facts about this
 /// moment rather than about any visitor.
+///
+/// `let_go` is the connection's mark, set as the writer finishes: see
+/// [`Peer::let_go`].
 fn start_writing(
     id: PeerId,
     mut writing_end: TcpStream,
     inbox: mpsc::Receiver<(Message, usize)>,
     network: NetworkId,
     written: Arc<AtomicUsize>,
+    let_go: Arc<AtomicBool>,
 ) -> io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("cairn-write-{id}"))
@@ -9948,6 +9996,10 @@ fn start_writing(
                     break;
                 }
             }
+            // Marked as well as shut, because this handle is a copy of the
+            // socket, and Windows can refuse a shutdown through a copy: the
+            // reader then leaves at its next read all the same.
+            let_go.store(true, Ordering::SeqCst);
             let _ = writing_end.shutdown(Shutdown::Both);
         })
 }
@@ -10080,7 +10132,8 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
 
     let network = shared.network();
     let written = Arc::clone(&outbound.waiting);
-    let Ok(writer) = start_writing(id, writing_end, inbox, network, written) else {
+    let let_go = Arc::clone(&outbound.let_go);
+    let Ok(writer) = start_writing(id, writing_end, inbox, network, written, let_go) else {
         // The closure went with the error, and the socket half it held with
         // it. What is left is the table entry, which nothing would ever come
         // back to remove: the thread that does that is the one below, and it
@@ -10382,7 +10435,15 @@ fn read_loop(
         // handshake saying it listens nowhere never gives it, so a peer that
         // does not listen was a stranger for life and its first block cost it
         // the connection and a refusal.
-        let frame = match read_frame(&mut stream, network, most_from(peer.greeted)) {
+        let read = read_frame(&mut stream, network, most_from(peer.greeted));
+        // A connection this node has let go of from outside this loop goes at
+        // its next read, whatever that read brought: see `Peer::let_go`. Not
+        // on a read that failed by itself, whose failure is how the connection
+        // ended and what `note_the_ending` writes down.
+        if read.is_ok() && outbound.was_let_go() {
+            break;
+        }
+        let frame = match read {
             Ok(Framed::Frame(frame)) => {
                 parting.said_anything = true;
                 last_heard = unix_now();
@@ -13909,6 +13970,71 @@ mod peers_and_loops {
             on_time,
             TARGET_PEERS + 1,
             "no feeler was dialled once its period was up"
+        );
+    }
+
+    /// A connection this node has let go of ends at its next read, whatever
+    /// that read brought, and what it brought is not answered, with nothing
+    /// done to its socket.
+    ///
+    /// The mark alone, because the shutdown beside it is not something every
+    /// platform can be held to: on Windows it does not wake a read already
+    /// waiting, and through a copy of a socket that was dialled it can be
+    /// refused outright.
+    #[test]
+    fn a_connection_let_go_of_ends_at_its_next_read_with_its_socket_left_alone() {
+        let node = quiet();
+        let greeting = hello(node.shared.network(), 0, 0, stranger(&node));
+        let mut line = Line::open(node, None);
+        line.send(&greeting);
+        assert!(line.hears(|message| matches!(message, Message::Welcome(_))));
+        line.node.shared.peers()[&line.id]
+            .outbound
+            .let_go
+            .store(true, Ordering::SeqCst);
+        line.send(&Message::Ping(1));
+        let ended = line.ends();
+        let answered = line
+            .said
+            .try_iter()
+            .any(|(message, _)| matches!(message, Message::Pong(1)));
+        drop(line.close());
+        assert!(
+            ended,
+            "a connection this node had let go of went on reading past the next frame"
+        );
+        assert!(
+            !answered,
+            "a connection this node had let go of answered what arrived after"
+        );
+    }
+
+    /// A writer that gives up on a peer marks the connection let go of, so
+    /// the reading loop leaves at its next read whether or not the writer's
+    /// own shutdown reached the socket.
+    ///
+    /// A socket already shut for writing is a write that fails at once on
+    /// every platform, which is what makes this one certain.
+    #[test]
+    fn a_writer_that_gives_up_marks_the_connection_let_go_of() {
+        let (near, _far) = a_socket();
+        near.shutdown(Shutdown::Write).unwrap();
+        let (sender, inbox) = mpsc::sync_channel(4);
+        let outbound = Outbound::new(sender);
+        let writer = start_writing(
+            0,
+            near,
+            inbox,
+            ConsensusParams::testnet().network,
+            Arc::clone(&outbound.waiting),
+            Arc::clone(&outbound.let_go),
+        )
+        .unwrap();
+        outbound.try_send(Message::Ping(1)).unwrap();
+        writer.join().unwrap();
+        assert!(
+            outbound.was_let_go(),
+            "a writer that gave up left the connection for its reader to find out about"
         );
     }
 
