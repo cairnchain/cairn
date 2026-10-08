@@ -541,9 +541,9 @@ impl Chooser {
         self.done || self.asked.is_some_and(|(asked, _, _)| asked == peer)
     }
 
-    /// A block `peer` delivered is now held, on the branch followed or beside
-    /// it. When `peer` is the one asked, its attempt is moving, and the
-    /// moment it was asked is moved up to now.
+    /// A block `peer` delivered has moved the branch this node follows. When
+    /// `peer` is the one asked, its attempt is moving, and the moment it was
+    /// asked is moved up to now.
     ///
     /// A read used to be given one answering window in all, because the first
     /// block it delivered ended the choice. The choice now stays open until
@@ -551,6 +551,12 @@ impl Chooser {
     /// windows of blocks, so a read is given its window between blocks
     /// instead: one that stops delivering is given up on, and one that keeps
     /// delivering is not cut off for having taken more than a window.
+    ///
+    /// Only a block that moved the branch, which is real work at the
+    /// difficulty the branch demands and takes the node a block nearer the end
+    /// of the choice. A block held beside the branch does neither, and renewed
+    /// by those a peer the choice asked could keep it asked for ever, a block
+    /// of the lowest difficulty there is a window.
     pub fn delivered(&mut self, peer: u64, now: u64) {
         if let Some((asked, _, at)) = self.asked.as_mut() {
             if *asked == peer {
@@ -2137,6 +2143,91 @@ mod tests {
             ),
             Step::Ask(2, Approach::Read),
             "a read that showed nothing in its window was waited on past it"
+        );
+    }
+
+    /// A block the asked peer delivers renews its read's answering window,
+    /// and one from anybody else does not.
+    ///
+    /// The choice now stays open while a read takes the node as far as it
+    /// undoes, many windows of blocks, and a read given one window in all was
+    /// cut off while it was still delivering. Renewed by anybody, a peer that
+    /// was asked and sent nothing would be kept asked by the blocks of others.
+    #[test]
+    fn a_read_is_given_its_window_between_the_blocks_it_delivers() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, false, 100);
+        chooser.noted(2, Some(host(2)), 500, LONG, false, 100);
+        assert_eq!(
+            chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Read)
+        );
+        let delivered = 200 + FIRST_ANSWER_PATIENCE - 1;
+        chooser.delivered(1, delivered);
+        assert_eq!(
+            chooser.step(
+                200 + FIRST_ANSWER_PATIENCE,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2]
+            ),
+            Step::Quiet,
+            "a read that delivered a block was given up on a window after it was asked"
+        );
+        chooser.delivered(2, delivered + FIRST_ANSWER_PATIENCE - 1);
+        assert_eq!(
+            chooser.step(
+                delivered + FIRST_ANSWER_PATIENCE,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2]
+            ),
+            Step::Ask(2, Approach::Read),
+            "a read was kept waiting by a block somebody else delivered"
+        );
+    }
+
+    /// A new rotation begins only for a claim waiting in it.
+    ///
+    /// With nobody waiting, beginning one would only hand a claim passed over
+    /// for its machine's pause the turn the pause is keeping from it, so the
+    /// last resort is what asks it, after its own retry pause.
+    #[test]
+    fn a_rotation_begins_only_for_somebody_waiting_in_it() {
+        let mut chooser = two_at_one_address();
+        assert_eq!(
+            chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join)
+        );
+        chooser.failed(1, 100 + SETTLING);
+        let rotation = chooser.rotation;
+        chooser.step(101 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]);
+        assert_eq!(
+            chooser.rotation, rotation,
+            "a rotation began with nobody waiting in it but a claim inside its pause"
+        );
+    }
+
+    /// A claim no heavier than a chain already shown and still standing is
+    /// not asked, and the claimant that showed it is.
+    #[test]
+    fn a_claim_as_heavy_as_a_chain_shown_is_not_worth_a_turn() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 1_000, LONG, true, 100);
+        chooser.noted(2, Some(host(2)), 900, LONG, true, 100);
+        assert_eq!(
+            chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join)
+        );
+        // It shows less than it said, and a heavier claim has turned up since.
+        chooser.noted(3, Some(host(3)), 1_500, LONG, true, 110);
+        assert!(!chooser.shown(1, 900, 110), "fixture: not taken yet");
+        assert_eq!(
+            chooser.step(111, true, 0, JoinProgress::NothingYet, &[1, 2, 3]),
+            Step::Ask(3, Approach::Join),
+            "a claim exactly as heavy as the chain already shown was asked to show it"
         );
     }
 

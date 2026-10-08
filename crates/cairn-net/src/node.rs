@@ -10544,9 +10544,9 @@ fn read_loop(
         peer.chosen = shared.choosing().has_chosen(id);
         let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message, asked);
         // What the choice is told about this peer's blocks: one of the asked
-        // peer's is its read moving, and one past what this peer claimed is
-        // what it sent in place of what it said.
-        if reaction.applied.is_some() || reaction.held_aside.is_some() {
+        // peer's that moved the branch is its read moving, and one past what
+        // this peer claimed is what it sent in place of what it said.
+        if reaction.applied.is_some() {
             shared.choosing().delivered(id, last_heard);
         }
         if let Some((height, work)) = reaction.outgrew {
