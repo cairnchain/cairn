@@ -40,7 +40,10 @@ pub const ANCHOR_FILE: &str = "anchors.txt";
 /// answers for the name, and a seed is never removed, so a reply of thousands
 /// used to fill this book past its ceiling with entries nothing could
 /// displace. What keeps seeds from being a way around the ceiling is
-/// `seeds::MOST_PER_NAME`, where a name's answer is taken in.
+/// `seeds::MOST_PER_NAME`, where a name's answer is taken in. The anchors read
+/// back at a start are outside it too, and they come from this node's own
+/// file of the peers it went out to and held: see
+/// `AddressBook::recall_anchors`.
 pub const MAX_ADDRESSES: usize = 4_096;
 
 /// Addresses kept from any one neighbourhood of the internet.
@@ -553,10 +556,10 @@ impl AddressBook {
     /// `crowding` is the address that could not get in, when what is full is
     /// its neighbourhood rather than the whole book.
     ///
-    /// Only ever an address never heard from, and never a seed. Anything else
-    /// and a stranger naming addresses would be choosing which of the peers
-    /// that answer this node keeps, which is the attack the ceilings are
-    /// there against, arriving by the door marked exit.
+    /// Only ever an address never heard from, and never a seed or an anchor.
+    /// Anything else and a stranger naming addresses would be choosing which
+    /// of the peers that answer this node keeps, which is the attack the
+    /// ceilings are there against, arriving by the door marked exit.
     fn make_room(&mut self, crowding: Option<&SocketAddr>) -> bool {
         let giving_way = match crowding {
             // One neighbourhood, which is where the ceiling usually bites.
@@ -569,7 +572,9 @@ impl AddressBook {
                 let (low, high) = neighbourhood_of(address);
                 self.known
                     .range(low..=high)
-                    .filter(|(_, known)| known.heard == 0 && !known.seed)
+                    .filter(|(address, known)| {
+                        known.heard == 0 && !known.seed && !self.anchors.contains(address)
+                    })
                     .max_by_key(|(_, known)| known.written_at)
                     .map(|(address, _)| *address)
             }
@@ -583,7 +588,9 @@ impl AddressBook {
                 .rev()
                 .find(|seat| {
                     let (Reverse(heard), _, address) = seat;
-                    *heard == 0 && !self.known.get(address).is_some_and(|known| known.seed)
+                    *heard == 0
+                        && !self.known.get(address).is_some_and(|known| known.seed)
+                        && !self.anchors.contains(address)
                 })
                 .map(|seat| seat.2),
         };
@@ -676,20 +683,31 @@ impl AddressBook {
         if !is_dialable(&address) {
             return false;
         }
-        let fresh = !self.known.contains_key(&address);
+        // The operator decides.
+        self.insert_past_the_ceilings(address);
         let entry = self.known.entry(address).or_default();
         let was_seed = entry.seed;
         entry.seed = true;
-        if fresh {
-            // Counted like any other, so a seed does not sit outside the
-            // accounting, but never refused by it: the operator decides.
-            let group = group_of(&address);
-            let held = self.groups.get(&group).copied().unwrap_or(0);
-            self.groups.insert(group, held.saturating_add(1));
-            self.changes = self.changes.saturating_add(1);
-            self.seat(address, 0);
-        }
         !was_seed
+    }
+
+    /// Puts in an address that no ceiling refuses, when it is not there
+    /// already: a seed the operator named, or an anchor this node went out
+    /// to and held.
+    ///
+    /// Counted like any other, so it does not sit outside the accounting, but
+    /// never refused by it. Neither is a name a stranger passed on, and the
+    /// ceilings are there against strangers.
+    fn insert_past_the_ceilings(&mut self, address: SocketAddr) {
+        if self.known.contains_key(&address) {
+            return;
+        }
+        let group = group_of(&address);
+        let held = self.groups.get(&group).copied().unwrap_or(0);
+        self.groups.insert(group, held.saturating_add(1));
+        self.changes = self.changes.saturating_add(1);
+        self.known.insert(address, Known::default());
+        self.seat(address, 0);
     }
 
     /// Whether this address was given rather than learned.
@@ -1100,6 +1118,11 @@ impl AddressBook {
     /// different moments and the book can have lost a peer the anchors kept.
     /// An anchor is a peer this node went out to and held, not a name
     /// somebody passed on, and a start dials it first whatever the book says.
+    /// So it has a seed's standing in the book: kept past its neighbourhood's
+    /// ceiling and the book's, and never given up to make room. Put in as any
+    /// other address, an anchor whose neighbourhood was full of addresses
+    /// this node had heard from was in neither the book nor the anchors, and
+    /// nothing said so.
     ///
     /// A line that does not read is passed over rather than set aside, as the
     /// book's would be. This file is the node's own note of who it was
@@ -1114,8 +1137,8 @@ impl AddressBook {
                 continue;
             };
             let address = canonical(address);
-            self.insert(address);
-            if self.contains(&address) {
+            if is_dialable(&address) {
+                self.insert_past_the_ceilings(address);
                 self.anchors.insert(address);
             }
         }
@@ -2753,6 +2776,38 @@ mod tests {
             read_back.anchor_changes(),
             0,
             "anchors read back were counted as news, to be written over the file they came from"
+        );
+    }
+
+    /// An anchor read back is kept though its neighbourhood is full of
+    /// addresses this node has heard from, and a stranger's address in that
+    /// neighbourhood afterwards does not take its place.
+    ///
+    /// It was put in as any other address, so the ceiling turned it away, and
+    /// it was in neither the book nor the anchors: the start dialled the book
+    /// in its order, which is the order the anchors exist to stop deciding.
+    #[test]
+    fn an_anchor_is_kept_past_its_neighbourhood_s_ceiling() {
+        let directory = scratch("anchors-full-neighbourhood");
+        let mut book = AddressBook::new();
+        for last in 0..u8::try_from(MAX_PER_GROUP).unwrap() {
+            book.insert(address(last, 9000));
+            book.answered(&address(last, 9000), 1_000);
+        }
+        book.save(&directory).unwrap();
+        let anchor = address(200, 9000);
+        save_anchors(&directory, &[anchor]).unwrap();
+        let mut read_back = AddressBook::load(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(
+            read_back.anchors().contains(&anchor) && read_back.contains(&anchor),
+            "an anchor whose neighbourhood was full was dropped from the book and the anchors"
+        );
+        let taken = read_back.insert(address(201, 9000));
+        assert!(
+            read_back.contains(&anchor) && !taken,
+            "a stranger's address took the place of an anchor"
         );
     }
 
