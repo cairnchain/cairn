@@ -165,10 +165,12 @@ const DIAL_BUDGET: Duration = Duration::from_secs(3);
 const DIALS_AT_ONCE: usize = 2 * TARGET_PEERS;
 /// How long a read waits before the loop looks up to check on things.
 ///
-/// Also how long a connection this node has shut can go on being read, on
-/// Windows. Shutting a socket wakes a read already waiting on it on Linux and
-/// macOS, and not on Windows: there the read goes on until the far end
-/// closes or this deadline passes, and the one after it fails at once.
+/// Also how long a connection this node has let go of can go on being read,
+/// on Windows. Shutting a socket wakes a read already waiting on it on Linux
+/// and macOS, and not on Windows: there the read goes on until something
+/// arrives or this deadline passes, and the loop then leaves because the
+/// connection is marked, whether or not the shutdown was taken. See
+/// [`Peer::let_go`].
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a write may block before the peer is treated as gone.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1471,7 +1473,9 @@ impl Outbound {
 #[allow(clippy::struct_excessive_bools)]
 struct Peer {
     outbound: Outbound,
-    /// Kept so a shutdown can unblock the thread reading from it.
+    /// A copy of the socket, kept so that letting go of the connection can
+    /// wake the thread reading from it where a shutdown does that: see
+    /// [`Peer::let_go`].
     stream: TcpStream,
     /// Where the connection came from, which is the only address about this
     /// peer that it did not choose itself.
@@ -1570,56 +1574,35 @@ impl Peer {
         self.dialled || self.greeted
     }
 
-    /// Ends this connection from outside its own loop, and says what shutting
-    /// its socket came to.
+    /// Ends this connection from outside its own loop.
     ///
-    /// The mark first, so a read the shutdown wakes finds it.
-    fn let_go(&self) -> io::Result<()> {
+    /// Marked as well as shut, because shutting it is not enough on Windows,
+    /// in two ways. A shutdown there does not wake a read already waiting.
+    /// And [`Peer::stream`] is a copy of the socket made by `try_clone`, which
+    /// Winsock can take for unconnected when the socket was dialled: it then
+    /// refuses the shutdown with `WSAENOTCONN`, does nothing, and the copy
+    /// goes on sending and receiving as if nothing had been asked. On the
+    /// windows-latest runner that was 30 hang-ups of a dialled peer in 320,
+    /// each refused again when tried twenty seconds later, and each one a
+    /// connection still carrying a message a second both ways. The shutdown's
+    /// answer was thrown away, so nothing knew.
+    ///
+    /// The mark is what the loop looks at whenever a read returns, so it
+    /// leaves at its next read, [`READ_TIMEOUT`] at the latest. As it leaves
+    /// it shuts the socket through its own handle, the one the connection was
+    /// made on, and then the writer and the table let go of their copies: the
+    /// connection closes once the last handle has gone, whatever any shutdown
+    /// did. What the shutdown here
+    /// still does is end the connection at once where it can, waking the read
+    /// on Linux and macOS, and telling the far end now rather than at the
+    /// loop's next read on Windows when it is taken. Its answer is not needed
+    /// for any of that, which is why nothing reads it.
+    ///
+    /// Marked first, so a read the shutdown wakes finds the mark.
+    fn let_go(&self) {
         self.outbound.let_go.store(true, Ordering::SeqCst);
-        self.stream.shutdown(Shutdown::Both)
+        let _ = self.stream.shutdown(Shutdown::Both);
     }
-}
-
-// TEMPORARY, for the Windows probe on fix/windows-hang-up, not for merging:
-// what happened to one node's connections, read back by a test that asked for
-// that node's lines by its nonce. Nothing is written for any other node.
-static TRACED: Mutex<Option<HashMap<u64, Vec<String>>>> = Mutex::new(None);
-static TRACE_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-
-fn trace(nonce: u64, line: impl FnOnce() -> String) {
-    let wanted = TRACED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .is_some_and(|all| all.contains_key(&nonce));
-    if !wanted {
-        return;
-    }
-    let line = line();
-    let at = TRACE_EPOCH.get_or_init(Instant::now).elapsed();
-    let mut traced = TRACED.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(lines) = traced.as_mut().and_then(|all| all.get_mut(&nonce)) {
-        lines.push(format!("{at:?} {line}"));
-    }
-}
-
-#[cfg(test)]
-fn trace_start(nonce: u64) {
-    TRACED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get_or_insert_with(HashMap::new)
-        .insert(nonce, Vec::new());
-}
-
-#[cfg(test)]
-fn trace_of(nonce: u64) -> Vec<String> {
-    TRACED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_mut()
-        .and_then(|all| all.remove(&nonce))
-        .unwrap_or_default()
 }
 
 struct Shared {
@@ -2600,9 +2583,10 @@ fn room_made_in(peers: &mut HashMap<PeerId, Peer>, host: IpAddr, salt: u64) -> b
 /// ceiling left it still full, and the visitor was turned away after somebody
 /// had been let go of for it. And one at a time. The connection chosen stops
 /// holding a slot the moment it is chosen, and leaves the table once its
-/// threads have wound down: a matter of moments once its socket is shut, and
-/// up to [`READ_TIMEOUT`] on Windows, where shutting it does not wake the read
-/// waiting on it. Until it has, nobody else is let go of, so the connections
+/// threads have wound down: a matter of moments on Linux and macOS, and up to
+/// [`READ_TIMEOUT`] on Windows, where shutting its socket does not wake the
+/// read waiting on it: see [`Peer::let_go`]. Until it has, nobody else is let
+/// go of, so the connections
 /// holding a place are at most one more than [`MAX_PEERS`], and only for that
 /// long.
 ///
@@ -2636,7 +2620,7 @@ fn make_room_in(peers: &mut HashMap<PeerId, Peer>, visitor: IpAddr, salt: u64) -
         return false;
     };
     peer.leaving = true;
-    let _ = peer.let_go();
+    peer.let_go();
     true
 }
 
@@ -3534,25 +3518,15 @@ impl Shared {
 
     /// Ends one connection, leaving its own threads to clear it up.
     ///
-    /// The socket is shut rather than the entry taken out of the table, so
-    /// what happens next is what happens to any peer that goes away: the
-    /// reading loop fails, the writer is freed, and the slot is given up once
-    /// both are finished with it. At once on Linux and macOS; on Windows the
-    /// read already waiting ends at the far end's answer or at
-    /// [`READ_TIMEOUT`], so the slot can stay taken that long.
+    /// The connection is let go of rather than the entry taken out of the
+    /// table, so what happens next is what happens to any peer that goes
+    /// away: the reading loop ends, the writer is freed, and the slot is given
+    /// up once both are finished with it. At once on Linux and macOS; on
+    /// Windows at the loop's next read, [`READ_TIMEOUT`] at the latest, so the
+    /// slot can stay taken that long. See [`Peer::let_go`].
     fn hang_up(&self, id: PeerId) {
         if let Some(peer) = self.peers().get(&id) {
-            let outcome = peer.let_go();
-            trace(self.nonce, || {
-                format!(
-                    "hang_up {id}: shutdown {outcome:?}, local {:?}, peer {:?}, take_error {:?}",
-                    peer.stream.local_addr(),
-                    peer.stream.peer_addr(),
-                    peer.stream.take_error()
-                )
-            });
-        } else {
-            trace(self.nonce, || format!("hang_up {id}: not in the table"));
+            peer.let_go();
         }
     }
 
@@ -6176,7 +6150,7 @@ impl Node {
         // joining, which adds its thread after the table was taken.
         loop {
             for peer in self.shared.peers().values() {
-                let _ = peer.let_go();
+                peer.let_go();
             }
             let handles = std::mem::take(&mut *self.shared.threads());
             if handles.is_empty() {
@@ -9718,7 +9692,6 @@ where
             felt,
         )
     };
-    trace(shared.nonce, || format!("round at {now}: felt {felt:?}"));
     for id in felt {
         shared.hang_up(id);
     }
@@ -10000,6 +9973,9 @@ fn tie_keys(shared: &Shared, their_nonce: u64) -> (u64, u64) {
 /// reached from here by a different road: there the machine is out of
 /// descriptors, here it is out of threads, and both are facts about this
 /// moment rather than about any visitor.
+///
+/// `let_go` is the connection's mark, set as the writer finishes: see
+/// [`Peer::let_go`].
 fn start_writing(
     id: PeerId,
     mut writing_end: TcpStream,
@@ -10007,28 +9983,25 @@ fn start_writing(
     network: NetworkId,
     written: Arc<AtomicUsize>,
     let_go: Arc<AtomicBool>,
-    nonce: u64,
 ) -> io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("cairn-write-{id}"))
         .spawn(move || {
-            let mut why = String::from("its queue closed");
             while let Ok((message, weight)) = inbox.recv() {
                 let outcome = write_message(&mut writing_end, network, &message);
                 // Off the count whether or not it reached the far end. What is
                 // being counted is what this node is holding, and once the write
                 // has returned it is holding nothing.
                 written.fetch_sub(weight, Ordering::SeqCst);
-                if let Err(error) = outcome {
-                    why = format!("a write failed, {error:?}");
+                if outcome.is_err() {
                     break;
                 }
             }
+            // Marked as well as shut, because this handle is a copy of the
+            // socket, and Windows can refuse a shutdown through a copy: the
+            // reader then leaves at its next read all the same.
             let_go.store(true, Ordering::SeqCst);
-            let outcome = writing_end.shutdown(Shutdown::Both);
-            trace(nonce, || {
-                format!("writer {id} ended: {why}, its shutdown {outcome:?}")
-            });
+            let _ = writing_end.shutdown(Shutdown::Both);
         })
 }
 
@@ -10157,26 +10130,11 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         let _ = closing_end.shutdown(Shutdown::Both);
         return false;
     };
-    trace(shared.nonce, || {
-        format!(
-            "attached {id}: dialled {dialled:?}, place {place:?}, local {:?}, peer {:?}",
-            closing_end.local_addr(),
-            closing_end.peer_addr()
-        )
-    });
 
     let network = shared.network();
     let written = Arc::clone(&outbound.waiting);
     let let_go = Arc::clone(&outbound.let_go);
-    let Ok(writer) = start_writing(
-        id,
-        writing_end,
-        inbox,
-        network,
-        written,
-        let_go,
-        shared.nonce,
-    ) else {
+    let Ok(writer) = start_writing(id, writing_end, inbox, network, written, let_go) else {
         // The closure went with the error, and the socket half it held with
         // it. What is left is the table entry, which nothing would ever come
         // back to remove: the thread that does that is the one below, and it
@@ -10202,7 +10160,6 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         .name(format!("cairn-read-{id}"))
         .spawn(move || {
             read_loop(&reading, stream, id, &outbound, remote, dialled, place);
-            trace(reading.nonce, || format!("reader {id}: loop returned"));
             drop(outbound);
             // The writer waits on the channel closing, and the channel cannot
             // close while the peer table still holds a sender for it. So the
@@ -10221,13 +10178,9 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
                 .unwrap_or_else(PoisonError::into_inner)
                 .take()
             {
-                trace(reading.nonce, || format!("reader {id}: joining the writer"));
                 let _ = writer.join();
             }
             reading.peers().remove(&id);
-            trace(reading.nonce, || {
-                format!("reader {id}: removed from the table")
-            });
         });
     let Ok(handle) = handle else {
         // Taking the entry out drops the table's sender, and the closure went
@@ -10484,19 +10437,13 @@ fn read_loop(
         // does not listen was a stranger for life and its first block cost it
         // the connection and a refusal.
         let read = read_frame(&mut stream, network, most_from(peer.greeted));
+        // A connection this node has let go of from outside this loop goes at
+        // its next read, whatever that read brought: see `Peer::let_go`. Not
+        // on a read that failed by itself, whose failure is how the connection
+        // ended and what `note_the_ending` writes down.
         if read.is_ok() && outbound.was_let_go() {
-            trace(shared.nonce, || format!("read {id}: let go of"));
             break;
         }
-        trace(shared.nonce, || match &read {
-            Ok(Framed::Frame(frame)) => format!(
-                "read {id}: a frame of {} bytes, tag {:?}",
-                frame.len(),
-                frame.first()
-            ),
-            Ok(Framed::Quiet) => format!("read {id}: quiet"),
-            Err(error) => format!("read {id}: failed, {error:?}"),
-        });
         let frame = match read {
             Ok(Framed::Frame(frame)) => {
                 parting.said_anything = true;
@@ -10661,13 +10608,7 @@ fn read_loop(
     // write begun on a socket just shut fails at once, wherever in a frame it
     // was. One already waiting for the far end to take its bytes is sure to end
     // only at `WRITE_TIMEOUT` on Windows, where a shut socket need not wake it.
-    let outcome = stream.shutdown(Shutdown::Both);
-    trace(shared.nonce, || {
-        format!(
-            "read loop {id} ended: running {}, parting {parting:?}, its own shutdown {outcome:?}",
-            shared.running.load(Ordering::SeqCst)
-        )
-    });
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 /// Whether a connection goes on after a read that came back with nothing to
@@ -13937,8 +13878,6 @@ mod peers_and_loops {
     fn a_node_holding_its_dials_still_reaches_an_address_it_never_heard_from() {
         let node = quiet();
         let far = Node::bind(ConsensusParams::testnet(), local()).unwrap();
-        trace_start(node.shared.nonce);
-        trace_start(far.shared.nonce);
         let (socket, _other) = a_socket();
         {
             // Numbered clear of what the node hands out to its own dials.
@@ -13999,14 +13938,11 @@ mod peers_and_loops {
                 .collect();
             format!("{} entries [{}]", peers.len(), entries.join("; "))
         };
-        let threads = threads_of(&node);
         let early = node.shared.peers().len();
         dial_from_book(&node.shared, 1_000 + FEELER_PERIOD);
         let on_time = node.shared.peers().len();
         stop_all(&node);
         far.shutdown();
-        let near_trace = trace_of(node.shared.nonce).join("\n  ");
-        let far_trace = trace_of(far.shared.nonce).join("\n  ");
 
         assert!(
             reached,
@@ -14025,8 +13961,7 @@ mod peers_and_loops {
             let_go,
             "a feeler that had answered was kept: when the wait for it ran out the table held \
              {table} where it should have come back to {TARGET_PEERS}, and the far end still \
-             held {far_end} connection(s) it had not dialled; threads {threads}\nnear:\n  \
-             {near_trace}\nfar:\n  {far_trace}"
+             held {far_end} connection(s) it had not dialled"
         );
         assert_eq!(
             early, TARGET_PEERS,
@@ -14093,7 +14028,6 @@ mod peers_and_loops {
             ConsensusParams::testnet().network,
             Arc::clone(&outbound.waiting),
             Arc::clone(&outbound.let_go),
-            0,
         )
         .unwrap();
         outbound.try_send(Message::Ping(1)).unwrap();
@@ -14101,157 +14035,6 @@ mod peers_and_loops {
         assert!(
             outbound.was_let_go(),
             "a writer that gave up left the connection for its reader to find out about"
-        );
-    }
-
-    /// TEMPORARY, for the Windows probe: which of this node's threads are
-    /// still running, by name.
-    fn threads_of(node: &Node) -> String {
-        let threads = node.shared.threads();
-        let named: Vec<String> = threads
-            .iter()
-            .map(|handle| {
-                format!(
-                    "{} {}",
-                    handle.thread().name().unwrap_or("unnamed"),
-                    if handle.is_finished() {
-                        "finished"
-                    } else {
-                        "running"
-                    }
-                )
-            })
-            .collect();
-        format!("[{}]", named.join(", "))
-    }
-
-    /// TEMPORARY, for the Windows probe on fix/windows-hang-up, not for
-    /// merging: the round's hang-up of an answered feeler, many times over and
-    /// side by side, with what each end did when one is kept.
-    #[test]
-    #[allow(
-        clippy::too_many_lines,
-        clippy::similar_names,
-        clippy::format_push_string
-    )]
-    fn probe_the_hang_up_of_a_feeler() {
-        fn wait_for(patience: Duration, ready: &dyn Fn() -> bool) -> Option<Duration> {
-            let began = Instant::now();
-            while began.elapsed() < patience {
-                if ready() {
-                    return Some(began.elapsed());
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-            ready().then(|| began.elapsed())
-        }
-        fn inbound(far: &Node) -> usize {
-            far.shared
-                .peers()
-                .values()
-                .filter(|peer| peer.dialled_to.is_none())
-                .count()
-        }
-        fn attempt(lane: usize, round: usize) -> (bool, String) {
-            let node = quiet();
-            let far = Node::bind(ConsensusParams::testnet(), local()).unwrap();
-            trace_start(node.shared.nonce);
-            trace_start(far.shared.nonce);
-            let (socket, _other) = a_socket();
-            {
-                let mut peers = node.shared.peers();
-                for id in 0..TARGET_PEERS {
-                    peers.insert(1_000 + u64::try_from(id).unwrap(), stand_in(&socket, true));
-                }
-            }
-            node.shared.book().insert(far.address());
-            node.shared.running.store(true, Ordering::SeqCst);
-            dial_from_book(&node.shared, 1_000);
-            let greeted = wait_for(Duration::from_secs(30), &|| {
-                node.shared
-                    .peers()
-                    .values()
-                    .any(|peer| peer.feeler && peer.greeted)
-            });
-            let door = a_door();
-            node.shared.book().insert(door.local_addr().unwrap());
-            dial_from_book(&node.shared, 1_001);
-            let far_let_go = wait_for(Duration::from_secs(15), &|| inbound(&far) == 0);
-            let near_let_go = wait_for(Duration::from_secs(15), &|| {
-                node.shared.peers().len() == TARGET_PEERS
-            });
-            let mut line = format!(
-                "lane {lane} round {round}: greeted {greeted:?}, far let go {far_let_go:?}, \
-                 near let go {near_let_go:?}"
-            );
-            let anomaly = greeted.is_none() || far_let_go.is_none() || near_let_go.is_none();
-            if anomaly {
-                let threads = threads_of(&node);
-                let (described, second) = {
-                    let peers = node.shared.peers();
-                    match peers.iter().find(|(_, peer)| peer.feeler) {
-                        Some((id, peer)) => (
-                            format!(
-                                "feeler {id}: greeted {}, leaving {}, local {:?}, peer {:?}, \
-                                 take_error {:?}",
-                                peer.greeted,
-                                peer.leaving,
-                                peer.stream.local_addr(),
-                                peer.stream.peer_addr(),
-                                peer.stream.take_error()
-                            ),
-                            Some(peer.stream.shutdown(Shutdown::Both)),
-                        ),
-                        None => ("no feeler in the table".to_owned(), None),
-                    }
-                };
-                let far_after = wait_for(Duration::from_secs(10), &|| inbound(&far) == 0);
-                let near_after = wait_for(Duration::from_secs(10), &|| {
-                    node.shared.peers().len() == TARGET_PEERS
-                });
-                line.push_str(&format!(
-                    "; ANOMALY {described}; threads {threads}; second shutdown {second:?}; \
-                     then far let go {far_after:?}, near let go {near_after:?}"
-                ));
-            }
-            stop_all(&node);
-            far.shutdown();
-            let near_trace = trace_of(node.shared.nonce);
-            let far_trace = trace_of(far.shared.nonce);
-            if anomaly {
-                line.push_str(&format!(
-                    "\n near:\n  {}\n far:\n  {}",
-                    near_trace.join("\n  "),
-                    far_trace.join("\n  ")
-                ));
-            }
-            (anomaly, line)
-        }
-
-        let lanes: Vec<_> = (0..8)
-            .map(|lane| {
-                thread::spawn(move || {
-                    (0..40)
-                        .map(|round| attempt(lane, round))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        let mut anomalies = Vec::new();
-        let mut count = 0usize;
-        for lane in lanes {
-            for (anomaly, line) in lane.join().unwrap() {
-                count += 1;
-                if anomaly {
-                    anomalies.push(line);
-                }
-            }
-        }
-        assert!(
-            anomalies.is_empty(),
-            "{} of {count} hang-ups did not end the feeler:\n{}",
-            anomalies.len(),
-            anomalies.join("\n")
         );
     }
 
