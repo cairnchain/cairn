@@ -479,16 +479,16 @@ impl Chooser {
 
     /// What a peer sent, in place of what it said.
     ///
-    /// `peer` delivered a block at `height`, above the height it claimed and
-    /// past the depth this node undoes, and this node, which could still undo
-    /// everything it holds, did not take it from a peer its choice had not
-    /// fallen on. `work` is as much of the branch under that block as this
-    /// node can stand behind, which is the work of the block it hangs on when
-    /// this node holds that block, and nought when it does not.
+    /// `peer` sent a block at `height`, above the height it claimed, while
+    /// this node could still undo everything it holds. `work` is as much of
+    /// the work behind that block as this node can stand behind: the block's
+    /// own when this node holds it, and when it does not, because the block
+    /// stood past the depth this node undoes and the choice had not fallen on
+    /// the peer, the work of the block it hangs on, or nought.
     ///
     /// Its words are replaced by that in both directions, as a weighing
-    /// replaces them in [`Self::shown`]. The height is past what this node
-    /// undoes, so the claim is one worth settling and opens the choice if
+    /// replaces them in [`Self::shown`]. A height as long as the network
+    /// undoes makes it a claim worth settling, which opens the choice if
     /// nothing had. The work is what this node saw rather than what it was
     /// told: a peer that said it had nought blocks and the work of a long
     /// chain, and then sent a short cheap branch, is ranked by the branch. Kept

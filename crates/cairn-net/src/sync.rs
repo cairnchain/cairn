@@ -1125,11 +1125,12 @@ pub struct Reaction {
     /// of these is a number a peer writes, and what a node should conclude
     /// from several is a question about the node.
     pub cannot_supply: Option<u64>,
-    /// The height of a block a peer sent above the height it claimed, which
-    /// this node did not take, with as much of the work beneath it as this
-    /// node can stand behind: this node could still undo everything it held,
-    /// the block stood past that depth, and its choice had not fallen on the
-    /// peer. See [`PeerState::chosen`].
+    /// The height of a block a peer sent above the height it claimed while
+    /// this node could still undo everything it held, with as much of the work
+    /// behind it as this node can stand behind: the block's own, when this
+    /// node now holds the block, and the work of the block beneath it when it
+    /// did not take it, because it stood past that depth and the choice had
+    /// not fallen on the peer. See [`PeerState::chosen`].
     ///
     /// Named for the node to tell its chooser, which ranks the peer by what it
     /// sent from then on rather than by what it said (`Chooser::outgrew`). A
@@ -1782,32 +1783,44 @@ fn on_a_refused_parent(
 /// undoes and the choice has not fallen on the peer. See
 /// [`PeerState::chosen`].
 ///
-/// Nothing, when the peer claimed a chain at least that long: its word stands
-/// and the choice will weigh it. When the block stands above the height the
-/// peer claimed, the peer has said two things about its chain and the block
-/// is the one this node can check, so what the peer claims becomes what it
-/// sent: the block's height, with the work of `parent` when this node holds it
-/// and nought when it does not. The block's own work is the peer's word until
-/// the block is judged, which it is not here. Named, for the node to tell its
-/// chooser: see [`Reaction::outgrew`].
+/// What [`past_its_word`] says, with the work of `parent` when this node holds
+/// it and nought when it does not: the block's own work is the peer's word
+/// until the block is judged, which it is not here.
 fn held_to_its_word(
     chain: &ChainStore,
     peer: &mut PeerState,
     height: u64,
     parent: Hash32,
 ) -> Reaction {
-    if height <= peer.height {
-        return Reaction::idle();
-    }
     let work = chain
         .block(&parent)
         .map_or(0, |block| block.header.total_work);
-    peer.height = height;
-    peer.total_work = work;
     Reaction {
-        outgrew: Some((height, work)),
+        outgrew: past_its_word(peer, height, work),
         ..Reaction::idle()
     }
+}
+
+/// Takes a block at `height`, behind which this node can stand behind `work`,
+/// as what `peer` holds, when it stands above the height the peer claimed.
+/// Says so, for the node to tell its chooser: see [`Reaction::outgrew`].
+///
+/// Nothing, when the peer claimed a chain at least that long: its word stands
+/// and the choice will weigh it. Above it, the peer has said two things about
+/// its chain and the block is the one this node can check, so what the peer
+/// claims becomes what it sent, the height with the work, in both directions:
+/// a peer whose chain grew since it greeted this node is raised to it, and one
+/// that said it had nought blocks and the work of a long chain is taken down
+/// to the branch it sent. Kept at its word, that peer was asked for its chain
+/// after every block it pushed, since it claimed more than this node would
+/// ever hold, and it was the heaviest claim in front of the choice.
+fn past_its_word(peer: &mut PeerState, height: u64, work: u128) -> Option<(u64, u128)> {
+    if height <= peer.height {
+        return None;
+    }
+    peer.height = height;
+    peer.total_work = work;
+    Some((height, work))
 }
 
 // The last two arms answer the same way for opposite reasons, and collapsing
@@ -1835,7 +1848,8 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
     // that depth from a peer its choice has not fallen on. Taking it is the
     // choice made, and made by whichever peer got there first. See
     // [`PeerState::chosen`].
-    if !peer.chosen && height > chain.undo_limit() && holds_nothing_it_cannot_undo(chain) {
+    let choosing = holds_nothing_it_cannot_undo(chain);
+    if choosing && !peer.chosen && height > chain.undo_limit() {
         return held_to_its_word(chain, peer, height, parent);
     }
 
@@ -1844,13 +1858,23 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             // See [`PeerState::clock_refused`]: what this peer sends now goes
             // onto the branch, so whatever it had refused is behind it.
             peer.clock_refused = None;
+            // Held, so the work its header states is the work behind it, and
+            // while the choice is open the choice hears it.
+            let outgrew = choosing
+                .then(|| past_its_word(peer, height, claimed))
+                .flatten();
             let mut reaction = follow_up(chain, peer, now);
             reaction.applied = Some(accepted);
+            reaction.outgrew = outgrew;
             reaction.broadcast.push(Located::new(height, id));
             reaction
         }
         Ok(Accepted::SideBranch) => {
+            let outgrew = choosing
+                .then(|| past_its_word(peer, height, claimed))
+                .flatten();
             let mut reaction = follow_up(chain, peer, now);
+            reaction.outgrew = outgrew;
             if !held_before {
                 reaction.held_aside = Some(id);
             }
