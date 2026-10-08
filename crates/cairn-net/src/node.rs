@@ -1583,20 +1583,20 @@ impl Peer {
     /// refuses the shutdown with `WSAENOTCONN`, does nothing, and the copy
     /// goes on sending and receiving as if nothing had been asked. On the
     /// windows-latest runner that was 30 hang-ups of a dialled peer in 320,
-    /// each refused again when tried twenty seconds later, and each one a
-    /// connection still carrying a message a second both ways. The shutdown's
-    /// answer was thrown away, so nothing knew.
+    /// each refused again when tried once more, and each one a connection
+    /// still carrying a message a second both ways. The shutdown's answer was
+    /// thrown away, so nothing knew.
     ///
     /// The mark is what the loop looks at whenever a read returns, so it
     /// leaves at its next read, [`READ_TIMEOUT`] at the latest. As it leaves
     /// it shuts the socket through its own handle, the one the connection was
     /// made on, and then the writer and the table let go of their copies: the
     /// connection closes once the last handle has gone, whatever any shutdown
-    /// did. What the shutdown here
-    /// still does is end the connection at once where it can, waking the read
-    /// on Linux and macOS, and telling the far end now rather than at the
-    /// loop's next read on Windows when it is taken. Its answer is not needed
-    /// for any of that, which is why nothing reads it.
+    /// did. What the shutdown here still does is end the connection at once
+    /// where it can, waking the read on Linux and macOS, and telling the far
+    /// end now rather than at the loop's next read on Windows when it is
+    /// taken. Its answer is not needed for any of that, which is why nothing
+    /// reads it.
     ///
     /// Marked first, so a read the shutdown wakes finds the mark.
     fn let_go(&self) {
@@ -2586,9 +2586,8 @@ fn room_made_in(peers: &mut HashMap<PeerId, Peer>, host: IpAddr, salt: u64) -> b
 /// threads have wound down: a matter of moments on Linux and macOS, and up to
 /// [`READ_TIMEOUT`] on Windows, where shutting its socket does not wake the
 /// read waiting on it: see [`Peer::let_go`]. Until it has, nobody else is let
-/// go of, so the connections
-/// holding a place are at most one more than [`MAX_PEERS`], and only for that
-/// long.
+/// go of, so the connections holding a place are at most one more than
+/// [`MAX_PEERS`], and only for that long.
 ///
 /// Which one goes is [`to_let_go`], and it may be none. A visitor waiting for
 /// its own introduction is never one: it holds no place to give up.
@@ -13980,7 +13979,8 @@ mod peers_and_loops {
     ///
     /// The mark alone, because the shutdown beside it is not something every
     /// platform can be held to: on Windows it does not wake a read already
-    /// waiting.
+    /// waiting, and through a copy of a socket that was dialled it can be
+    /// refused outright.
     #[test]
     fn a_connection_let_go_of_ends_at_its_next_read_with_its_socket_left_alone() {
         let node = quiet();
