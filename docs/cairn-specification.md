@@ -2455,14 +2455,14 @@ networks' opening difficulties, the cheapest tip a forger can present costs
 the pinned header alone it would cost 2<sup>11.9</sup> and 2<sup>8.1</sup>.
 These are lower bounds on what a forger pays: the measurement lets the run
 below the pinned header start anywhere on its schedule, which the run's own
-rules no longer allow. The faster walk moved the price by a tenth of a halving from what the moving average
-gave at the same opening difficulty, 2<sup>18.0</sup> at testnet-7's
-2<sup>27</sup> and 2<sup>14.0</sup> on the devnet, because the floor rests on
-the run's ceiling and the tie, not on the walk; testnet-8's opening at
-2<sup>28</sup> doubled it, since the band is counted in blocks at that
-difficulty. It does not cost the chain's
-difficulty, and no tie of this kind can make it: a run whose tip fell by the
-tie is what an honest chain looks like after a loss.
+rules no longer allow. The faster walk moved the price by a tenth of a halving
+from what the moving average gave at the same opening difficulty,
+2<sup>18.0</sup> at testnet-7's 2<sup>27</sup> and 2<sup>14.0</sup> on the
+devnet, because the floor rests on the run's ceiling and the tie, not on the
+walk; testnet-8's opening at 2<sup>28</sup> doubled it, since the band is
+counted in blocks at that difficulty. It does not cost the chain's difficulty,
+and no tie of this kind can make it: a run whose tip fell by the tie is what an
+honest chain looks like after a loss.
 
 So the figure MUST be quoted against a grinding budget. At 40 per cent the
 inequality above gives 2^-161.9 a tip, which stays under 2^-128 against
