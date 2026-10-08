@@ -2584,8 +2584,11 @@ fn room_made_in(peers: &mut HashMap<PeerId, Peer>, host: IpAddr, salt: u64) -> b
 /// had been let go of for it. And one at a time. The connection chosen stops
 /// holding a slot the moment it is chosen, and leaves the table once its
 /// threads have wound down: a matter of moments on Linux and macOS, and up to
-/// [`READ_TIMEOUT`] on Windows, where shutting its socket does not wake the
-/// read waiting on it: see [`Peer::let_go`]. Until it has, nobody else is let
+/// [`READ_TIMEOUT`] plus [`WRITE_TIMEOUT`] on Windows. Shutting its socket
+/// there wakes neither the read waiting on it, which ends at the loop's next
+/// read, nor a write waiting on a far end that has stopped reading, which
+/// ends at its own timeout, and the entry goes only once the reader has
+/// joined the writer: see [`Peer::let_go`]. Until it has, nobody else is let
 /// go of, so the connections holding a place are at most one more than
 /// [`MAX_PEERS`], and only for that long.
 ///
@@ -3520,9 +3523,11 @@ impl Shared {
     /// The connection is let go of rather than the entry taken out of the
     /// table, so what happens next is what happens to any peer that goes
     /// away: the reading loop ends, the writer is freed, and the slot is given
-    /// up once both are finished with it. At once on Linux and macOS; on
-    /// Windows at the loop's next read, [`READ_TIMEOUT`] at the latest, so the
-    /// slot can stay taken that long. See [`Peer::let_go`].
+    /// up once both are finished with it. At once on Linux and macOS. On
+    /// Windows the loop ends at its next read, [`READ_TIMEOUT`] at the latest,
+    /// and a write already waiting on a far end that has stopped reading ends
+    /// only at [`WRITE_TIMEOUT`], so the slot can stay taken for the two
+    /// together. See [`Peer::let_go`].
     fn hang_up(&self, id: PeerId) {
         if let Some(peer) = self.peers().get(&id) {
             peer.let_go();
