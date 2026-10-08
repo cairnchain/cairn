@@ -1376,6 +1376,10 @@ struct Outbound {
     /// a push: seven blocks at nine units each against a window holding
     /// seven, refused in silence, the heights left outstanding.
     asked_for_the_chain: Arc<AtomicBool>,
+    /// Set when this node has ended the connection from outside its own
+    /// loop, and looked at by that loop whenever a read returns: see
+    /// [`Peer::let_go`].
+    let_go: Arc<AtomicBool>,
 }
 
 impl Outbound {
@@ -1384,7 +1388,13 @@ impl Outbound {
             sender,
             waiting: Arc::new(AtomicUsize::new(0)),
             asked_for_the_chain: Arc::new(AtomicBool::new(false)),
+            let_go: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether this node has ended the connection from outside its loop.
+    fn was_let_go(&self) -> bool {
+        self.let_go.load(Ordering::SeqCst)
     }
 
     /// Queues a message this node composed outside the connection's own
@@ -1558,6 +1568,15 @@ impl Peer {
     /// queues its introduction before putting it there.
     const fn worth_speaking_to(&self) -> bool {
         self.dialled || self.greeted
+    }
+
+    /// Ends this connection from outside its own loop, and says what shutting
+    /// its socket came to.
+    ///
+    /// The mark first, so a read the shutdown wakes finds it.
+    fn let_go(&self) -> io::Result<()> {
+        self.outbound.let_go.store(true, Ordering::SeqCst);
+        self.stream.shutdown(Shutdown::Both)
     }
 }
 
@@ -2617,7 +2636,7 @@ fn make_room_in(peers: &mut HashMap<PeerId, Peer>, visitor: IpAddr, salt: u64) -
         return false;
     };
     peer.leaving = true;
-    let _ = peer.stream.shutdown(Shutdown::Both);
+    let _ = peer.let_go();
     true
 }
 
@@ -3523,7 +3542,7 @@ impl Shared {
     /// [`READ_TIMEOUT`], so the slot can stay taken that long.
     fn hang_up(&self, id: PeerId) {
         if let Some(peer) = self.peers().get(&id) {
-            let outcome = peer.stream.shutdown(Shutdown::Both);
+            let outcome = peer.let_go();
             trace(self.nonce, || {
                 format!(
                     "hang_up {id}: shutdown {outcome:?}, local {:?}, peer {:?}, take_error {:?}",
@@ -6157,7 +6176,7 @@ impl Node {
         // joining, which adds its thread after the table was taken.
         loop {
             for peer in self.shared.peers().values() {
-                let _ = peer.stream.shutdown(Shutdown::Both);
+                let _ = peer.let_go();
             }
             let handles = std::mem::take(&mut *self.shared.threads());
             if handles.is_empty() {
@@ -9987,6 +10006,7 @@ fn start_writing(
     inbox: mpsc::Receiver<(Message, usize)>,
     network: NetworkId,
     written: Arc<AtomicUsize>,
+    let_go: Arc<AtomicBool>,
     nonce: u64,
 ) -> io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
@@ -10004,6 +10024,7 @@ fn start_writing(
                     break;
                 }
             }
+            let_go.store(true, Ordering::SeqCst);
             let outcome = writing_end.shutdown(Shutdown::Both);
             trace(nonce, || {
                 format!("writer {id} ended: {why}, its shutdown {outcome:?}")
@@ -10146,7 +10167,16 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
 
     let network = shared.network();
     let written = Arc::clone(&outbound.waiting);
-    let Ok(writer) = start_writing(id, writing_end, inbox, network, written, shared.nonce) else {
+    let let_go = Arc::clone(&outbound.let_go);
+    let Ok(writer) = start_writing(
+        id,
+        writing_end,
+        inbox,
+        network,
+        written,
+        let_go,
+        shared.nonce,
+    ) else {
         // The closure went with the error, and the socket half it held with
         // it. What is left is the table entry, which nothing would ever come
         // back to remove: the thread that does that is the one below, and it
@@ -10454,6 +10484,10 @@ fn read_loop(
         // does not listen was a stranger for life and its first block cost it
         // the connection and a refusal.
         let read = read_frame(&mut stream, network, most_from(peer.greeted));
+        if read.is_ok() && outbound.was_let_go() {
+            trace(shared.nonce, || format!("read {id}: let go of"));
+            break;
+        }
         trace(shared.nonce, || match &read {
             Ok(Framed::Frame(frame)) => format!(
                 "read {id}: a frame of {} bytes, tag {:?}",
@@ -14002,6 +14036,71 @@ mod peers_and_loops {
             on_time,
             TARGET_PEERS + 1,
             "no feeler was dialled once its period was up"
+        );
+    }
+
+    /// A connection this node has let go of ends at its next read, whatever
+    /// that read brought, and what it brought is not answered, with nothing
+    /// done to its socket.
+    ///
+    /// The mark alone, because the shutdown beside it is not something every
+    /// platform can be held to: on Windows it does not wake a read already
+    /// waiting.
+    #[test]
+    fn a_connection_let_go_of_ends_at_its_next_read_with_its_socket_left_alone() {
+        let node = quiet();
+        let greeting = hello(node.shared.network(), 0, 0, stranger(&node));
+        let mut line = Line::open(node, None);
+        line.send(&greeting);
+        assert!(line.hears(|message| matches!(message, Message::Welcome(_))));
+        line.node.shared.peers()[&line.id]
+            .outbound
+            .let_go
+            .store(true, Ordering::SeqCst);
+        line.send(&Message::Ping(1));
+        let ended = line.ends();
+        let answered = line
+            .said
+            .try_iter()
+            .any(|(message, _)| matches!(message, Message::Pong(1)));
+        drop(line.close());
+        assert!(
+            ended,
+            "a connection this node had let go of went on reading past the next frame"
+        );
+        assert!(
+            !answered,
+            "a connection this node had let go of answered what arrived after"
+        );
+    }
+
+    /// A writer that gives up on a peer marks the connection let go of, so
+    /// the reading loop leaves at its next read whether or not the writer's
+    /// own shutdown reached the socket.
+    ///
+    /// A socket already shut for writing is a write that fails at once on
+    /// every platform, which is what makes this one certain.
+    #[test]
+    fn a_writer_that_gives_up_marks_the_connection_let_go_of() {
+        let (near, _far) = a_socket();
+        near.shutdown(Shutdown::Write).unwrap();
+        let (sender, inbox) = mpsc::sync_channel(4);
+        let outbound = Outbound::new(sender);
+        let writer = start_writing(
+            0,
+            near,
+            inbox,
+            ConsensusParams::testnet().network,
+            Arc::clone(&outbound.waiting),
+            Arc::clone(&outbound.let_go),
+            0,
+        )
+        .unwrap();
+        outbound.try_send(Message::Ping(1)).unwrap();
+        writer.join().unwrap();
+        assert!(
+            outbound.was_let_go(),
+            "a writer that gave up left the connection for its reader to find out about"
         );
     }
 
