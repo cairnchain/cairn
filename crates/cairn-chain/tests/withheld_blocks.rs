@@ -895,7 +895,8 @@ fn a_withholding_miner_earns_what_the_papers_say() {
 
 /// The third table of the header, slow, even and fast: the share at which
 /// each lane's revenue crosses the share, as `the_tables_in_the_header`
-/// computes it.
+/// computes it. Measured figures: 0.318 only looks like the reciprocal of pi.
+#[allow(clippy::approx_constant)]
 const CROSSINGS: [(&str, [f64; 3]); 4] = [
     ("SM1", [0.333, 0.294, 0.186]),
     ("lead stubborn, real", [0.396, 0.323, 0.213]),
@@ -1175,9 +1176,8 @@ fn the_threat_model_quotes_the_tables_in_the_header() {
             "the threat model does not say \"{stated}\""
         );
     }
-    assert_eq!(
-        (least * 10.0).round(),
-        9.0,
+    assert!(
+        (0.85..0.95).contains(&least),
         "nine in ten no longer rounds the least deep gamma the header states, {least:.2}"
     );
 }

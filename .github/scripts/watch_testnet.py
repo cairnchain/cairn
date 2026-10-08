@@ -165,10 +165,10 @@ MEANING = {
     "far more power than the difficulty expects, and it is the opening move of a freeze: "
     "the difficulty overshoots and the chain stalls after it.",
     FLOOR: "A run of blocks was asked the least difficulty there is, where every hash is a "
-    "block. The chain stood far behind its schedule, after a large miner left or a stall of "
-    "over a day, and is catching up for nothing. A payment in these blocks has almost no work "
-    "above it until the chain is past them: count its confirmations from the first block "
-    "above the run.",
+    "block. The chain stood far behind its schedule, after a large miner left, a stall of over "
+    "a day, or an opening long after its first block, and caught up on blocks that cost "
+    "nothing. A payment in these blocks has almost no work above it until the chain is past "
+    "them: count its confirmations from the first block above the run.",
     SUPPLY: "Two counts of the money in existence that the explorer computes from "
     "different things do not agree, or its own totals do not add up. One of them is wrong.",
     HEALTH: "The explorer's node is reporting a state that is normally empty. Several of "
