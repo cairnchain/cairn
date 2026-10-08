@@ -646,7 +646,7 @@ fn specification() -> String {
 fn the_specification_says_the_drift_at_the_door_is_neither_remembered_nor_charged() {
     let specification = specification();
     for stated in [
-        "None of the first five refusals changes a verdict",
+        "None of the first six refusals changes a verdict",
         "so it is the one refusal here that two honest nodes can disagree about and that a \
          node reverses by waiting: a node MUST NOT remember it against the block, and SHOULD \
          NOT charge the peer that offered it.",
@@ -659,6 +659,11 @@ fn the_specification_says_the_drift_at_the_door_is_neither_remembered_nor_charge
     assert!(
         !specification.contains("None of these refusals changes a verdict"),
         "the specification still says the drift is charged as the switch would charge it"
+    );
+    assert!(
+        specification.contains("the block's encoded size against the size limit, and the drift"),
+        "the specification does not list the size among what the door asks, between the work \
+         and the clock, where the door asks it"
     );
 }
 

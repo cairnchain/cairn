@@ -717,6 +717,20 @@ fn the_side_store_lets_the_deepest_switch_the_rules_allow_happen() {
             "the README does not say `{said}`, which is what this build holds"
         );
     }
+    let specification = SPECIFICATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for said in [
+        format!("keeps {} MiB in memory", MAX_SIDE_BYTES >> 20),
+        format!("about {} in all", megabytes(ceiling)),
+        format!("a switch of {} blocks at the size limit", grouped(deepest)),
+    ] {
+        assert!(
+            specification.contains(&said),
+            "the specification does not say `{said}`, which is what this build holds"
+        );
+    }
 }
 
 /// A handover off a small chain that has run long enough for its hot set to
