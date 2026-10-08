@@ -1338,6 +1338,12 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
             // above the real one and refuse an honest run. Above the pinned
             // header that is always the case, since ninety headers lie below
             // it or the run starts at the first block.
+            //
+            // `from == 0` is `handover::check_recent`'s question, whether the
+            // run's first header is the first block, spelt as the height the
+            // run was asked from: the length check, the consecutive heights
+            // and the last header being the tip pin the first header of the
+            // tail to `from`, so the two agree.
             if index >= MEDIAN_TIME_WINDOW || from == 0 {
                 let below_it = start
                     .tail

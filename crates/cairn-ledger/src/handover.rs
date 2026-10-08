@@ -1066,6 +1066,13 @@ fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), Han
         // these and the rule read exactly them. Anywhere else a median taken
         // over part of the window is not the rule: over timestamps that do
         // not rise it can stand above the real one and refuse an honest run.
+        //
+        // The same gate in `sampling::check_the_tail` is spelt `from == 0`,
+        // the height a weighing's tail was asked from. The two agree: there
+        // the length check, the consecutive heights and the last header being
+        // the tip pin the tail's first header to `from`, so `from == 0` holds
+        // exactly when that header is the first block, which is what this
+        // asks.
         let whole = index >= MEDIAN_TIME_WINDOW
             || handover
                 .recent
