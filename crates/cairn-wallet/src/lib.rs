@@ -354,6 +354,9 @@ struct Draft {
     /// What a note of it falling out of the hot set before a block carries
     /// it can add to the floor.
     margin: Amount,
+    /// How many places notes of it falling can add, which `margin` prices.
+    /// Each adds `NOTE_WEIGHT` to what the pool weighs it at as well.
+    may_fall: usize,
 }
 
 /// What this key holds.
@@ -1870,6 +1873,7 @@ impl Wallet {
             floor: cairn_chain::fee_floor(bytes, places, &self.params),
             burn: self.params.burn_for(places).unwrap_or(Amount::MAX_MONEY),
             margin: margin_of(freed, transfer.outputs.len(), &self.params),
+            may_fall: may_fall(freed, transfer.outputs.len()),
             weight,
             bytes,
             spending,
@@ -3901,8 +3905,14 @@ fn take_until(sorted: &[Held], needed: Amount, most: usize) -> Option<(Vec<Held>
 /// block may carry, not only one a pool lets go of.
 fn margin_of(freed: usize, outputs: usize, rules: &ConsensusParams) -> Amount {
     rules
-        .burn_for(freed.min(outputs))
+        .burn_for(may_fall(freed, outputs))
         .unwrap_or(Amount::MAX_MONEY)
+}
+
+/// How many places notes of a spend falling out of the hot set can add: one
+/// for each hot note it frees, and never more than its outputs take.
+fn may_fall(freed: usize, outputs: usize) -> usize {
+    freed.min(outputs)
 }
 
 /// The `cheapest` rate a pool of `count` transfers taking `bytes` holds, when
@@ -3927,14 +3937,28 @@ fn crowded(count: usize, bytes: usize, cost: usize, cheapest: Option<u128>) -> O
 /// about three pebbles a unit against ten for filler that takes no place, and
 /// blocks kept full of that filler never carried it. A pool only has to hold
 /// more than a block for that, not be full, and nothing about this wallet's
-/// own pool says when it does. A payment and its change with a hot note among
-/// its notes carries a place's price in margin, more than the one place it
-/// can take weighs at the floor rate, so its quote does not move.
+/// own pool says when it does.
+///
+/// Both rates are asked at what the spend weighs and burns once every note
+/// of it that can fall has fallen, since that is what a pool ranks it at from
+/// then on. A note that falls adds a place, and the place adds its burn,
+/// which the margin pays, and `NOTE_WEIGHT` to the weight, which nothing paid
+/// while the rate was asked at the weight it had hot: a payment and its
+/// change quoted that way, whose note fell before a block carried it, ranked
+/// at about a fifth of the floor rate, below the filler the floor rate is
+/// there to outrank.
 fn asking(draft: &Draft, crowded: Option<u128>) -> Amount {
     let quoted = draft.floor.checked_add(draft.margin).unwrap_or(draft.floor);
     let rate = crowded.unwrap_or(0).max(cairn_chain::FLOOR_RATE);
-    let outrank = cairn_chain::fee_to_outrank(rate, draft.weight);
-    quoted.max(draft.burn.checked_add(outrank).unwrap_or(Amount::MAX_MONEY))
+    let weight = draft
+        .weight
+        .saturating_add(draft.may_fall.saturating_mul(cairn_chain::NOTE_WEIGHT));
+    let burn = draft
+        .burn
+        .checked_add(draft.margin)
+        .unwrap_or(Amount::MAX_MONEY);
+    let outrank = cairn_chain::fee_to_outrank(rate, weight);
+    quoted.max(burn.checked_add(outrank).unwrap_or(Amount::MAX_MONEY))
 }
 
 /// The most a spend pays to be carried before the wallet stops and asks.
@@ -4704,20 +4728,35 @@ mod tests {
             burn,
             weight: 150 + cairn_chain::NOTE_WEIGHT,
             margin: place,
+            may_fall: 1,
         };
+        assert!(
+            asking(&draft, None) >= draft.floor.checked_add(place).unwrap(),
+            "the quote is less than the floor and its margin"
+        );
+        // What a pool ranks it at once its note has fallen: a place more, at
+        // the place's burn and its weight.
+        let fallen_burn = burn.checked_add(place).unwrap();
+        let fallen_weight = draft.weight + cairn_chain::NOTE_WEIGHT;
         assert_eq!(
             asking(&draft, None),
-            draft.floor.checked_add(place).unwrap(),
-            "the quote is not the floor and its margin"
+            fallen_burn
+                .checked_add(cairn_chain::fee_to_outrank(
+                    cairn_chain::FLOOR_RATE,
+                    fallen_weight
+                ))
+                .unwrap(),
+            "the quote does not outrank filler at the floor once its note has fallen"
         );
         // A full pool whose cheapest pays far more per unit than this would.
         let dear = u128::from(u64::MAX >> 20);
         assert_eq!(
             asking(&draft, Some(dear)),
-            burn.checked_add(cairn_chain::fee_to_outrank(dear, draft.weight))
+            fallen_burn
+                .checked_add(cairn_chain::fee_to_outrank(dear, fallen_weight))
                 .unwrap(),
             "a quote into a full pool does not outrank the cheapest it holds, \
-             once the burn no miner keeps is paid"
+             once the burn no miner keeps is paid and its note has fallen"
         );
         assert_eq!(
             asking(&draft, Some(0)),
@@ -4755,7 +4794,8 @@ mod tests {
 
     /// The quote for a blank fee leaves a miner more for each unit of weight
     /// than filler taking no place at the floor does, for a payment from
-    /// fallen notes, and a payment from a hot note is quoted what it was.
+    /// fallen notes, and for a payment from a hot note once that note has
+    /// fallen too.
     ///
     /// The two shapes are lab D's (R15 and R21, in
     /// `tests/spam_at_the_floor_and_stale_proofs.rs`): one note with change,
@@ -4764,6 +4804,12 @@ mod tests {
     /// pebbles, which leaves its miner 4 670 for a weight of 1 491, and blocks
     /// kept full at the floor never carried it. Past the floor rate its miner
     /// keeps 14 911, ten pebbles a unit and one over.
+    ///
+    /// AUDIT, repaired (8 October, 04-F2): the hot one was quoted 14 230, its
+    /// floor and a place's price. Its note falling adds the place's burn, which
+    /// that price pays, and 512 to its weight, which nothing paid: it then left
+    /// its miner 2 230 for a weight of 1 247, about a fifth of what filler at
+    /// the floor leaves. Asked at that weight it is quoted 24 471.
     #[test]
     fn a_blank_fee_from_fallen_notes_outranks_filler_at_the_floor() {
         let place = cairn_ledger::validation::PLACE_PRICE;
@@ -4776,6 +4822,7 @@ mod tests {
             burn: rules.burn_for(places).unwrap(),
             weight: bytes + places * cairn_chain::NOTE_WEIGHT,
             margin: margin_of(freed, 2, &rules),
+            may_fall: super::may_fall(freed, 2),
         };
 
         let fallen = shaped(467, 2, 0);
@@ -4797,11 +4844,19 @@ mod tests {
 
         let hot = shaped(223, 1, 1);
         assert_eq!(hot.floor.as_pebbles(), 8_230, "fixture: lab D's floor");
-        assert_eq!(
-            asking(&hot, None).as_pebbles(),
-            14_230,
-            "a payment from a hot note is quoted something other than its floor and \
-             a place's price"
+        let quote = asking(&hot, None);
+        assert_eq!(quote.as_pebbles(), 24_471);
+        assert!(
+            quote >= hot.floor.checked_add(hot.margin).unwrap(),
+            "a payment from a hot note is quoted less than its floor and a place's price"
+        );
+        let fell = shaped(223, 2, 0);
+        let kept = quote.checked_sub(fell.burn).unwrap().as_pebbles();
+        assert!(
+            kept > fell.weight as u64 * cairn_chain::MIN_FEE_PER_WEIGHT,
+            "a quote of {quote} for a payment from a hot note leaves its miner {kept} for a \
+             weight of {} once the note has fallen, no more a unit than filler at the floor",
+            fell.weight
         );
     }
 
