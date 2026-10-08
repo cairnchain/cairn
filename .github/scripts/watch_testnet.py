@@ -2,7 +2,7 @@
 """Watches the public test network and keeps one GitHub issue open per kind of alarm.
 
 Run by `.github/workflows/watch-testnet.yml` every fifteen minutes. It reads the
-explorer's public JSON API and knocks on the seed's port, runs seven checks,
+explorer's public JSON API and knocks on the seed's port, runs eight checks,
 and then makes the open issues say what the checks found: an issue is opened
 when an alarm starts, commented when its figures change materially, and closed
 with a comment when it clears.
@@ -51,6 +51,14 @@ DIFFICULTY_FALL = 2
 FAST_RUN_BLOCKS = 20
 # That many blocks inside this many target times is four times schedule or better (5 min at 60 s).
 FAST_RUN_SPAN_IN_TARGETS = 5
+# The difficulty a chain can fall to and no further (pow.rs `MIN_DIFFICULTY`): every hash is a block.
+FLOOR_DIFFICULTY = 1
+# Honest mining never asks the floor here: only a chain about log2(D) - 1 half lives behind its
+# schedule is asked it, 27 hours at testnet's 2^28, which is a departure's debt being repaid, a
+# stall of over a day, or a network opened long after its first block. The shortest run the open
+# questions measure is a median of about twenty (a departure from 2 048 times), so ten in a row
+# sees it with room, and is not a stray block at the floor's edge as the chain climbs back.
+FLOOR_RUN_BLOCKS = 10
 # Blocks asked per run: the explorer's largest page, two hours at 60 s, enough to bridge a late run.
 LISTED_BLOCKS = 128
 # A reorganisation is an event, so its issue is held open this long (the span the listing covers).
@@ -108,17 +116,18 @@ NODE_GROWTH = ("turnedAway",)
 NODE_READINGS = ("writtenThrough", "opening")
 
 # ---------------------------------------------------------------------------
-# The seven alarms.
+# The eight alarms.
 # ---------------------------------------------------------------------------
 
 STALE = "stale-tip"
 SWING = "difficulty-swing"
 FAST = "fast-run"
+FLOOR = "floor-run"
 SUPPLY = "supply-mismatch"
 HEALTH = "node-health"
 REORG = "reorg"
 UNREACHABLE = "unreachable"
-KINDS = (STALE, SWING, FAST, SUPPLY, HEALTH, REORG, UNREACHABLE)
+KINDS = (STALE, SWING, FAST, FLOOR, SUPPLY, HEALTH, REORG, UNREACHABLE)
 
 LABEL = "testnet-alarm"
 LABEL_COLOR = "B60205"
@@ -128,6 +137,7 @@ CHECK_NAMES = {
     STALE: "tip age",
     SWING: "difficulty",
     FAST: "block pace",
+    FLOOR: "difficulty floor",
     SUPPLY: "supply figures",
     HEALTH: "node health",
     REORG: "reorganisation",
@@ -138,6 +148,7 @@ TITLES = {
     STALE: "testnet alarm: the tip is stale",
     SWING: "testnet alarm: the difficulty has swung",
     FAST: "testnet alarm: a run of blocks came far faster than schedule",
+    FLOOR: "testnet alarm: a run of blocks was mined at the difficulty floor",
     SUPPLY: "testnet alarm: the explorer's supply figures disagree",
     HEALTH: "testnet alarm: the explorer's node reports a fault",
     REORG: "testnet alarm: blocks seen earlier were replaced",
@@ -153,6 +164,11 @@ MEANING = {
     FAST: "A run of blocks arrived much faster than the schedule. That is a miner with "
     "far more power than the difficulty expects, and it is the opening move of a freeze: "
     "the difficulty overshoots and the chain stalls after it.",
+    FLOOR: "A run of blocks was asked the least difficulty there is, where every hash is a "
+    "block. The chain stood far behind its schedule, after a large miner left, a stall of over "
+    "a day, or an opening long after its first block, and caught up on blocks that cost "
+    "nothing. A payment in these blocks has almost no work above it until the chain is past "
+    "them: count its confirmations from the first block above the run.",
     SUPPLY: "Two counts of the money in existence that the explorer computes from "
     "different things do not agree, or its own totals do not add up. One of them is wrong.",
     HEALTH: "The explorer's node is reporting a state that is normally empty. Several of "
@@ -333,7 +349,7 @@ def target_seconds(params) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The seven checks. Pure: they take what was read and return a verdict.
+# The eight checks. Pure: they take what was read and return a verdict.
 # ---------------------------------------------------------------------------
 
 
@@ -461,6 +477,49 @@ def check_fast_run(
             f"alarm threshold: {run} blocks inside {span_targets} target block times "
             f"({duration(limit)})",
         ),
+    )
+
+
+def check_floor_run(blocks, run: int = FLOOR_RUN_BLOCKS) -> Verdict:
+    """The longest run of consecutive listed blocks asked the floor.
+
+    Not the difficulty swing: by the time a chain reaches the floor the fall is
+    over, and a run at difficulty 1 swings nothing. Nor the block pace, which
+    fires only while the run is mined in minutes and says nothing of the floor.
+    """
+    longest = current = None
+    for block in blocks:
+        if block.difficulty > FLOOR_DIFFICULTY:
+            current = None
+            continue
+        if current is not None and block.height == current[1] + 1:
+            current = (current[0], block.height, current[2] + 1, current[3], block.timestamp)
+        else:
+            current = (block.height, block.height, 1, block.timestamp, block.timestamp)
+        if longest is None or current[2] > longest[2]:
+            longest = current
+    if longest is None:
+        return Verdict(FLOOR, OK, f"no listed block is at the floor (alarm at {run} in a row)")
+    first, last, count, began, ended = longest
+    if count < run:
+        return Verdict(
+            FLOOR,
+            OK,
+            f"at most {count} listed blocks in a row at the floor (alarm at {run})",
+        )
+    facts = [
+        f"heights {first} to {last}, {count} blocks, were asked difficulty "
+        f"{FLOOR_DIFFICULTY}, dated over {duration(max(0, ended - began))}",
+    ]
+    if first == blocks[0].height:
+        facts.append("the listing begins inside the run, so it may have begun lower")
+    facts.append(f"alarm threshold: {run} consecutive blocks at the floor")
+    return Verdict(
+        FLOOR,
+        ALARM,
+        f"{count} listed blocks in a row at the floor, heights {first} to {last}",
+        level=doublings(count, run),
+        facts=tuple(facts),
     )
 
 
@@ -1134,7 +1193,7 @@ def analyse(seen: Observed, state: dict, now: int) -> Analysis:
     owners_new, owners_window = [], []
 
     if seen.status is None or seen.blocks is None:
-        for kind in (STALE, SWING, FAST, SUPPLY, HEALTH, REORG):
+        for kind in (STALE, SWING, FAST, FLOOR, SUPPLY, HEALTH, REORG):
             verdicts.append(Verdict(kind, UNKNOWN, "the explorer could not be read"))
         verdicts.append(reach)
         return Analysis(verdicts, headline, [], [], notes, new_state)
@@ -1178,6 +1237,7 @@ def analyse(seen: Observed, state: dict, now: int) -> Analysis:
     )
     verdicts.append(check_difficulty(blocks))
     verdicts.append(check_fast_run(blocks, target))
+    verdicts.append(check_floor_run(blocks))
     judged = seen.confirmed_status if seen.confirmed_status is not None else status
     verdicts.append(check_supply(judged))
     health, unknown_fields = check_node_health(dig(status, "node"), state.get("turned_away"))
