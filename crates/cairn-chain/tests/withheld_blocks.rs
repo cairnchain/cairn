@@ -4,43 +4,51 @@
 //! Lab scenario R20 (attacks A04 and A05 of the 3 October catalogue). A miner
 //! with less than half of the work keeps the blocks it finds to itself and
 //! releases them to orphan honest ones. The threat model says this is
-//! untreated, "as on every Nakamoto chain", that it pays from a third of the
-//! work upwards, and that the one lever taken is the tie rule: a branch of
-//! equal work does not displace the one a node already follows. Eyal and
-//! Sirer give the share a withholding miner earns as a function of its own
-//! share `alpha` and of `gamma`, the part of the honest work that ends up
-//! mining on the withholder's block when two blocks race at one height; it
-//! pays above `alpha` once `alpha > (1 - gamma) / (3 - 2 gamma)`, a third at
-//! `gamma = 0` and a quarter at `gamma = 1/2`.
+//! untreated, "as on every Nakamoto chain", and that the one lever taken is
+//! the tie rule: a branch of equal work does not displace the one a node
+//! already follows, and nor does a rival tip of its height carrying no more
+//! than half the followed tip's difficulty in extra work. Eyal and Sirer give
+//! the share a withholding miner earns as a function of its own share `alpha`
+//! and of `gamma`, the part of the honest work that ends up mining on the
+//! withholder's block when two blocks race at one height; it pays above
+//! `alpha` once `alpha > (1 - gamma) / (3 - 2 gamma)`, a third at `gamma = 0`
+//! and a quarter at `gamma = 1/2`.
 //!
 //! Nothing here is a model of the fork choice. Every honest node is a real
 //! [`ChainStore`], every block is assembled, mined and validated, and what a
-//! node follows is whatever `add_block` decided. Around them sits a small
-//! discrete event simulation: each miner finds blocks as a Poisson process at
-//! a rate set by its share and by the difficulty its own tip asks, blocks
-//! travel with exponential delays, and the withholder follows a strategy from
-//! the papers, written by length as they are.
+//! node follows is whatever `add_block` decided. The withholder's view of the
+//! public chain is a real store as well, so it weighs branches as every node
+//! does. Around them sits a small discrete event simulation: each miner finds
+//! blocks as a Poisson process at a rate set by its share and by the
+//! difficulty its own tip asks, blocks travel with exponential delays, and the
+//! withholder follows a strategy from the papers, written by length as they
+//! are.
 //!
 //! **What was measured.** Four honest nodes of equal share, a 60 second
 //! block, honest blocks two seconds apart on average, and three ways the
 //! withholder can be placed: slow (it hears honest blocks in two seconds and
 //! its own reach honest nodes in six), even (one and one), and fast (a tenth
-//! of a second each way). Eight thousand blocks a cell, one seed; run with
-//! `cargo test -p cairn-chain --test withheld_blocks --release -- --ignored
-//! --nocapture`, about seventeen minutes on ten cores.
+//! of a second each way). Eight thousand blocks a cell, on the eleven shares
+//! of the testnet-9 study, every cell from four seeds (the control from one),
+//! revenue averaged and races pooled; run with `cargo test -p cairn-chain
+//! --test withheld_blocks --release -- --ignored --nocapture`, an hour and a
+//! half on ten cores shared with other work.
 //!
 //! ```text
 //! revenue share of the withholder (main chain blocks it mined), SM1
 //!         slow                 even                 fast
 //! alpha   gamma share  ES      gamma share  ES      gamma share  ES
-//! 0.10    0.11  0.043  0.044   0.35  0.060  0.061   0.66  0.085  0.084
-//! 0.20    0.08  0.138  0.138   0.32  0.174  0.163   0.65  0.199  0.198
-//! 0.25    0.08  0.203  0.203   0.34  0.231  0.232   0.65  0.264  0.267
-//! 0.30    0.09  0.280  0.283   0.33  0.304  0.308   0.68  0.345  0.346
-//! 0.33    0.10  0.330  0.337   0.32  0.368  0.360   0.67  0.385  0.396
-//! 0.35    0.09  0.365  0.375   0.33  0.413  0.399   0.68  0.425  0.434
-//! 0.40    0.08  0.490  0.490   0.32  0.504  0.511   0.66  0.515  0.539
-//! 0.45    0.11  0.622  0.658   0.32  0.665  0.670   0.66  0.669  0.690
+//! 0.10    0.09  0.041  0.043   0.31  0.057  0.059   0.67  0.086  0.085
+//! 0.15    0.09  0.079  0.085   0.33  0.109  0.107   0.67  0.138  0.139
+//! 0.20    0.09  0.134  0.140   0.34  0.167  0.165   0.68  0.205  0.201
+//! 0.25    0.09  0.193  0.205   0.33  0.235  0.231   0.67  0.267  0.269
+//! 0.28    0.09  0.243  0.250   0.33  0.268  0.276   0.68  0.313  0.314
+//! 0.30    0.09  0.269  0.283   0.33  0.306  0.309   0.67  0.344  0.345
+//! 0.33    0.09  0.328  0.336   0.33  0.355  0.361   0.68  0.394  0.397
+//! 0.35    0.08  0.361  0.375   0.34  0.406  0.400   0.67  0.430  0.433
+//! 0.38    0.09  0.425  0.441   0.32  0.450  0.462   0.68  0.498  0.495
+//! 0.40    0.10  0.482  0.492   0.33  0.509  0.511   0.67  0.534  0.539
+//! 0.45    0.09  0.636  0.657   0.33  0.650  0.671   0.66  0.683  0.690
 //! ```
 //!
 //! ```text
@@ -48,58 +56,72 @@
 //! the real retarget, then with every block weighing one
 //!         slow                     even                     fast
 //! alpha   real        flat         real        flat         real        flat
-//! 0.10    0.038 0.87  0.025 0.11   0.062 0.94  0.059 0.53   0.085 0.97  0.083 0.71
-//! 0.20    0.135 0.87  0.093 0.11   0.166 1.00  0.141 0.34   0.206 1.00  0.206 0.66
-//! 0.25    0.219 0.89  0.137 0.07   0.237 0.98  0.211 0.40   0.277 0.99  0.262 0.69
-//! 0.30    0.281 0.88  0.198 0.10   0.322 0.99  0.279 0.32   0.364 1.00  0.353 0.69
-//! 0.33    0.363 0.89  0.237 0.10   0.385 0.98  0.349 0.35   0.436 1.00  0.409 0.65
-//! 0.35    0.398 0.88  0.292 0.09   0.437 0.99  0.384 0.35   0.463 1.00  0.445 0.65
-//! 0.40    0.544 0.90  0.424 0.10   0.578 0.98  0.499 0.33   0.604 1.00  0.566 0.65
-//! 0.45    0.695 0.90  0.596 0.09   0.708 0.99  0.696 0.33   0.714 1.00  0.738 0.69
+//! 0.10    0.027 0.12  0.027 0.12   0.051 0.36  0.053 0.37   0.083 0.64  0.083 0.69
+//! 0.15    0.058 0.10  0.057 0.10   0.092 0.31  0.093 0.32   0.139 0.70  0.137 0.70
+//! 0.20    0.090 0.09  0.095 0.09   0.142 0.34  0.144 0.34   0.194 0.64  0.201 0.65
+//! 0.25    0.141 0.09  0.141 0.09   0.209 0.33  0.208 0.34   0.266 0.66  0.266 0.69
+//! 0.28    0.173 0.09  0.176 0.09   0.245 0.32  0.252 0.33   0.315 0.67  0.316 0.68
+//! 0.30    0.203 0.09  0.205 0.10   0.279 0.33  0.280 0.33   0.358 0.67  0.360 0.67
+//! 0.33    0.250 0.10  0.244 0.09   0.337 0.32  0.343 0.33   0.420 0.65  0.420 0.67
+//! 0.35    0.292 0.11  0.290 0.09   0.381 0.33  0.383 0.33   0.466 0.67  0.455 0.67
+//! 0.38    0.354 0.11  0.339 0.09   0.453 0.33  0.457 0.33   0.524 0.66  0.543 0.68
+//! 0.40    0.407 0.12  0.417 0.09   0.507 0.34  0.503 0.33   0.564 0.67  0.573 0.66
+//! 0.45    0.600 0.16  0.581 0.09   0.665 0.35  0.713 0.34   0.737 0.67  0.740 0.69
 //! ```
 //!
 //! ```text
-//! the first share measured that earns more than itself
-//!                              slow   even   fast
-//! Eyal and Sirer at gamma      0.32   0.29   0.20
-//! SM1                          0.35   0.30   0.25
-//! lead stubborn, real          0.33   0.30   0.20
-//! lead stubborn, flat          0.40   0.33   0.20
+//! the share at which revenue crosses the share, linear between grid points
+//!                              slow    even    fast
+//! Eyal and Sirer at gamma      0.323   0.286   0.199
+//! SM1                          0.333   0.294   0.186
+//! lead stubborn, real          0.396   0.323   0.213
+//! lead stubborn, flat          0.394   0.318   0.196
+//! best of the two, real        0.333   0.294   0.186
+//! best of the two, before      0.301   0.266   0.177
 //! ```
 //!
 //! `ES` is Eyal and Sirer's formula at the gamma measured in the same run,
 //! counted over races at one height only; their threshold is a third at
-//! gamma 0, a quarter at gamma 1/2 and nought at gamma 1. Deep gamma is the
+//! gamma 0, a quarter at gamma 1/2 and nought at gamma 1, and its first line
+//! above is taken at the gamma measured here, 0.09 / 0.33 / 0.67. Deep gamma is the
 //! same count over matches two or more blocks deep. The honest control
-//! (`alpha` mined and published at once) earned within a point of `alpha` in
-//! every cell.
+//! (`alpha` mined and published at once) earned within a hundredth of `alpha`
+//! in every cell. The last line is the study's figure for the fork choice
+//! before the band (`sims/q1-results.txt` of the testnet-9 study, sixteen
+//! seeds), which this file measured as 0.33 / 0.30 / 0.20 from one seed on a
+//! coarser grid; the study puts the band at 0.333 / 0.284 / 0.181.
 //!
 //! **What it says.** Selfish mining behaves here as the papers say it does on
 //! any chain, and the tie rule does what the threat model claims for it and
-//! no more: at one height the two blocks carry the same work, since the
+//! no more. At one height the two blocks carry the same work, since the
 //! retarget reads only the parent, so the race goes to whichever block a node
 //! heard first, and gamma is set by where the withholder sits in the network,
-//! not by the rule. SM1 earns within noise of the formula in every cell. The
-//! threat model's "from a third" is the badly placed withholder's figure; one
-//! with gamma near two thirds profits from a quarter of the work, and breaks
-//! even at a fifth.
+//! not by the rule. SM1 earns within noise of the formula in every cell and
+//! sets the threshold: a third for a withholder that hears and speaks late,
+//! under three tenths for one as quick as the honest nodes, under a fifth for
+//! one that reaches them first.
 //!
-//! One thing is Cairn's own. Two branches of the same length that fork two or
-//! more blocks deep do not carry the same work: each block's difficulty
-//! follows its parent's timestamp, so the branch whose blocks are dated
-//! earlier asks more of the blocks above them and is heavier. Equal length is
-//! a tie only at depth one. A withholder that matches rather than overrides,
-//! as lead stubbornness does, matches with blocks it found earlier, and wins
-//! those matches by work rather than by arrival: nine in ten even where it
-//! hears and speaks late, where with every block weighing one it wins one in
-//! ten. Lead stubbornness then pays from a third of the work where SM1 needs
-//! more, against two fifths were work only length, and from a third up it
-//! out-earns SM1 in every placement. The deep matches it loses fall from
-//! about one in ten to nearly none as its blocks reach honest nodes faster,
-//! which is what losing to honest blocks found before the match arrived
-//! looks like.
-//! `a_race_two_blocks_deep_goes_to_the_branch_dated_earlier` holds the fact;
-//! the second table measures what it is worth.
+//! Two branches of the same length that fork two or more blocks deep do not
+//! carry the same work. Each block's difficulty follows its parent's
+//! timestamp, so the branch whose blocks are dated earlier asks more of the
+//! blocks above them and is heavier, by a few hundredths of a block. That is
+//! inside the band, so such a match is a tie and arrival settles it, as at
+//! one height: the deep gamma of lead stubbornness on the real retarget is the
+//! flat lane's, a tenth, a third and two thirds by placement, and so, within
+//! noise, are its revenue and its threshold. It pays from a higher share than
+//! SM1 in every placement; past two fifths of the work in the fast placement
+//! it earns more than SM1 does, which is the papers' own finding for a
+//! withholder that wins two races in three, and owes nothing to the dates.
+//!
+//! Before the band the fork choice switched on any surplus. A withholder that
+//! matches rather than overrides matches with blocks it found, and dated,
+//! earlier, so it won those matches by work rather than by arrival: deep gamma
+//! 0.87 to 1.00 in every placement, against a tenth to two thirds when every
+//! block weighed one. Lead stubbornness then paid from 0.30 / 0.27 / 0.18 of
+//! the work, at or below SM1 and below the papers' figure at the measured
+//! gamma, and every miner gained by dating its blocks early (T8-4 of the
+//! testnet-8 findings). `a_race_two_blocks_deep_goes_to_the_branch_heard_first` holds
+//! the fact the band turns on; the tables measure what it is worth.
 
 #![allow(
     clippy::unwrap_used,
@@ -116,6 +138,8 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt::Write;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Mutex;
 
 use cairn_chain::{ChainError, ChainStore};
 use cairn_crypto::{PublicKey, SecretKey};
@@ -188,22 +212,24 @@ fn stamp(state: &LedgerState, clock: u64) -> u64 {
 // The fact the measurement turns on.
 // ---------------------------------------------------------------------------
 
-/// **A race two blocks deep goes to the branch dated earlier, whoever saw it
-/// first.**
+/// **A race two blocks deep goes to the branch heard first, as a race at one
+/// height does.**
 ///
-/// At one height the tie rule decides: both blocks sit on one parent, the
-/// retarget reads only the parent, so both carry the same difficulty and a
-/// node keeps the one it heard first. One block further on it no longer
-/// does. The second block of each branch is asked a difficulty set by the
-/// first block's timestamp, and the branch whose first block is dated earlier
-/// stands further ahead of the schedule, is asked more, and is heavier. A
-/// node that followed the later branch switches.
+/// The two branches do not carry the same work. Both first blocks sit on one
+/// parent and are asked the same difficulty, but the second block of each is
+/// asked a difficulty set by the first block's timestamp, and the branch
+/// whose first block is dated earlier stands further ahead of the schedule,
+/// is asked more, and is heavier. Under a fork choice that switched on any
+/// surplus, a node that followed the later branch switched to the earlier
+/// one, and a withholder matching with blocks it had found, and so dated,
+/// before the honest ones won such matches by its dates wherever it sat in
+/// the network (T8-4).
 ///
-/// This is what lets a withholder that matches two blocks deep win the match
-/// outright: the blocks it kept were found, and dated, before the honest ones
-/// they race.
+/// The two tips stand at one height and the surplus is a few hundredths of a
+/// block, inside the half of the tip's difficulty that makes two tips of one
+/// height a tie, so each node keeps the branch it heard first.
 #[test]
-fn a_race_two_blocks_deep_goes_to_the_branch_dated_earlier() {
+fn a_race_two_blocks_deep_goes_to_the_branch_heard_first() {
     let params = rules();
     let mut state = LedgerState::new();
     let mut base = Vec::new();
@@ -230,32 +256,33 @@ fn a_race_two_blocks_deep_goes_to_the_branch_dated_earlier() {
         early_first.header.total_work, late_first.header.total_work,
         "one block deep the two branches carry the same work"
     );
+    let surplus = early_second.header.total_work - late_second.header.total_work;
+    let band = u128::from(late_second.header.difficulty) / 2;
     assert!(
-        early_second.header.total_work > late_second.header.total_work,
-        "two blocks deep the branch dated earlier is heavier: {} against {}",
-        early_second.header.total_work,
-        late_second.header.total_work
+        surplus > 0 && surplus <= band,
+        "two blocks deep the branch dated earlier is heavier, by {surplus}, and within \
+         half the tip's difficulty, {band}"
     );
 
-    // A node that hears the late branch first, block by block.
-    let mut node = ChainStore::new(params);
-    for block in &base {
-        node.add_block(block.clone(), now).unwrap();
-    }
-    node.add_block(late_first.clone(), now).unwrap();
-    node.add_block(early_first.clone(), now).unwrap();
-    assert_eq!(
-        node.tip(),
-        Some(late_first.id()),
-        "at one height the block heard first is kept"
-    );
-    node.add_block(late_second.clone(), now).unwrap();
-    node.add_block(early_second.clone(), now).unwrap();
-    assert_eq!(
-        node.tip(),
-        Some(early_second.id()),
-        "at two heights the branch dated earlier wins, though it was heard last"
-    );
+    // Two nodes, each hearing one branch first, block by block.
+    let heard = |first: [&Block; 2], then: [&Block; 2]| {
+        let mut node = ChainStore::new(params);
+        for block in &base {
+            node.add_block(block.clone(), now).unwrap();
+        }
+        for at in 0..2 {
+            node.add_block(first[at].clone(), now).unwrap();
+            node.add_block(then[at].clone(), now).unwrap();
+            assert_eq!(
+                node.tip(),
+                Some(first[at].id()),
+                "at depth {} the block heard first is kept",
+                at + 1
+            );
+        }
+    };
+    heard([&late_first, &late_second], [&early_first, &early_second]);
+    heard([&early_first, &early_second], [&late_first, &late_second]);
 }
 
 // ---------------------------------------------------------------------------
@@ -800,9 +827,10 @@ fn simulate(run: Run) -> Outcome {
 ///
 /// The control publishes at once and earns its share. SM1 with nearly half of
 /// the work earns well over it, and with a tenth earns under it: the curve the
-/// papers draw, crossing where they say. And the deep matches, settled by
-/// work rather than by arrival, go to the withholder almost every time on the
-/// real retarget, and stop doing so when every block weighs the same.
+/// papers draw, crossing where they say. And the deep matches are settled by
+/// arrival on the real retarget as they are when every block weighs the same,
+/// so a withholder that hears late and speaks late loses most of them. Before
+/// the band they were settled by work, and went its way nine times in ten.
 #[test]
 fn a_withholding_miner_earns_what_the_papers_say() {
     let run = |share, strategy, opening| {
@@ -851,10 +879,10 @@ fn a_withholding_miner_earns_what_the_papers_say() {
     let timed_deep = timed.deep_gamma().expect("deep matches happened");
     let flat_deep = flat.deep_gamma().expect("deep matches happened");
     assert!(
-        timed_deep > 0.75,
-        "on the real retarget a match two or more blocks deep is won by the \
-         blocks dated earlier, which are the withholder's: {timed_deep:.2} of \
-         {} went its way",
+        timed_deep < 0.5,
+        "on the real retarget a match two or more blocks deep is a tie, the \
+         blocks dated earlier being heavier by less than half a block, so \
+         arrival settles it: {timed_deep:.2} of {} went the withholder's way",
         timed.deep_races
     );
     assert!(
@@ -865,71 +893,113 @@ fn a_withholding_miner_earns_what_the_papers_say() {
     );
 }
 
+/// The share at which revenue crosses the miner's own share, between the
+/// two grid points either side of the last crossing from under to over.
+fn crossing(points: &[(f64, f64)]) -> Option<f64> {
+    points
+        .windows(2)
+        .filter_map(|pair| {
+            let ((low, under), (high, over)) = (pair[0], pair[1]);
+            (under <= 0.0 && over > 0.0).then(|| low + (high - low) * -under / (over - under))
+        })
+        .next_back()
+}
+
 /// The tables at the top of this file.
 ///
-/// Every cell on a thread of its own, from one seed, so the figures come back
-/// the same on a rerun on the same platform.
+/// Every cell from `SEEDS` seeds, on a pool of one thread a core, so the
+/// figures come back the same on a rerun on the same platform. The control
+/// is run from the first seed alone: what it shows is that nothing in the
+/// simulation pays a miner that withholds nothing.
 #[test]
-#[ignore = "about twenty minutes; fills the tables in the header"]
+#[ignore = "about an hour and a half on ten cores; fills the tables in the header"]
 fn the_tables_in_the_header() {
     const BLOCKS: u64 = 8_000;
-    let shares = [0.1, 0.2, 0.25, 0.3, 0.33, 0.35, 0.4, 0.45];
+    const SEEDS: u64 = 4;
+    let shares = [
+        0.10, 0.15, 0.20, 0.25, 0.28, 0.30, 0.33, 0.35, 0.38, 0.40, 0.45,
+    ];
     let networks = [SLOW, EVEN, FAST];
-    let cells: Vec<(f64, Strategy, Network, u64)> = shares
-        .iter()
-        .flat_map(|share| {
-            networks.iter().flat_map(move |network| {
-                [
-                    (*share, Strategy::Honest, *network, TIMED),
-                    (*share, Strategy::Selfish, *network, TIMED),
-                    (*share, Strategy::LeadStubborn, *network, TIMED),
-                    (*share, Strategy::LeadStubborn, *network, FLAT),
-                ]
-            })
-        })
-        .collect();
-    let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
-        let handles: Vec<_> = cells
-            .iter()
-            .map(|(share, strategy, network, opening)| {
-                scope.spawn(move || {
-                    simulate(Run {
+    let lanes = [
+        (Strategy::Selfish, TIMED),
+        (Strategy::LeadStubborn, TIMED),
+        (Strategy::LeadStubborn, FLAT),
+        (Strategy::Honest, TIMED),
+    ];
+    let mut cells: Vec<Run> = Vec::new();
+    for share in shares.iter().rev() {
+        for network in networks {
+            for (strategy, opening) in lanes {
+                let seeds = if strategy == Strategy::Honest {
+                    1
+                } else {
+                    SEEDS
+                };
+                for seed in 0..seeds {
+                    cells.push(Run {
                         share: *share,
-                        strategy: *strategy,
-                        network: *network,
+                        strategy,
+                        network,
                         blocks: BLOCKS,
-                        seed: 20,
-                        opening: *opening,
-                    })
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect()
+                        seed: 20 + seed,
+                        opening,
+                    });
+                }
+            }
+        }
+    }
+    let next = AtomicUsize::new(0);
+    let done: Mutex<Vec<Option<Outcome>>> = Mutex::new(vec![None; cells.len()]);
+    let workers = std::thread::available_parallelism().map_or(4, usize::from);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let at = next.fetch_add(1, AtomicOrdering::Relaxed);
+                let Some(run) = cells.get(at) else {
+                    break;
+                };
+                let outcome = simulate(*run);
+                done.lock().unwrap()[at] = Some(outcome);
+            });
+        }
     });
+    let done: Vec<Outcome> = done.into_inner().unwrap().into_iter().flatten().collect();
+    assert_eq!(done.len(), cells.len(), "every cell ran");
+
+    // The seeds of one cell together: revenue averaged, races pooled.
     let find = |share: f64, strategy, network: &str, opening| {
-        cells
+        let runs: Vec<&Outcome> = cells
             .iter()
-            .zip(&outcomes)
-            .find(|((s, st, n, o), _)| {
-                (*s - share).abs() < 1e-9 && *st == strategy && n.name == network && *o == opening
+            .zip(&done)
+            .filter(|(run, _)| {
+                (run.share - share).abs() < 1e-9
+                    && run.strategy == strategy
+                    && run.network.name == network
+                    && run.opening == opening
             })
-            .map(|(_, outcome)| *outcome)
-            .unwrap()
+            .map(|(_, outcome)| outcome)
+            .collect();
+        let revenue = runs.iter().map(|outcome| outcome.revenue()).sum::<f64>() / runs.len() as f64;
+        let mut pooled = Outcome::default();
+        for outcome in &runs {
+            pooled.shallow_races += outcome.shallow_races;
+            pooled.shallow_to_withholder += outcome.shallow_to_withholder;
+            pooled.deep_races += outcome.deep_races;
+            pooled.deep_to_withholder += outcome.deep_to_withholder;
+        }
+        (revenue, pooled)
     };
 
     println!("\nSM1: alpha, then per network gamma, share, Eyal-Sirer at that gamma");
     for share in shares {
         let mut line = format!("{share:<5}");
         for network in &networks {
-            let outcome = find(share, Strategy::Selfish, network.name, TIMED);
+            let (revenue, outcome) = find(share, Strategy::Selfish, network.name, TIMED);
             write!(
                 line,
                 "   {:.2}  {:.3}  {:.3}",
                 outcome.gamma(),
-                outcome.revenue(),
+                revenue,
                 eyal_sirer(share, outcome.gamma())
             )
             .unwrap();
@@ -941,15 +1011,15 @@ fn the_tables_in_the_header() {
     for share in shares {
         let mut line = format!("{share:<5}");
         for network in &networks {
-            let timed = find(share, Strategy::LeadStubborn, network.name, TIMED);
-            let flat = find(share, Strategy::LeadStubborn, network.name, FLAT);
+            let (timed, timed_races) = find(share, Strategy::LeadStubborn, network.name, TIMED);
+            let (flat, flat_races) = find(share, Strategy::LeadStubborn, network.name, FLAT);
             write!(
                 line,
                 "   {:.3} {:.2}  {:.3} {:.2}",
-                timed.revenue(),
-                timed.deep_gamma().unwrap_or(f64::NAN),
-                flat.revenue(),
-                flat.deep_gamma().unwrap_or(f64::NAN)
+                timed,
+                timed_races.deep_gamma().unwrap_or(f64::NAN),
+                flat,
+                flat_races.deep_gamma().unwrap_or(f64::NAN)
             )
             .unwrap();
         }
@@ -959,9 +1029,38 @@ fn the_tables_in_the_header() {
     for share in shares {
         let mut line = format!("{share:<5}");
         for network in &networks {
-            let outcome = find(share, Strategy::Honest, network.name, TIMED);
-            write!(line, "   {:.3}", outcome.revenue()).unwrap();
+            let (revenue, _) = find(share, Strategy::Honest, network.name, TIMED);
+            write!(line, "   {revenue:.3}").unwrap();
         }
         println!("{line}");
     }
+    println!("\nthe share where revenue crosses the share, per network");
+    let threshold = |strategy, network: &str, opening| {
+        let points: Vec<(f64, f64)> = shares
+            .iter()
+            .map(|share| (*share, find(*share, strategy, network, opening).0 - share))
+            .collect();
+        crossing(&points).unwrap_or(f64::NAN)
+    };
+    for (name, strategy, opening) in [
+        ("SM1", Strategy::Selfish, TIMED),
+        ("lead stubborn, real", Strategy::LeadStubborn, TIMED),
+        ("lead stubborn, flat", Strategy::LeadStubborn, FLAT),
+    ] {
+        let mut line = format!("{name:<22}");
+        for network in &networks {
+            write!(line, "   {:.3}", threshold(strategy, network.name, opening)).unwrap();
+        }
+        println!("{line}");
+    }
+    let mut line = format!("{:<22}", "best of the two, real");
+    for network in &networks {
+        let best = threshold(Strategy::Selfish, network.name, TIMED).min(threshold(
+            Strategy::LeadStubborn,
+            network.name,
+            TIMED,
+        ));
+        write!(line, "   {best:.3}").unwrap();
+    }
+    println!("{line}");
 }

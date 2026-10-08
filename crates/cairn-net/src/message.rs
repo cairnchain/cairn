@@ -209,7 +209,9 @@ pub struct Handshake {
     /// travel beside it and nothing read it, since a node judges a peer's chain
     /// by what it serves and not by what it says here.
     pub height: u64,
-    /// Work behind the tip, which is what decides who is behind whom.
+    /// Work behind the tip, which with the height above decides who is
+    /// behind whom: two tips of one height are a tie unless one carries more
+    /// than half a block more (see `ChainStore::outweighed_by`).
     pub total_work: u128,
     /// The port this node listens on. A peer already knows the address the
     /// connection came from, so this is what completes it into an address

@@ -244,7 +244,7 @@ fn a_twin_of_a_block_already_followed_cannot_take_its_body() {
 /// for what answers that.
 ///
 /// What that buys is the branch. The forgery sits under the real block's
-/// identifier until the branch it is on becomes the heaviest, and then the
+/// identifier until the fork choice takes the branch it is on, and then the
 /// switch onto it reads the forged body, fails on a root that does not match,
 /// and leaves the node on the lighter branch. `cairn-net` reads that refusal
 /// as `DropReason::BadBlock` against whoever delivered the block above it,

@@ -2024,8 +2024,7 @@ impl Wallet {
             // `balance` and built `send` from whatever chain was on disk.
             peers: self.node.peers_introduced(),
             joining: self.node.joining(),
-            work: self.node.total_work(),
-            claim: self.node.best_claim(),
+            claim: self.node.claim_ahead(),
         }
     }
 
@@ -3637,7 +3636,8 @@ struct Look {
     height: Option<u64>,
     peers: usize,
     joining: Joined,
-    work: u128,
+    /// The heaviest claim a peer made that this wallet's node would follow,
+    /// if any: see `Node::claim_ahead`.
     claim: Option<(u64, u128)>,
 }
 
@@ -3651,12 +3651,10 @@ impl Look {
         )
     }
 
-    /// The height a peer gave beside more work than this chain has, if one
+    /// The height a peer gave beside a claim this node would follow, if one
     /// did.
     fn behind(&self) -> Option<u64> {
-        self.claim
-            .filter(|&(_, work)| work > self.work)
-            .map(|(height, _)| height)
+        self.claim.map(|(height, _)| height)
     }
 }
 
@@ -5072,12 +5070,11 @@ mod tests {
             height: Some(0),
             peers: 1,
             joining: Joined::No,
-            work: 10,
-            claim: Some((0, 10)),
+            claim: None,
         };
         assert!(
             settled(&calm, long),
-            "a chain held still with a peer level with it"
+            "a chain held still with no peer claiming a chain it would follow"
         );
         assert!(
             !settled(&calm, short),
@@ -5117,7 +5114,7 @@ mod tests {
         };
         assert!(
             !settled(&ahead, long),
-            "a peer says its chain has more work"
+            "a peer claims a chain this node would follow"
         );
         assert_eq!(
             ran_out(&ahead, long, false),

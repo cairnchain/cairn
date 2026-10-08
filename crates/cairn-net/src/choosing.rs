@@ -280,7 +280,21 @@ pub enum Step {
     /// The choice is made. These peers still claim more work than the chain
     /// the node now follows, and the ordinary rules take it from here: their
     /// chains arrive as branches and the fork choice weighs them.
-    Nudge(Vec<u64>),
+    Nudge(Vec<Claimed>),
+}
+
+/// A peer still claiming more work than the chain a node took, as
+/// [`Step::Nudge`] names it, with what it claims.
+///
+/// The height beside the work, because the node asks only for a chain its
+/// fork choice would take, and two tips of one height are a tie unless one
+/// carries more than half a block more work: see
+/// `cairn_chain::ChainStore::outweighed_by`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Claimed {
+    pub peer: u64,
+    pub height: u64,
+    pub work: u128,
 }
 
 /// The one choice a node with no chain makes about whom to follow.
@@ -963,13 +977,17 @@ impl Chooser {
     fn finish(&mut self, chain_work: u128, connected: &[u64]) -> Step {
         self.done = true;
         let asked = self.asked.map(|(peer, _, _)| peer);
-        let mut behind: Vec<u64> = self
+        let mut behind: Vec<Claimed> = self
             .claims
             .iter()
             .filter(|(peer, claim)| {
                 connected.contains(peer) && claim.work > chain_work && Some(**peer) != asked
             })
-            .map(|(peer, _)| *peer)
+            .map(|(peer, claim)| Claimed {
+                peer: *peer,
+                height: claim.height,
+                work: claim.work,
+            })
             .collect();
         // Nothing here is read again for the rest of the node's life, and
         // both of these were fed by strangers. Kept until now and not a
@@ -979,7 +997,7 @@ impl Chooser {
         if behind.is_empty() {
             return Step::Quiet;
         }
-        behind.sort_unstable();
+        behind.sort_unstable_by_key(|claimed| claimed.peer);
         Step::Nudge(behind)
     }
 }
@@ -1521,7 +1539,11 @@ mod tests {
         chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2, 3]);
         assert_eq!(
             chooser.step(210, false, 600, JoinProgress::NothingYet, &[1, 2, 3]),
-            Step::Nudge(vec![3]),
+            Step::Nudge(vec![Claimed {
+                peer: 3,
+                height: LONG,
+                work: 700
+            }]),
             "peer 3 claims more than the chain carries, peer 2 does not, \
              and peer 1 is the one the chain came from"
         );

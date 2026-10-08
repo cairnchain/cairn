@@ -1862,7 +1862,7 @@ struct Shared {
 /// fails a switch costs its sender and nobody else.
 ///
 /// A block that loses the fork choice is held without being applied, and its
-/// body is tried only when its branch becomes the heaviest, which is usually
+/// body is tried only when the fork choice takes its branch, which is usually
 /// the delivery of a later block by some other peer. A body that is not the
 /// one its header names is refused before it is held, so a body that fails is
 /// a mined block that is invalid, and the connection that handed it in
@@ -5819,18 +5819,45 @@ impl Node {
     /// itself, with the height it gave beside it, or `None` with nobody
     /// introduced.
     ///
-    /// For a wallet deciding whether to go on waiting before it answers. A
-    /// chain that has stopped moving is not the same thing as the network's
-    /// tip, and this is the one number that tells the two apart. Anyone can
-    /// write it into a handshake, so it is a reason to wait and never a
-    /// verdict: a liar can make a wallet wait out its patience, and nothing
-    /// more.
+    /// The figure as it was said. What a wallet waits on is
+    /// [`Self::claim_ahead`], the same claims weighed by the fork choice.
     pub fn best_claim(&self) -> Option<(u64, u128)> {
         self.shared
             .peers()
             .values()
             .filter_map(|peer| peer.claims)
             .max_by_key(|&(_, work)| work)
+    }
+
+    /// Of what connected peers said their chains had when they introduced
+    /// themselves, the claim of most work among those this node's fork
+    /// choice would take over the branch it follows, with the height given
+    /// beside it, or `None` when it would take none of them.
+    ///
+    /// For a wallet deciding whether to go on waiting before it answers. A
+    /// chain that has stopped moving is not the same thing as the network's
+    /// tip, and this is what tells the two apart. Anyone can write a claim
+    /// into a handshake, so it is a reason to wait and never a verdict: a
+    /// liar can make a wallet wait out its patience, and nothing more.
+    ///
+    /// Weighed rather than compared on work, because two tips of one height
+    /// are a tie within half a block ([`ChainStore::outweighed_by`]): a node
+    /// keeping the lighter of the two will not take the other, so a wallet
+    /// reading the work alone waited out its patience for a chain that was
+    /// never coming and then said it was behind.
+    pub fn claim_ahead(&self) -> Option<(u64, u128)> {
+        let claims: Vec<(u64, u128)> = self
+            .shared
+            .peers()
+            .values()
+            .filter_map(|peer| peer.claims)
+            .collect();
+        self.with_chain(|chain| {
+            claims
+                .into_iter()
+                .filter(|&(height, work)| chain.outweighed_by(height, work))
+                .max_by_key(|&(_, work)| work)
+        })
     }
 
     /// Connected peers that say they keep the whole cold set.
@@ -9309,8 +9336,11 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
         // node took was held off while it chose, and gets the ordinary
         // question now: their chains arrive as branches, and the fork choice
         // weighs branches for a living.
-        choosing::Step::Nudge(peers) => {
-            let locator = shared.chain().locator();
+        choosing::Step::Nudge(claims) => {
+            let (locator, peers) = {
+                let chain = shared.chain();
+                (chain.locator(), still_ahead(&chain, &claims))
+            };
             for peer in peers {
                 shared.send_to(
                     peer,
@@ -9320,6 +9350,89 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
                 );
             }
         }
+    }
+}
+
+/// Of the peers a finished choice names as still claiming more work than
+/// the chain this node took, the ones whose claim that chain would give way
+/// to.
+///
+/// Asked of the fork choice, as every other question for a peer's chain is
+/// in [`crate::sync`]: a claim at this node's own height within the band
+/// that makes two tips a tie is a branch this node would only hold aside,
+/// and a claim a block higher with the same work is one it would take. See
+/// [`ChainStore::outweighed_by`].
+fn still_ahead(chain: &ChainStore, claims: &[choosing::Claimed]) -> Vec<PeerId> {
+    claims
+        .iter()
+        .filter(|claimed| chain.outweighed_by(claimed.height, claimed.work))
+        .map(|claimed| claimed.peer)
+        .collect()
+}
+
+/// Whom a finished choice asks for their chains.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::arithmetic_side_effects)]
+mod a_finished_choice {
+    use super::still_ahead;
+    use crate::choosing::Claimed;
+    use cairn_chain::ChainStore;
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::note::Note;
+    use cairn_ledger::transaction::CoinbaseTransaction;
+    use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
+    use cairn_ledger::LedgerState;
+
+    /// **Of the peers still claiming more work, only the ones whose claim the
+    /// fork choice would take are asked.**
+    ///
+    /// A chain of blocks at difficulty sixteen, so two tips of its height are
+    /// a tie within eight units. A peer claiming eight more at that height is
+    /// left alone, nine more is asked, and one more a block higher is asked.
+    #[test]
+    fn a_finished_choice_asks_whom_the_fork_choice_would_follow() {
+        let params = ConsensusParams {
+            genesis_difficulty: 16,
+            ..ConsensusParams::testnet()
+        };
+        let mut state = LedgerState::new();
+        let mut chain = ChainStore::new(params);
+        for height in 0..4u64 {
+            let coinbase = CoinbaseTransaction::new(
+                height,
+                vec![Note::new(
+                    params.reward_at(height),
+                    SecretKey::from_bytes(&[5; 32]).public_key(),
+                )],
+            );
+            let block =
+                assemble_block(&state, coinbase, Vec::new(), &params, height * 60, 0).unwrap();
+            let block = mine_block(block, 1 << 20).unwrap();
+            connect_block(&mut state, &block, &params, 2_000_000_000).unwrap();
+            chain.add_block(block, 2_000_000_000).unwrap();
+        }
+        let tip = state.recent_headers().last().copied().unwrap();
+        assert_eq!(tip.difficulty, 16, "fixture: the tip is at the opening");
+        let (height, work) = (tip.height, chain.total_work());
+
+        let claims = [
+            Claimed {
+                peer: 1,
+                height,
+                work: work + 8,
+            },
+            Claimed {
+                peer: 2,
+                height,
+                work: work + 9,
+            },
+            Claimed {
+                peer: 3,
+                height: height + 1,
+                work: work + 1,
+            },
+        ];
+        assert_eq!(still_ahead(&chain, &claims), vec![2, 3]);
     }
 }
 
@@ -15715,6 +15828,79 @@ mod peers_and_loops {
             .count();
         stop_all(&node);
         assert_eq!(past_the_ceiling, 0, "a feeler dialled out of a full table");
+    }
+
+    /// **A wallet's node is behind a peer only when it would take the chain
+    /// that peer claims.**
+    ///
+    /// A chain at difficulty sixteen, so two tips of its height are a tie
+    /// within eight units. A peer claiming eight more at that height, and one
+    /// claiming less a block lower, are nothing it would take; a peer
+    /// claiming one unit more a block higher is the claim ahead, though the
+    /// tie claims more work.
+    #[test]
+    fn a_claim_is_ahead_only_when_the_fork_choice_would_take_it() {
+        let params = ConsensusParams {
+            genesis_difficulty: 16,
+            ..ConsensusParams::testnet()
+        };
+        let node = Node::bind(params, local()).unwrap();
+        node.shutdown();
+        let mut state = cairn_ledger::LedgerState::new();
+        for height in 0..4u64 {
+            let coinbase = cairn_ledger::transaction::CoinbaseTransaction::new(
+                height,
+                vec![cairn_ledger::note::Note::new(
+                    params.reward_at(height),
+                    cairn_crypto::SecretKey::from_bytes(&[6; 32]).public_key(),
+                )],
+            );
+            let block = cairn_ledger::validation::assemble_block(
+                &state,
+                coinbase,
+                Vec::new(),
+                &params,
+                height * 60,
+                0,
+            )
+            .unwrap();
+            let block = cairn_ledger::validation::mine_block(block, 1 << 20).unwrap();
+            cairn_ledger::validation::connect_block(&mut state, &block, &params, 2_000_000_000)
+                .unwrap();
+            node.submit_block(block).unwrap();
+        }
+        let (height, work) = (node.height().unwrap(), node.total_work());
+        assert_eq!(
+            node.with_chain(|chain| chain.state().recent_headers().last().unwrap().difficulty),
+            16,
+            "fixture: the tip is at the opening"
+        );
+
+        let (near, _far) = a_socket();
+        let claim = |id: PeerId, claims: (u64, u128)| {
+            node.shared.peers().insert(
+                id,
+                Peer {
+                    claims: Some(claims),
+                    ..stand_in(&near, false)
+                },
+            );
+        };
+        claim(1, (height, work + 8));
+        claim(2, (height - 1, work - 1));
+        assert_eq!(
+            node.claim_ahead(),
+            None,
+            "a tie and a lighter chain are nothing this node would take"
+        );
+        claim(3, (height + 1, work + 1));
+        assert_eq!(node.claim_ahead(), Some((height + 1, work + 1)));
+        assert_eq!(
+            node.best_claim(),
+            Some((height, work + 8)),
+            "fixture: the tie is the most work claimed"
+        );
+        stop_all(&node);
     }
 }
 

@@ -668,7 +668,8 @@ impl ChainError {
 pub enum Accepted {
     /// Already known, nothing changed.
     Duplicate,
-    /// Recorded on a branch lighter than the current one.
+    /// Recorded on a branch the fork choice does not take over the current
+    /// one: lighter, or a tie (see [`ChainStore::outweighed_by`]).
     SideBranch,
     /// Extended the current branch by one block.
     Extended,
@@ -1283,6 +1284,54 @@ impl ChainStore {
     /// are the same figure.
     pub fn total_work(&self) -> u128 {
         self.state.total_work()
+    }
+
+    /// Whether this node would leave the branch it follows for one whose tip
+    /// stands at `height` with `total_work` behind it: the fork choice, and
+    /// the one place it is written.
+    ///
+    /// By work, with a tie band at the followed tip's height. A branch
+    /// carrying no more work than the one followed never displaces it. A
+    /// branch of the same height as the followed tip must also carry more
+    /// than half the tip's difficulty in extra work; anything less is a tie
+    /// as well, and a tie keeps the branch followed. A branch of any other
+    /// height is weighed by work alone.
+    ///
+    /// The band is there because the retarget reads the parent's timestamp.
+    /// Two blocks on one parent are asked the same difficulty, but one block
+    /// further on the branch dated earlier stands further ahead of its
+    /// schedule and is asked more, so of two branches of one length forked
+    /// two or more blocks deep the earlier-dated one is heavier, by about one
+    /// percent of a block per minute between their dates. Switching on any
+    /// surplus handed every such race to the earlier dates: a withholder
+    /// matching an honest branch with blocks it had found, and dated, before
+    /// the honest ones won nine in ten of them wherever it sat in the
+    /// network, which lowered the share withholding pays from, and every
+    /// miner gained by dating its blocks as early as the median allows (T8-4
+    /// of the testnet-8 findings). The lean is a few percent of a block; half
+    /// a block is well clear of it, and short of anything a branch that is
+    /// truly a block ahead carries.
+    ///
+    /// A choice between valid branches and not a rule of validity: no block
+    /// is judged by it, so nodes that weigh differently agree on every block
+    /// and meet again at the next one, as two nodes that heard a race in
+    /// opposite orders do. `cairn-net` asks the same question before it
+    /// fetches a peer's chain, so a node asks for a branch exactly when it
+    /// would take it.
+    pub fn outweighed_by(&self, height: u64, total_work: u128) -> bool {
+        let followed = self.total_work();
+        if total_work <= followed {
+            return false;
+        }
+        if self.height() != Some(height) {
+            return true;
+        }
+        let band = self
+            .state
+            .recent_headers()
+            .last()
+            .map_or(0, |tip| work_of(tip.difficulty) / 2);
+        total_work.saturating_sub(followed) > band
     }
 
     pub fn block(&self, id: &Hash32) -> Option<&Block> {
@@ -2279,7 +2328,8 @@ impl ChainStore {
         Ok(())
     }
 
-    /// Records a block and follows the heaviest branch it makes available.
+    /// Records a block, and follows the branch it ends if that branch
+    /// outweighs the one followed (see [`Self::outweighed_by`]).
     ///
     /// `now` is this node's clock, in seconds since the Unix epoch.
     pub fn add_block(&mut self, block: Block, now: u64) -> Result<Accepted, ChainError> {
@@ -2350,8 +2400,7 @@ impl ChainStore {
                 // arrive under that identifier gets its turn, which is what
                 // `an_invalid_twin_seen_first_must_not_lock_out_the_honest_block`
                 // measures.
-                let total_work = held.total_work;
-                if total_work <= self.total_work() {
+                if !self.outweighed_by(held.header.height, held.total_work) {
                     return Ok(Accepted::SideBranch);
                 }
                 return self.follow(id, now);
@@ -2511,9 +2560,10 @@ impl ChainStore {
             });
         }
 
+        let height = block.header.height;
         self.hold(id, block, total_work);
 
-        if total_work <= self.total_work() {
+        if !self.outweighed_by(height, total_work) {
             // The sweeps that bound what this node holds ran from `follow` and
             // from nowhere else, so they ran when a block joined this node's
             // own branch and never when one did not. Between two blocks of its
@@ -2535,12 +2585,14 @@ impl ChainStore {
             // block on an honest network.
             self.forget_unreachable_branches();
             // Ties keep the block already followed, and this is a choice with
-            // a cost, so it is worth writing down rather than implying.
+            // a cost, so it is worth writing down rather than implying. A tie
+            // is equal work, or a rival of the tip's own height within half
+            // the tip's difficulty of it: see `outweighed_by`.
             //
             // Two miners finding a block at the same height is ordinary. It
             // leaves two branches of exactly equal work, and two honest nodes
             // that heard them in opposite orders sit on different tips until a
-            // heavier block settles it. Nothing is wrong with either node.
+            // longer branch settles it. Nothing is wrong with either node.
             //
             // Breaking the tie on the lower identifier would settle it at once
             // and was tried. It costs more than it buys: a node catching up
