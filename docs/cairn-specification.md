@@ -2451,8 +2451,10 @@ over 2<sup>18</sup>, which on a chain that ran to schedule is at least a
 thousandth of an average block. Measured on a thirty year chain at the two
 networks' opening difficulties, the cheapest tip a forger can present costs
 2<sup>18.9</sup> hashes on testnet-8 and 2<sup>13.9</sup> on the devnet; held to
-the pinned header alone it would cost 2<sup>11.9</sup> and 2<sup>8.1</sup>. The
-faster walk moved the price by a tenth of a halving from what the moving average
+the pinned header alone it would cost 2<sup>11.9</sup> and 2<sup>8.1</sup>.
+These are lower bounds on what a forger pays: the measurement lets the run
+below the pinned header start anywhere on its schedule, which the run's own
+rules no longer allow. The faster walk moved the price by a tenth of a halving from what the moving average
 gave at the same opening difficulty, 2<sup>18.0</sup> at testnet-7's
 2<sup>27</sup> and 2<sup>14.0</sup> on the devnet, because the floor rests on
 the run's ceiling and the tie, not on the walk; testnet-8's opening at

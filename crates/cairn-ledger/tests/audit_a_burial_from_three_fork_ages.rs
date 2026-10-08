@@ -1,4 +1,4 @@
-//! AUDIT: a forged burial from a fork point of every age.
+//! AUDIT: a forged burial from fork points of three ages.
 //!
 //! A newcomer joining by the weighing exchange is handed a chain that ends
 //! in a burial under a block the newcomer itself never mined. This builds a
@@ -27,9 +27,10 @@
 //! tip's timestamp precedes `now + drift`. The fall gate then catches the
 //! forgery: the honest headers in the run carry difficulty near 4 096, and
 //! the tip at the floor (1) fell more than `MOST_FALL` (32) below them.
-//! The minimum cost of a well-shaped forgery that clears the fall gate is
-//! measured separately in `the_price_of_a_seed.rs` (2^13.9 hashes on the
-//! devnet, 2^18.9 on testnet-8).
+//! What a well-shaped forgery that clears the fall gate costs is measured
+//! separately in `the_price_of_a_seed.rs` (2^13.9 hashes on the devnet, 2^18.9
+//! on testnet-8), as a lower bound: that model lets the run start anywhere on
+//! its schedule, which the rules now refuse.
 
 #![allow(
     clippy::too_many_lines,
@@ -299,9 +300,9 @@ fn a_forgery_from_a_fork_at_the_02_q1_threshold_is_refused_at_the_fall_gate() {
 /// `MOST_FALL` (32) below them (`TipFellTooFar`).
 ///
 /// For a forgery to clear the fall gate the forger must carry the full
-/// band of work at a difficulty within `MOST_FALL` of the tip; the minimum
-/// cost of such a chain is 2^13.9 hashes (devnet, measured in
-/// `the_price_of_a_seed.rs`).
+/// band of work at a difficulty within `MOST_FALL` of the tip; such a chain
+/// costs at least 2^13.9 hashes on the devnet, a lower bound measured in
+/// `the_price_of_a_seed.rs`.
 #[test]
 fn a_forgery_from_a_ten_day_old_fork_passes_the_timing_gate_but_is_refused_at_the_fall_gate() {
     let (honest_tip, start) = forged_start();

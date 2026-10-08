@@ -734,11 +734,11 @@ let it walk its run down to the difficulty floor, where a tip costs one
 hash. So a newcomer refuses a tip more than 32 times below the hardest
 header of its run. That puts a tip at no less than a thousandth of an
 average block on a chain that ran to schedule, measured at 2^18.9 hashes at
-the public test network's opening difficulty, and it costs an honest chain
-what the cap does: one
-that loses more than about twenty times its hash rate is read rather than
-weighed, on the test network from about eight hours after the loss and for
-under five and a half days beyond what the cap already refuses. A burst
+the public test network's opening difficulty as a lower bound, and it costs
+an honest chain what the cap does: one that loses more than about twenty
+times its hash rate is read rather than weighed, on the test network from
+about eight hours after the loss and for under five and a half days beyond
+what the cap already refuses. A burst
 that lifts the difficulty more than 32 times and leaves does the same: after
 bursts to 128 times, for up to fifteen hours on an old chain and thirty five
 on a young one, and after a burst to 1 024 times, for 100 to 124 hours on a

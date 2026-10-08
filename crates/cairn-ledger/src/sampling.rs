@@ -206,8 +206,10 @@ use crate::validation::{carries_what_its_parent_demands, ConsensusParams, Undema
 /// the band the draw leaves unresolved over 2^18, a thousandth of an average
 /// block on a chain that ran to schedule. Measured on a thirty year chain, the
 /// cheapest tip a forger can present costs 2^18.9 hashes at testnet-8's
-/// opening difficulty and 2^13.9 at the devnet's. [`MOST_FALL`] says why it is not the
-/// chain's difficulty, and what the tie costs an honest chain.
+/// opening difficulty and 2^13.9 at the devnet's, both lower bounds: the
+/// measurement lets the run below the pinned header start anywhere on its
+/// schedule, which `check_the_tail` no longer allows. [`MOST_FALL`] says why
+/// it is not the chain's difficulty, and what the tie costs an honest chain.
 ///
 /// So the figure is stated against a budget. At 40% the inequality above
 /// leaves 2^-161.9 a tip, which holds under 2^-128 against 2^33 tips and not
@@ -550,7 +552,9 @@ pub const BELOW_THE_PINNED: u64 = RECENT_HEADERS as u64 - 1;
 /// least 256 times its mean difficulty, so a fresh seed costs at least a
 /// thousandth of an average block. Measured on a thirty year chain in
 /// `tests/the_price_of_a_seed.rs`, the cheapest tip a forger can present is
-/// 2^18.9 hashes at testnet-8's opening difficulty and 2^13.9 at the devnet's.
+/// 2^18.9 hashes at testnet-8's opening difficulty and 2^13.9 at the devnet's,
+/// both lower bounds, since that measurement lets the run below the pinned
+/// header start anywhere on its schedule and the run's rules now refuse it.
 /// Under the moving average the retarget used to be it was 2^18.0 at
 /// testnet-7's, a halving lower, and 2^14.0 at the devnet's: the walk got
 /// faster and the price did not move, because it rests on this tie and on the
