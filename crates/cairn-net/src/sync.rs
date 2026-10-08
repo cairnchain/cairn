@@ -3785,7 +3785,8 @@ mod a_tie_at_one_height {
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing
 )]
 mod a_full_side_store {
     use super::{on_block, PeerState};
