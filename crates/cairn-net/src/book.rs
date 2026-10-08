@@ -148,14 +148,32 @@ struct Known {
     /// Heard again on the first handshake of every connection, which costs
     /// nothing, and it is only ever used to decide who to ask first.
     archives: bool,
-    /// Whether this address once handed this node a path that folded, since
-    /// it started.
+    /// What this address's last answer about where a fallen note sits came
+    /// to, since this node started.
     ///
     /// Not written down, for the reason `archives` is not. What it is for is
     /// telling an archivist from a peer that only says it is one: the claim is
     /// a bit in a handshake and costs nothing, and a path that folds to this
     /// node's own commitment costs keeping the whole cold set.
-    handed_a_path: bool,
+    paths: Paths,
+}
+
+/// What an address's last answer about where a fallen note sits came to, in
+/// the order a node reaching for archivists tries them.
+///
+/// The last answer and not the first. A fold used to be a mark for the life
+/// of the process, so a peer that folded one path and refused every one
+/// after it was reached for ahead of an archivist never asked, and four such
+/// were the whole of a round.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Paths {
+    /// A path that folded.
+    Folded,
+    /// No answer yet.
+    #[default]
+    Unasked,
+    /// Nothing that folded.
+    Refused,
 }
 
 impl Known {
@@ -831,12 +849,23 @@ impl AddressBook {
     /// Only for an address already in the book, as with what it keeps.
     pub(crate) fn handed_over_a_path(&mut self, address: &SocketAddr) {
         if let Some(known) = self.known.get_mut(address) {
-            known.handed_a_path = true;
+            known.paths = Paths::Folded;
         }
     }
 
-    /// Addresses that said they keep the cold set: the ones that once handed
-    /// over a path that folded first, then the rest, each newest first.
+    /// Writes down that an address answered a question about where a fallen
+    /// note sits with nothing that folded.
+    ///
+    /// Only for an address already in the book, as with a path that folded.
+    pub(crate) fn refused_a_path(&mut self, address: &SocketAddr) {
+        if let Some(known) = self.known.get_mut(address) {
+            known.paths = Paths::Refused;
+        }
+    }
+
+    /// Addresses that said they keep the cold set: the ones whose last answer
+    /// was a path that folded first, then the ones not asked yet, then the
+    /// ones whose last answer folded nothing, each newest first.
     ///
     /// For a wallet that needs a path rebuilt and is connected to nobody who
     /// can rebuild one, or only to peers that said they could and did not.
@@ -846,21 +875,16 @@ impl AddressBook {
     /// claimers is the one who spoke last, and a node reaching for a few
     /// addresses reached for its claimers. A claim is a bit in a handshake;
     /// a path that folded took keeping the whole cold set, so an address that
-    /// once handed one over goes first however long ago it spoke.
+    /// handed one over goes first however long ago it spoke, until it answers
+    /// with nothing that folds.
     pub(crate) fn archivists(&self) -> Vec<SocketAddr> {
-        let mut found: Vec<(bool, u64, SocketAddr)> = self
+        let mut found: Vec<(Paths, Reverse<u64>, SocketAddr)> = self
             .known
             .iter()
             .filter(|(_, known)| known.archives)
-            .map(|(address, known)| (known.handed_a_path, known.heard, *address))
+            .map(|(address, known)| (known.paths, Reverse(known.heard), *address))
             .collect();
-        found.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then(right.1.cmp(&left.1))
-                .then(left.2.cmp(&right.2))
-        });
+        found.sort();
         found.into_iter().map(|(_, _, address)| address).collect()
     }
 
@@ -3041,6 +3065,52 @@ mod tests {
         let stranger: SocketAddr = "203.0.113.9:9000".parse().unwrap();
         book.handed_over_a_path(&stranger);
         assert_eq!(book.len(), 3);
+    }
+
+    /// An address that handed over a path and has folded nothing since falls
+    /// behind an archivist never asked, however more recently it spoke.
+    ///
+    /// A fold was a mark for the life of the process and a refusal was
+    /// written nowhere, so a peer that folded one path and placed nothing
+    /// after it was reached for first every time, and four of them were the
+    /// whole of a round.
+    #[test]
+    fn an_address_that_folded_and_then_refused_falls_behind_one_never_asked() {
+        let mut book = AddressBook::new();
+        let never_asked: SocketAddr = "203.0.113.1:9000".parse().unwrap();
+        let turned: SocketAddr = "198.51.100.2:9000".parse().unwrap();
+        for (address, heard) in [(never_asked, 100), (turned, 200)] {
+            book.insert(address);
+            book.answered(&address, heard);
+            book.keeps_the_cold_set(&address, true);
+        }
+        book.handed_over_a_path(&turned);
+        assert_eq!(
+            book.archivists(),
+            vec![turned, never_asked],
+            "fixture: an address that handed over a path goes first"
+        );
+
+        for _ in 0..3 {
+            book.refused_a_path(&turned);
+        }
+        assert_eq!(
+            book.archivists(),
+            vec![never_asked, turned],
+            "an address that folded nothing since its one path was reached for ahead of an \
+             archivist never asked"
+        );
+
+        // The last answer decides, so a fold after the refusals puts it first
+        // again: an honest path built a moment too early fails as an invented
+        // one does.
+        book.handed_over_a_path(&turned);
+        assert_eq!(book.archivists(), vec![turned, never_asked]);
+
+        // As with a path, a refusal is not a reason to write an address down.
+        let stranger: SocketAddr = "203.0.113.9:9000".parse().unwrap();
+        book.refused_a_path(&stranger);
+        assert_eq!(book.len(), 2);
     }
 
     #[test]

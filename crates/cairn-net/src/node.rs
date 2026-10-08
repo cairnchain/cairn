@@ -4402,6 +4402,8 @@ impl Shared {
             if checking.is_empty() {
                 // Nothing to check, so the answer is already all it will be.
                 asking.answered.insert(from);
+                drop(asking);
+                self.judge_the_answer(from, false);
                 return;
             }
             checking
@@ -4433,15 +4435,29 @@ impl Shared {
             asking.answered.insert(from);
         }
         drop(asking);
-        // Against the address it listens at, which is what its claim to keep
-        // the set was written against, so that a node reaching for archivists
-        // it met tries this one before any that only claimed: see
-        // `AddressBook::archivists`. Once the question is let go of, which is
-        // a leaf.
-        if handed_a_path {
-            let listens = self.peers().get(&from).and_then(|peer| peer.advertised);
-            if let Some(address) = listens {
-                self.book().handed_over_a_path(&address);
+        if kept {
+            self.judge_the_answer(from, handed_a_path);
+        }
+    }
+
+    /// Writes down whether a peer's answer to this question brought a path
+    /// that folded, against the address it listens at, which is what its
+    /// claim to keep the set was written against.
+    ///
+    /// So that a node reaching for archivists it met tries one that folded a
+    /// path before any that only claimed, and one that has folded nothing
+    /// since after any not yet asked: see `AddressBook::archivists`. The
+    /// refusal used to be counted for the question and dropped with it, so a
+    /// single fold stood for the life of the process. Called once the
+    /// question is let go of, which is a leaf.
+    fn judge_the_answer(&self, from: PeerId, folded: bool) {
+        let listens = self.peers().get(&from).and_then(|peer| peer.advertised);
+        if let Some(address) = listens {
+            let mut book = self.book();
+            if folded {
+                book.handed_over_a_path(&address);
+            } else {
+                book.refused_a_path(&address);
             }
         }
     }
@@ -5952,7 +5968,8 @@ impl Node {
     /// reaches for one it has heard of, and if none arrives in time the answer
     /// says that nobody was asked. When every such peer connected has
     /// answered and a place is still not placed, it reaches past them the
-    /// same way, archivists that once handed over a path that folded first.
+    /// same way, archivists whose last answer was a path that folded first
+    /// and those whose last answer folded nothing last.
     /// Either way it dials past addresses that do not answer, and only within
     /// `patience`: the dials are part of the wait and not ahead of it.
     ///
@@ -15105,24 +15122,28 @@ mod peers_and_loops {
     }
 
     /// A peer whose path folded is written down as having handed one over,
-    /// against the address it listens at, and one whose paths did not fold
-    /// is not.
+    /// against the address it listens at, and one whose paths did not fold,
+    /// or that placed nothing, as having refused.
     ///
-    /// That mark is what a node reaching for archivists it met goes by
-    /// first, past peers that are newer in its book and only claimed.
+    /// Those marks are what a node reaching for archivists it met goes by: a
+    /// peer whose last answer folded first, past peers that are newer in its
+    /// book and only claimed, and one whose last answer folded nothing behind
+    /// an archivist not yet asked. The refusal was written nowhere, so a peer
+    /// that folded once was reached for first for the life of the process.
     #[test]
     fn a_peer_whose_path_folded_is_reached_for_before_peers_that_only_claimed() {
         let node = quiet();
         let (socket, _far) = a_socket();
         let honest: SocketAddr = "203.0.113.1:9000".parse().unwrap();
         let claimer: SocketAddr = "198.51.100.2:9000".parse().unwrap();
-        node.shared
-            .peers()
-            .insert(1, a_claimer(&socket, Some(honest)));
-        node.shared
-            .peers()
-            .insert(2, a_claimer(&socket, Some(claimer)));
-        for (address, heard) in [(honest, 100), (claimer, 200)] {
+        let empty: SocketAddr = "192.0.2.3:9000".parse().unwrap();
+        let unasked: SocketAddr = "203.0.113.4:9000".parse().unwrap();
+        for (id, address) in [(1, honest), (2, claimer), (3, empty)] {
+            node.shared
+                .peers()
+                .insert(id, a_claimer(&socket, Some(address)));
+        }
+        for (address, heard) in [(honest, 100), (claimer, 200), (empty, 300), (unasked, 400)] {
             let mut book = node.shared.book();
             book.insert(address);
             book.answered(&address, heard);
@@ -15130,7 +15151,7 @@ mod peers_and_loops {
         }
         *node.shared.asking() = Asking {
             wanted: BTreeMap::from([(7, Hash32::ZERO), (9, Hash32::ZERO)]),
-            asked: HashSet::from([1, 2]),
+            asked: HashSet::from([1, 2, 3]),
             ..Asking::default()
         };
 
@@ -15141,16 +15162,18 @@ mod peers_and_loops {
                     .map(|(position, _, proof)| (position, proof, false))
                     .collect()
             });
+        node.shared.take_placed(3, &nothing_placed());
         assert_eq!(
             node.shared.book().archivists(),
-            vec![claimer, honest],
-            "a peer none of whose paths folded was written down as handing one over"
+            vec![unasked, honest, empty, claimer],
+            "a peer none of whose paths folded, or that placed nothing, was not written down \
+             as refusing"
         );
         node.shared
             .take_placed_with(1, &an_answer_about_seven_and_nine(), only_seven_folds);
         assert_eq!(
             node.shared.book().archivists(),
-            vec![honest, claimer],
+            vec![honest, unasked, empty, claimer],
             "a peer whose path folded was not written down as handing one over"
         );
     }
