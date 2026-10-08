@@ -194,7 +194,9 @@ fn a_payment_at_the_quote_is_pooled_and_mined_where_a_place_is_priced() {
     // More than the price since 8 October (04-F2): the quote also outranks
     // filler at the floor at the weight the place adds once the note falls.
     assert!(
-        quoted.checked_sub(least).is_some_and(|margin| margin >= price),
+        quoted
+            .checked_sub(least)
+            .is_some_and(|margin| margin >= price),
         "the quote's margin for the one note that can fall is less than the place price"
     );
     // What the confirmation says before paying: the burn of the one place the
