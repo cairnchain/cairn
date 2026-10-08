@@ -1561,6 +1561,48 @@ impl Peer {
     }
 }
 
+// TEMPORARY, for the Windows probe on fix/windows-hang-up, not for merging:
+// what happened to one node's connections, read back by a test that asked for
+// that node's lines by its nonce. Nothing is written for any other node.
+static TRACED: Mutex<Option<HashMap<u64, Vec<String>>>> = Mutex::new(None);
+static TRACE_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+fn trace(nonce: u64, line: impl FnOnce() -> String) {
+    let wanted = TRACED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|all| all.contains_key(&nonce));
+    if !wanted {
+        return;
+    }
+    let line = line();
+    let at = TRACE_EPOCH.get_or_init(Instant::now).elapsed();
+    let mut traced = TRACED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(lines) = traced.as_mut().and_then(|all| all.get_mut(&nonce)) {
+        lines.push(format!("{at:?} {line}"));
+    }
+}
+
+#[cfg(test)]
+fn trace_start(nonce: u64) {
+    TRACED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .insert(nonce, Vec::new());
+}
+
+#[cfg(test)]
+fn trace_of(nonce: u64) -> Vec<String> {
+    TRACED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_mut()
+        .and_then(|all| all.remove(&nonce))
+        .unwrap_or_default()
+}
+
 struct Shared {
     params: ConsensusParams,
     address: SocketAddr,
@@ -3481,7 +3523,17 @@ impl Shared {
     /// [`READ_TIMEOUT`], so the slot can stay taken that long.
     fn hang_up(&self, id: PeerId) {
         if let Some(peer) = self.peers().get(&id) {
-            let _ = peer.stream.shutdown(Shutdown::Both);
+            let outcome = peer.stream.shutdown(Shutdown::Both);
+            trace(self.nonce, || {
+                format!(
+                    "hang_up {id}: shutdown {outcome:?}, local {:?}, peer {:?}, take_error {:?}",
+                    peer.stream.local_addr(),
+                    peer.stream.peer_addr(),
+                    peer.stream.take_error()
+                )
+            });
+        } else {
+            trace(self.nonce, || format!("hang_up {id}: not in the table"));
         }
     }
 
@@ -9647,6 +9699,7 @@ where
             felt,
         )
     };
+    trace(shared.nonce, || format!("round at {now}: felt {felt:?}"));
     for id in felt {
         shared.hang_up(id);
     }
@@ -9934,21 +9987,27 @@ fn start_writing(
     inbox: mpsc::Receiver<(Message, usize)>,
     network: NetworkId,
     written: Arc<AtomicUsize>,
+    nonce: u64,
 ) -> io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("cairn-write-{id}"))
         .spawn(move || {
+            let mut why = String::from("its queue closed");
             while let Ok((message, weight)) = inbox.recv() {
                 let outcome = write_message(&mut writing_end, network, &message);
                 // Off the count whether or not it reached the far end. What is
                 // being counted is what this node is holding, and once the write
                 // has returned it is holding nothing.
                 written.fetch_sub(weight, Ordering::SeqCst);
-                if outcome.is_err() {
+                if let Err(error) = outcome {
+                    why = format!("a write failed, {error:?}");
                     break;
                 }
             }
-            let _ = writing_end.shutdown(Shutdown::Both);
+            let outcome = writing_end.shutdown(Shutdown::Both);
+            trace(nonce, || {
+                format!("writer {id} ended: {why}, its shutdown {outcome:?}")
+            });
         })
 }
 
@@ -10077,10 +10136,17 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         let _ = closing_end.shutdown(Shutdown::Both);
         return false;
     };
+    trace(shared.nonce, || {
+        format!(
+            "attached {id}: dialled {dialled:?}, place {place:?}, local {:?}, peer {:?}",
+            closing_end.local_addr(),
+            closing_end.peer_addr()
+        )
+    });
 
     let network = shared.network();
     let written = Arc::clone(&outbound.waiting);
-    let Ok(writer) = start_writing(id, writing_end, inbox, network, written) else {
+    let Ok(writer) = start_writing(id, writing_end, inbox, network, written, shared.nonce) else {
         // The closure went with the error, and the socket half it held with
         // it. What is left is the table entry, which nothing would ever come
         // back to remove: the thread that does that is the one below, and it
@@ -10106,6 +10172,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         .name(format!("cairn-read-{id}"))
         .spawn(move || {
             read_loop(&reading, stream, id, &outbound, remote, dialled, place);
+            trace(reading.nonce, || format!("reader {id}: loop returned"));
             drop(outbound);
             // The writer waits on the channel closing, and the channel cannot
             // close while the peer table still holds a sender for it. So the
@@ -10124,9 +10191,13 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
                 .unwrap_or_else(PoisonError::into_inner)
                 .take()
             {
+                trace(reading.nonce, || format!("reader {id}: joining the writer"));
                 let _ = writer.join();
             }
             reading.peers().remove(&id);
+            trace(reading.nonce, || {
+                format!("reader {id}: removed from the table")
+            });
         });
     let Ok(handle) = handle else {
         // Taking the entry out drops the table's sender, and the closure went
@@ -10382,7 +10453,17 @@ fn read_loop(
         // handshake saying it listens nowhere never gives it, so a peer that
         // does not listen was a stranger for life and its first block cost it
         // the connection and a refusal.
-        let frame = match read_frame(&mut stream, network, most_from(peer.greeted)) {
+        let read = read_frame(&mut stream, network, most_from(peer.greeted));
+        trace(shared.nonce, || match &read {
+            Ok(Framed::Frame(frame)) => format!(
+                "read {id}: a frame of {} bytes, tag {:?}",
+                frame.len(),
+                frame.first()
+            ),
+            Ok(Framed::Quiet) => format!("read {id}: quiet"),
+            Err(error) => format!("read {id}: failed, {error:?}"),
+        });
+        let frame = match read {
             Ok(Framed::Frame(frame)) => {
                 parting.said_anything = true;
                 last_heard = unix_now();
@@ -10546,7 +10627,13 @@ fn read_loop(
     // write begun on a socket just shut fails at once, wherever in a frame it
     // was. One already waiting for the far end to take its bytes is sure to end
     // only at `WRITE_TIMEOUT` on Windows, where a shut socket need not wake it.
-    let _ = stream.shutdown(Shutdown::Both);
+    let outcome = stream.shutdown(Shutdown::Both);
+    trace(shared.nonce, || {
+        format!(
+            "read loop {id} ended: running {}, parting {parting:?}, its own shutdown {outcome:?}",
+            shared.running.load(Ordering::SeqCst)
+        )
+    });
 }
 
 /// Whether a connection goes on after a read that came back with nothing to
@@ -13816,6 +13903,8 @@ mod peers_and_loops {
     fn a_node_holding_its_dials_still_reaches_an_address_it_never_heard_from() {
         let node = quiet();
         let far = Node::bind(ConsensusParams::testnet(), local()).unwrap();
+        trace_start(node.shared.nonce);
+        trace_start(far.shared.nonce);
         let (socket, _other) = a_socket();
         {
             // Numbered clear of what the node hands out to its own dials.
@@ -13876,11 +13965,14 @@ mod peers_and_loops {
                 .collect();
             format!("{} entries [{}]", peers.len(), entries.join("; "))
         };
+        let threads = threads_of(&node);
         let early = node.shared.peers().len();
         dial_from_book(&node.shared, 1_000 + FEELER_PERIOD);
         let on_time = node.shared.peers().len();
         stop_all(&node);
         far.shutdown();
+        let near_trace = trace_of(node.shared.nonce).join("\n  ");
+        let far_trace = trace_of(far.shared.nonce).join("\n  ");
 
         assert!(
             reached,
@@ -13899,7 +13991,8 @@ mod peers_and_loops {
             let_go,
             "a feeler that had answered was kept: when the wait for it ran out the table held \
              {table} where it should have come back to {TARGET_PEERS}, and the far end still \
-             held {far_end} connection(s) it had not dialled"
+             held {far_end} connection(s) it had not dialled; threads {threads}\nnear:\n  \
+             {near_trace}\nfar:\n  {far_trace}"
         );
         assert_eq!(
             early, TARGET_PEERS,
@@ -13909,6 +14002,157 @@ mod peers_and_loops {
             on_time,
             TARGET_PEERS + 1,
             "no feeler was dialled once its period was up"
+        );
+    }
+
+    /// TEMPORARY, for the Windows probe: which of this node's threads are
+    /// still running, by name.
+    fn threads_of(node: &Node) -> String {
+        let threads = node.shared.threads();
+        let named: Vec<String> = threads
+            .iter()
+            .map(|handle| {
+                format!(
+                    "{} {}",
+                    handle.thread().name().unwrap_or("unnamed"),
+                    if handle.is_finished() {
+                        "finished"
+                    } else {
+                        "running"
+                    }
+                )
+            })
+            .collect();
+        format!("[{}]", named.join(", "))
+    }
+
+    /// TEMPORARY, for the Windows probe on fix/windows-hang-up, not for
+    /// merging: the round's hang-up of an answered feeler, many times over and
+    /// side by side, with what each end did when one is kept.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::similar_names,
+        clippy::format_push_string
+    )]
+    fn probe_the_hang_up_of_a_feeler() {
+        fn wait_for(patience: Duration, ready: &dyn Fn() -> bool) -> Option<Duration> {
+            let began = Instant::now();
+            while began.elapsed() < patience {
+                if ready() {
+                    return Some(began.elapsed());
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            ready().then(|| began.elapsed())
+        }
+        fn inbound(far: &Node) -> usize {
+            far.shared
+                .peers()
+                .values()
+                .filter(|peer| peer.dialled_to.is_none())
+                .count()
+        }
+        fn attempt(lane: usize, round: usize) -> (bool, String) {
+            let node = quiet();
+            let far = Node::bind(ConsensusParams::testnet(), local()).unwrap();
+            trace_start(node.shared.nonce);
+            trace_start(far.shared.nonce);
+            let (socket, _other) = a_socket();
+            {
+                let mut peers = node.shared.peers();
+                for id in 0..TARGET_PEERS {
+                    peers.insert(1_000 + u64::try_from(id).unwrap(), stand_in(&socket, true));
+                }
+            }
+            node.shared.book().insert(far.address());
+            node.shared.running.store(true, Ordering::SeqCst);
+            dial_from_book(&node.shared, 1_000);
+            let greeted = wait_for(Duration::from_secs(30), &|| {
+                node.shared
+                    .peers()
+                    .values()
+                    .any(|peer| peer.feeler && peer.greeted)
+            });
+            let door = a_door();
+            node.shared.book().insert(door.local_addr().unwrap());
+            dial_from_book(&node.shared, 1_001);
+            let far_let_go = wait_for(Duration::from_secs(15), &|| inbound(&far) == 0);
+            let near_let_go = wait_for(Duration::from_secs(15), &|| {
+                node.shared.peers().len() == TARGET_PEERS
+            });
+            let mut line = format!(
+                "lane {lane} round {round}: greeted {greeted:?}, far let go {far_let_go:?}, \
+                 near let go {near_let_go:?}"
+            );
+            let anomaly = greeted.is_none() || far_let_go.is_none() || near_let_go.is_none();
+            if anomaly {
+                let threads = threads_of(&node);
+                let (described, second) = {
+                    let peers = node.shared.peers();
+                    match peers.iter().find(|(_, peer)| peer.feeler) {
+                        Some((id, peer)) => (
+                            format!(
+                                "feeler {id}: greeted {}, leaving {}, local {:?}, peer {:?}, \
+                                 take_error {:?}",
+                                peer.greeted,
+                                peer.leaving,
+                                peer.stream.local_addr(),
+                                peer.stream.peer_addr(),
+                                peer.stream.take_error()
+                            ),
+                            Some(peer.stream.shutdown(Shutdown::Both)),
+                        ),
+                        None => ("no feeler in the table".to_owned(), None),
+                    }
+                };
+                let far_after = wait_for(Duration::from_secs(10), &|| inbound(&far) == 0);
+                let near_after = wait_for(Duration::from_secs(10), &|| {
+                    node.shared.peers().len() == TARGET_PEERS
+                });
+                line.push_str(&format!(
+                    "; ANOMALY {described}; threads {threads}; second shutdown {second:?}; \
+                     then far let go {far_after:?}, near let go {near_after:?}"
+                ));
+            }
+            stop_all(&node);
+            far.shutdown();
+            let near_trace = trace_of(node.shared.nonce);
+            let far_trace = trace_of(far.shared.nonce);
+            if anomaly {
+                line.push_str(&format!(
+                    "\n near:\n  {}\n far:\n  {}",
+                    near_trace.join("\n  "),
+                    far_trace.join("\n  ")
+                ));
+            }
+            (anomaly, line)
+        }
+
+        let lanes: Vec<_> = (0..8)
+            .map(|lane| {
+                thread::spawn(move || {
+                    (0..40)
+                        .map(|round| attempt(lane, round))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut anomalies = Vec::new();
+        let mut count = 0usize;
+        for lane in lanes {
+            for (anomaly, line) in lane.join().unwrap() {
+                count += 1;
+                if anomaly {
+                    anomalies.push(line);
+                }
+            }
+        }
+        assert!(
+            anomalies.is_empty(),
+            "{} of {count} hang-ups did not end the feeler:\n{}",
+            anomalies.len(),
+            anomalies.join("\n")
         );
     }
 
