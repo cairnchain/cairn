@@ -466,7 +466,10 @@ timestamp: of two branches of one length, the one dated earlier is asked a
 little more above its first block and so weighs a little more, and
 switching on that surplus would hand every such race to whoever dated its
 blocks earliest, a withholding miner above all, rather than to the block
-heard first. A switch is applied atomically: each applied block records
+heard first. That surplus grows with the depth of the match, so even within
+the band a withholder that dates its blocks as early as the median allows
+takes matches seven or more blocks deep, and loses more to the difficulty
+than it gains. A switch is applied atomically: each applied block records
 its own inverse, and a bad block discovered partway through a switch
 returns the node exactly where it was.
 

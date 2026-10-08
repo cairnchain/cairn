@@ -490,3 +490,100 @@ fn the_fork_choice_over_rivals_around_one_tip() {
         "a node holding nothing takes no branch carrying none"
     );
 }
+
+/// Text with every run of whitespace made one space and the comment markers
+/// of a Rust source left out, so that a phrase is found however it was
+/// wrapped.
+fn flat(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|word| !matches!(*word, "///" | "//!" | "//"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The site states the fork choice in four strings, two in each language, and
+/// the band reached the four documents and none of them: the site said ties
+/// keep the followed branch and nothing of the rival of the tip's height that
+/// carries up to half a block more, which is the whole of the band. So every
+/// place a file says ties keep the followed branch, it says the band with it.
+#[test]
+fn the_site_states_the_band_wherever_it_states_the_tie() {
+    for (name, text, tie, band) in [
+        (
+            "the site",
+            include_str!("../../../web/i18n/en.json"),
+            "Ties keep the branch already followed",
+            "Ties keep the branch already followed, and two tips of one height are a tie until \
+             one carries more than half a block of extra work.",
+        ),
+        (
+            "le site",
+            include_str!("../../../web/i18n/fr.json"),
+            "la branche déjà suivie est conservée",
+            "la branche déjà suivie est conservée, et deux pointes de même hauteur sont à égalité \
+             tant que l'une ne porte pas plus d'un demi-bloc de travail en plus.",
+        ),
+    ] {
+        let text = flat(text);
+        assert_eq!(
+            text.matches(band).count(),
+            2,
+            "{name} does not state the band in both places it states the fork choice"
+        );
+        assert_eq!(
+            text.matches(tie).count(),
+            text.matches(band).count(),
+            "{name} says a tie keeps the followed branch somewhere without the band"
+        );
+    }
+}
+
+/// The documents say a branch dated earlier weighs "a little more", and that
+/// within the band a race goes to the block heard first. Both are exact for
+/// branches dated by their clocks and below seven blocks: a branch dated one
+/// second past its own median every block carries 0.480 of the honest tip's
+/// difficulty more at six blocks deep and 0.615 at seven, and is taken by a
+/// node that heard the honest branch first, though the dating costs the
+/// withholder more than the matches return (G1-3 of the testnet-9 audit). So
+/// every place that states the lean says where it stops.
+#[test]
+fn every_place_that_states_the_lean_says_where_it_stops() {
+    for (name, text, stated) in [
+        (
+            "lib.rs",
+            include_str!("../src/lib.rs"),
+            "a withholder that dates its blocks as early as the median allows takes matches \
+             seven or more blocks deep, and loses more to the difficulty than it gains",
+        ),
+        (
+            "the specification",
+            include_str!("../../../docs/cairn-specification.md"),
+            "a withholder that dates its blocks as early as the median allows takes matches \
+             seven or more blocks deep, and loses more to the difficulty than it gains.",
+        ),
+        (
+            "the threat model",
+            include_str!("../../../docs/cairn-threat-model.md"),
+            "A withholder that dates its blocks as early as the median allows takes matches \
+             seven or more blocks deep, and loses more to the difficulty than it gains.",
+        ),
+        (
+            "the whitepaper",
+            include_str!("../../../docs/cairn-whitepaper.md"),
+            "a withholder that dates its blocks as early as the median allows takes matches \
+             seven or more blocks deep, and loses more to the difficulty than it gains.",
+        ),
+        (
+            "the design document",
+            include_str!("../../../docs/cairn-design.md"),
+            "un mineur qui date ses blocs aussi tôt que la médiane le permet emporte les courses \
+             de sept blocs ou plus, et y perd en difficulté plus qu'il n'y gagne.",
+        ),
+    ] {
+        assert!(
+            flat(text).contains(stated),
+            "{name} states the lean of an earlier-dated branch without saying where it stops: \
+             \"{stated}\""
+        );
+    }
+}
