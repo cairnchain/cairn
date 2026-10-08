@@ -1462,9 +1462,9 @@ floor's edge, and the blocks after it are asked the floor until the chain has
 caught up to that edge: measured on testnet-8's rules, 3 455 blocks at the
 floor after a departure from 4 096 times and 9 191 after 8 192 when every block
 takes the mean time its difficulty asks, and a median of 2 244 and 7 793 over
-sixty four seeds of random block times. It stays because the weighing reasons from it: a run of
-blocks implies a least and a most work only because no step moves the
-difficulty further than this.
+sixty four seeds of random block times. It stays because the weighing reasons
+from it: a run of blocks implies a least and a most work only because no step
+moves the difficulty further than this.
 
 These are vectors from an independent reference written with unbounded
 integers; `crates/cairn-ledger/tests/asert_vectors.txt` holds 50 of them, and an
@@ -2272,9 +2272,10 @@ From the run's second header on, each header is held to the rules a node
 applies to any block it is handed: the difficulty the retarget demands of the
 header below it, its own work added to that header's total, and, where the run
 holds the window, a timestamp later than the median of the eleven headers below
-it. That is the pinned header and the ninety below it as well as everything
-above. The retarget reads only the header below and the network's first block,
-so the run carries everything the difficulty needs, and the pinned header,
+it. That reaches the pinned header and the ninety below it as well as
+everything above, from the run's second header on. The retarget reads only
+the header below and the network's first block, so the run carries everything
+the difficulty needs, and the pinned header,
 whose difficulty the tie below starts from, states the one its parent demands
 rather than one of its own choosing. The first header of the run has no parent
 in it and is not judged, and nothing here claims the whole run.
@@ -2680,16 +2681,16 @@ fewer headers is not the rule, and over timestamps that do not rise it can
 stand above the real one and refuse an honest handover, so a node MUST NOT ask
 it there.
 
-**Twenty-seven is asked from the second recent header on, the anchor
-included.** The retarget reads only the header below and the network's first
-block, so the run carries everything it needs. The anchor is the header whose
-difficulty seeds the first buried header's demand and the bound of four around
-it, and the buried walk starts above it, so nothing else judges it. The first
-recent header has no parent in the run and is not judged, as its total is not.
-Every header of the run is the anchor's hash ancestry, so a difficulty or a
-total bent anywhere in it also breaks the link above it; twenty-seven and
-twenty-eight come before thirty so that the refusal says what was wrong rather
-than that the run is not one chain.
+**Twenty-seven is asked from the second recent header on, the anchor included
+unless it is the run's only header.** The retarget reads only the header below
+and the network's first block, so the run carries everything it needs. The
+anchor is the header whose difficulty seeds the first buried header's demand and
+the bound of four around it, and the buried walk starts above it, so nothing
+else judges it. The first recent header has no parent in the run and is not
+judged, as its total is not. Every header of the run is the anchor's hash
+ancestry, so a difficulty or a total bent anywhere in it also breaks the link
+above it; twenty-seven and twenty-eight come before thirty so that the refusal
+says what was wrong rather than that the run is not one chain.
 
 ### What is pinned by a commitment, and what is not
 
