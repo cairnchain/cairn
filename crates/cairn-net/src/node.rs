@@ -15156,6 +15156,123 @@ mod peers_and_loops {
         assert_eq!(recovered.answered, 1, "{recovered:?}");
     }
 
+    /// Writes `address` into the book as an archivist last heard from at
+    /// `heard`.
+    fn an_archivist_in_the_book(node: &Node, address: SocketAddr, heard: u64) {
+        let mut book = node.shared.book();
+        book.insert(address);
+        book.answered(&address, heard);
+        book.keeps_the_cold_set(&address, true);
+    }
+
+    /// `count` archivists in the book, heard from at `heard`, that no dial
+    /// reaches: hosts this node is refusing, so each fails at once on every
+    /// platform rather than in the two seconds Windows takes to refuse.
+    fn archivists_out_of_reach(node: &Node, count: u8, heard: u64) {
+        for last in 1..=count {
+            let address = SocketAddr::from((Ipv4Addr::new(203, 0, 113, last), 9000));
+            node.shared.refuse(address.ip(), unix_now());
+            an_archivist_in_the_book(node, address, heard);
+        }
+    }
+
+    /// **One round of reaching opens what it is for with half of its
+    /// addresses out of reach.**
+    ///
+    /// What [`DIALS_PER_REACH`] says it is for. Four archivists nobody can
+    /// reach, newer in the book than four that take the connection: a round
+    /// that gave up before the eighth dial opened fewer than
+    /// [`REACH_FOR_ARCHIVISTS`].
+    #[test]
+    fn a_round_of_reaching_opens_what_it_is_for_with_half_its_addresses_gone() {
+        let node = quiet();
+        archivists_out_of_reach(&node, 4, 200);
+        let doors: Vec<TcpListener> = (0..4).map(|_| a_door()).collect();
+        for door in &doors {
+            an_archivist_in_the_book(&node, door.local_addr().unwrap(), 100);
+        }
+        node.shared.running.store(true, Ordering::SeqCst);
+
+        let mut tried = HashSet::new();
+        let opened = node.reach_for_an_archivist(
+            &mut tried,
+            Instant::now().checked_add(Duration::from_secs(60)),
+        );
+        let reached = dialled(&node);
+        stop_all(&node);
+        assert_eq!(
+            (opened, reached),
+            (Some(REACH_FOR_ARCHIVISTS), REACH_FOR_ARCHIVISTS),
+            "a round with half its addresses out of reach did not open what it is for"
+        );
+    }
+
+    /// **A node connected to nobody reaches again past a round that opened
+    /// nothing.**
+    ///
+    /// The first round of a node with nobody to ask is the one it makes
+    /// before looking at the question, and what that round came to was not
+    /// read: a round of addresses out of reach left the archivist behind them
+    /// undialled for the rest of the question.
+    #[test]
+    fn a_node_connected_to_nobody_reaches_again_past_a_round_that_opened_nothing() {
+        let node = quiet();
+        let rounds = u8::try_from(DIALS_PER_REACH).unwrap();
+        archivists_out_of_reach(&node, rounds, 200);
+        let door = a_door();
+        an_archivist_in_the_book(&node, door.local_addr().unwrap(), 100);
+        node.shared.running.store(true, Ordering::SeqCst);
+
+        let looks = AtomicUsize::new(0);
+        let _ = node.recover_proofs_with(&[(7, Hash32::ZERO)], Duration::from_secs(60), || {
+            // Ended once the archivist is dialled, or after a few looks
+            // should it never be.
+            if dialled(&node) > 0 || looks.fetch_add(1, Ordering::SeqCst) >= 3 {
+                node.shared.asking().found.insert(
+                    7,
+                    ForestProof {
+                        siblings: Vec::new(),
+                    },
+                );
+            }
+        });
+        let reached = dialled(&node);
+        stop_all(&node);
+        assert_eq!(
+            reached, 1,
+            "the archivist behind a round of addresses out of reach was not dialled"
+        );
+    }
+
+    /// **A node connected to nobody, whose every address has failed, waits
+    /// out its patience for an archivist to arrive.**
+    ///
+    /// Nobody was asked, so nobody's answer ended it, and upkeep may yet
+    /// bring one: an answer that arrives at the first look is the one it was
+    /// waiting for. Ending the question once nobody was left to dial ended it
+    /// here before anybody could arrive.
+    #[test]
+    fn a_node_connected_to_nobody_waits_once_every_address_has_failed() {
+        let node = quiet();
+        archivists_out_of_reach(&node, 1, 200);
+        node.shared.running.store(true, Ordering::SeqCst);
+
+        let recovered =
+            node.recover_proofs_with(&[(7, Hash32::ZERO)], Duration::from_secs(60), || {
+                node.shared.asking().found.insert(
+                    7,
+                    ForestProof {
+                        siblings: Vec::new(),
+                    },
+                );
+            });
+        stop_all(&node);
+        assert!(
+            recovered.proofs.contains_key(&7),
+            "a node connected to nobody gave up once its addresses had failed: {recovered:?}"
+        );
+    }
+
     /// A question dials nobody once its patience is spent.
     ///
     /// The reach came before the patience was counted and dialled without
