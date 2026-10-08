@@ -32,6 +32,14 @@
 //! the claimers are the addresses it heard from last. With six claimers
 //! connected it now dials the honest archivist and has the path in that
 //! same round.
+//!
+//! **What was found next.** The reach said how many connections it opened,
+//! and nought was read as nobody left to dial. It took the first four
+//! addresses of the list before dialling any, so four that claimed the
+//! archive and went away, heard from after the honest archivist, ended every
+//! question with the archivist behind them never tried. It now dials past
+//! addresses that do not answer, a round at a time, and remembers within a
+//! question which it has tried.
 
 #![allow(
     clippy::unwrap_used,
@@ -53,6 +61,7 @@ use cairn_ledger::state::cold_leaf;
 use cairn_ledger::transaction::{CoinbaseTransaction, Transfer};
 use cairn_ledger::validation::{assemble_block, connect_block, mine_block, ConsensusParams};
 use cairn_ledger::LedgerState;
+use cairn_net::book::PEER_FILE;
 use cairn_net::message::{Handshake, Keeps, Message, Placed, PROTOCOL_VERSION};
 use cairn_net::node::TARGET_PEERS;
 use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
@@ -67,6 +76,13 @@ const PATIENCE: Duration = Duration::from_secs(30);
 
 /// The peers that claim the archive, as many as the catalogue sends.
 const CLAIMERS: usize = 6;
+
+/// Addresses that claimed the archive and are no longer there, as many as
+/// one round of reaching used to try.
+const GHOSTS: usize = 4;
+
+/// More of them than one round of reaching dials, which is eight.
+const GHOSTS_PAST_A_ROUND: usize = 9;
 
 /// A small hot set, so notes fall at once, and a shallow burial.
 fn params() -> ConsensusParams {
@@ -206,6 +222,12 @@ impl Drop for Pretender {
 /// A node that met the honest archivist before and is now connected to
 /// `claimers` peers claiming the archive and enough others to hold all its
 /// dialled connections, and the honest archivist, up and not connected.
+///
+/// And `ghosts` further addresses that claimed the archive and are gone:
+/// peers that were dialled, introduced themselves, and went away, after the
+/// archivist did. Their addresses stay in the book, marked as keeping the
+/// cold set and heard from more recently than the archivist, and nothing
+/// answers on them, which is also what four archivists that moved look like.
 struct Scene {
     directory: std::path::PathBuf,
     keeper: Node,
@@ -216,7 +238,7 @@ struct Scene {
 }
 
 impl Scene {
-    fn new(name: &str, claimers: usize) -> Self {
+    fn new(name: &str, claimers: usize, ghosts: usize) -> Self {
         let (blocks, position, leaf) = a_chain_with_a_fallen_note();
         let top = (blocks.len() - 1) as u64;
         let directory = scratch(name);
@@ -265,7 +287,36 @@ impl Scene {
         wait_for("the asker to notice the archivist went", || {
             asker.peer_count() == TARGET_PEERS
         });
+
+        // A second after the archivist's ending, so the book's order by when
+        // each address last spoke is not a tie.
+        if ghosts > 0 {
+            thread::sleep(Duration::from_millis(1_100));
+            let gone: Vec<Pretender> = (0..ghosts)
+                .map(|index| Pretender::start(0x40 + u8::try_from(index).unwrap(), true))
+                .collect();
+            for ghost in &gone {
+                asker.connect(ghost.address).unwrap();
+            }
+            wait_for(
+                "the peers that claim the archive to introduce themselves",
+                || asker.peers_introduced() == TARGET_PEERS + ghosts,
+            );
+            drop(gone);
+            wait_for("those peers to go away", || {
+                asker.peer_count() == TARGET_PEERS
+            });
+        }
+
+        // Without the book it kept, which holds the asker: an archivist that
+        // comes back dials who it knows, and the asker would be asking it
+        // because it called, whatever the asker's own reach did.
+        let _ = std::fs::remove_file(directory.join(PEER_FILE));
         let (keeper, _) = Node::open_archiving(params(), at, &directory).unwrap();
+        assert!(
+            keeper.known_addresses().is_empty(),
+            "fixture: the archivist knows nobody to dial"
+        );
         assert_eq!(keeper.height(), Some(top));
         assert_eq!(asker.archiving_peers(), claimers);
         assert_eq!(keeper.peer_count(), 0);
@@ -295,7 +346,7 @@ impl Scene {
 /// earlier connection is followed with a dial, and the answer folds.
 #[test]
 fn a_node_with_no_archivist_connected_reaches_the_one_it_met() {
-    let scene = Scene::new("none-claiming", 0);
+    let scene = Scene::new("none-claiming", 0, 0);
     let answer = scene
         .asker
         .recover_proofs(&[(scene.position, scene.leaf)], PATIENCE);
@@ -316,7 +367,7 @@ fn a_node_with_no_archivist_connected_reaches_the_one_it_met() {
 /// round.
 #[test]
 fn a_node_that_knows_an_honest_archivist_gets_the_path_past_peers_that_only_claim_it() {
-    let scene = Scene::new("six-claiming", CLAIMERS);
+    let scene = Scene::new("six-claiming", CLAIMERS, 0);
     let answer = scene
         .asker
         .recover_proofs(&[(scene.position, scene.leaf)], PATIENCE);
@@ -331,5 +382,58 @@ fn a_node_that_knows_an_honest_archivist_gets_the_path_past_peers_that_only_clai
          knows: {} asked, {} answered, nothing placed, and the archivist dialled {} \
          times",
         answer.asked, answer.answered, dialled
+    );
+}
+
+/// **Four addresses that claimed the archive and went away do not keep a
+/// node from the honest archivist in its book.**
+///
+/// They did. The node asked its six connected claimers, took six empty
+/// answers, reached for the first four archivists in its book, failed to
+/// open a connection to any of them, and read that as nobody being left to
+/// dial. The honest archivist, up and at the address the book holds for it,
+/// was never tried, and every later question took the same four.
+#[test]
+fn addresses_that_claimed_the_archive_and_went_away_do_not_stop_the_reach() {
+    let scene = Scene::new("ghosts", CLAIMERS, GHOSTS);
+    let answer = scene
+        .asker
+        .recover_proofs(&[(scene.position, scene.leaf)], PATIENCE);
+    let asked: u64 = scene.pretenders.iter().map(Pretender::asked).sum();
+    let dialled = scene.keeper.peer_count();
+    let found = answer.proofs.contains_key(&scene.position);
+    scene.finish();
+    assert_eq!(asked, CLAIMERS as u64, "fixture: every claimer was asked");
+    assert!(
+        found,
+        "{GHOSTS} addresses that claimed the archive and went away kept the node from the \
+         honest archivist it knows: {} asked, {} answered, nothing placed, and the \
+         archivist dialled {dialled} times",
+        answer.asked, answer.answered
+    );
+}
+
+/// **More addresses gone than one round of reaching dials do not keep a node
+/// from the honest archivist behind them.**
+///
+/// A round dials at most eight addresses, so these nine take two, and the
+/// second has to go on past the first round's rather than back to them.
+#[test]
+fn more_addresses_gone_than_a_round_dials_do_not_stop_the_reach() {
+    let scene = Scene::new("many-ghosts", CLAIMERS, GHOSTS_PAST_A_ROUND);
+    // Windows takes about two seconds to refuse a dial on the loopback, and
+    // nine are refused before the archivist is dialled.
+    let answer = scene
+        .asker
+        .recover_proofs(&[(scene.position, scene.leaf)], PATIENCE * 2);
+    let dialled = scene.keeper.peer_count();
+    let found = answer.proofs.contains_key(&scene.position);
+    scene.finish();
+    assert!(
+        found,
+        "{GHOSTS_PAST_A_ROUND} addresses that claimed the archive and went away kept the node \
+         from the honest archivist behind them: {} asked, {} answered, and the archivist \
+         dialled {dialled} times",
+        answer.asked, answer.answered
     );
 }
