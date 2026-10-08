@@ -316,7 +316,9 @@ fn a_node_stopped_while_putting_a_rival_together_starts_again_from_its_own_branc
     for block in followed {
         node.submit_block(block.clone()).unwrap();
     }
-    let stopped_at = rival.len() - 10;
+    // Past what memory holds beside the branch, and short of the block that
+    // outweighs.
+    let stopped_at = rival.len() - 2;
     let answers = hand_over(&node, &rival[..stopped_at]);
     assert!(
         answers.iter().all(|answer| answer == "SideBranch"),

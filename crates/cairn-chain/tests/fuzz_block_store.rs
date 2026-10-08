@@ -643,6 +643,87 @@ fn network(rng: &mut Rng, flood: Option<Price>, salt: u64, padded: bool, spills:
     }
 }
 
+/// The case a disk is for, built rather than drawn.
+///
+/// A branch of two blocks the store follows, and a heavier branch of three
+/// beside it from the first block, every block padded to the largest a block
+/// may be. The store is handed the branch it follows, then the closing
+/// delivery begins, and after the first block of the heavier branch a fat
+/// flood lands on the first block: siblings tying that block, which arrived
+/// before them, past what memory holds beside the branch. A store with
+/// nowhere to spill lets the earlier of equal blocks go, which is the
+/// heavier branch's first, and refuses the rest of it for that parent; a
+/// store with a disk holds all of it and follows the heavier branch.
+///
+/// A draw reaches this seldom, since it needs the store on another branch,
+/// that branch's first block a leaf, and the flood just after it, so the
+/// campaign holds it every run.
+fn the_case_a_disk_is_for(rng: &mut Rng, salt: u64) -> (Network, Vec<Step>) {
+    let mut params = rules(LIGHT);
+    params.coinbase_maturity = 0;
+    let mut honest: Vec<Honest> = Vec::new();
+    // Each on its parent, a minute after it, which is the schedule, so every
+    // block asks the same difficulty and the work is the height.
+    for (index, parent) in [None, Some(0), Some(1), Some(0), Some(3), Some(4)]
+        .into_iter()
+        .enumerate()
+    {
+        let before = parent.map_or_else(LedgerState::new, |at: usize| honest[at].after.clone());
+        let timestamp = parent.map_or(OPENS, |at| honest[at].block.header.timestamp + 60);
+        let block = mint_padded(&params, &before, timestamp, salt ^ index as u64);
+        let mut after = before;
+        connect_block(&mut after, &block, &params, NOW).unwrap();
+        honest.push(Honest {
+            work: block.header.total_work,
+            block,
+            parent,
+            after,
+        });
+    }
+    assert!(honest[5].work > honest[2].work && honest[3].work < honest[2].work);
+    let universe = honest
+        .iter()
+        .enumerate()
+        .map(|(index, minted)| Entry {
+            block: minted.block.clone(),
+            kind: Kind::Honest(index),
+            near: index,
+        })
+        .collect();
+    let honest_by_id = honest
+        .iter()
+        .enumerate()
+        .map(|(index, minted)| (minted.block.id(), index))
+        .collect();
+    let network = Network {
+        params,
+        honest,
+        universe,
+        honest_by_id,
+        heaviest: 5,
+        padded: true,
+        spills: true,
+    };
+    let steps = vec![
+        Step::Offer(0),
+        Step::Offer(1),
+        Step::Offer(2),
+        Step::Close(0),
+        Step::Close(3),
+        Step::Flood {
+            depth: 1,
+            count: MAX_SIDE_BYTES / FAT_BYTES + rng.between(1, 8),
+            shape: Shape::Fat,
+            price: Price::Paid,
+            salt: rng.edgy_u64(),
+            closing: true,
+        },
+        Step::Close(4),
+        Step::Close(5),
+    ];
+    (network, steps)
+}
+
 /// How the junk of a flood hangs together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shape {
@@ -1776,13 +1857,10 @@ fn the_block_store_follows_the_heaviest_valid_branch_whatever_order_it_hears_it_
         // what reaches the side store's ceiling, and it costs a second or so.
         // The first is paid and the second free, so a short run holds both.
         //
-        // The first is also the case this campaign most needs and a draw
-        // reaches least: a fat flood in the middle of the closing delivery,
-        // tying the first block of the heaviest branch, on a store with a
-        // disk, over honest blocks as large as a block may be. Without the
-        // disk that flood costs the store the branch, and with it, nothing.
-        // The third is the same flood on a store without one, where it hangs
-        // a block lower.
+        // The first is also built rather than drawn: see
+        // `the_case_a_disk_is_for`. The third is a fat flood in the middle of
+        // the closing delivery on a store without a disk, where it hangs a
+        // block lower.
         let flood = match case {
             0 | 2 => Some(Price::Paid),
             1 => Some(Price::Free),
@@ -1791,14 +1869,7 @@ fn the_block_store_follows_the_heaviest_valid_branch_whatever_order_it_hears_it_
                 .then(|| if rng.bool() { Price::Paid } else { Price::Free }),
         };
         let (padded, spills, drawn) = match case {
-            0 => (
-                true,
-                true,
-                Drawn {
-                    shape: Some(Shape::Fat),
-                    closing: Some(true),
-                },
-            ),
+            0 => (true, true, Drawn::default()),
             2 => (
                 true,
                 false,
@@ -1813,8 +1884,13 @@ fn the_block_store_follows_the_heaviest_valid_branch_whatever_order_it_hears_it_
             tally.padded += 1;
         }
         let salt = rng.edgy_u64();
-        let network = network(rng, flood, salt, padded, spills);
-        let steps = sequence(rng, &network, flood, drawn);
+        let (network, steps) = if case == 0 {
+            the_case_a_disk_is_for(rng, salt)
+        } else {
+            let network = network(rng, flood, salt, padded, spills);
+            let steps = sequence(rng, &network, flood, drawn);
+            (network, steps)
+        };
 
         let first = run(&network, &steps, Some(&mut tally));
         let failure = match first {
@@ -1922,5 +1998,10 @@ fn the_block_store_follows_the_heaviest_valid_branch_whatever_order_it_hears_it_
         tally.most_spilled > 0,
         "no store spilled a body, so what a node with a disk does with a full store was never \
          asked"
+    );
+    assert!(
+        tally.applied_from_disk > 0,
+        "no switch applied a body that had been spilled, so a branch put together past memory \
+         was never followed"
     );
 }

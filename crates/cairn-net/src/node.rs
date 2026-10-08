@@ -11393,10 +11393,12 @@ mod disk_and_headers {
     #[test]
     fn headers_below_what_the_chain_can_compare_against_stand() {
         let params = ConsensusParams::testnet();
-        let (blocks, states) = forged(11, params);
-        let recent: Vec<BlockHeader> = blocks[6..].iter().map(|block| block.header).collect();
+        // A run of eleven, the least a ledger is adopted with, starting
+        // above height 3.
+        let (blocks, states) = forged(16, params);
+        let recent: Vec<BlockHeader> = blocks[5..].iter().map(|block| block.header).collect();
         let mut chain = ChainStore::new(params);
-        chain.adopt(states[10].clone(), &recent).unwrap();
+        chain.adopt(states[15].clone(), &recent).unwrap();
         assert!(
             chain.id_at(3).is_none(),
             "the fixture has to be a chain with nothing to say about height 3"
