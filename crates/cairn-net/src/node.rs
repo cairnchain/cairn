@@ -9404,11 +9404,11 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
 /// one held none of its leaves and never archived anything from then on.
 ///
 /// And for a node that holds a short branch of its own, read from a peer it
-/// asked at the handshake. A ledger is adopted only onto a node holding
-/// nothing past the first block (`ChainStore::adopt`), so a join asked of such
-/// a node was answered, weighed and then dropped as an answer that outlived
-/// its question, and the honest peer that gave it paid for the silence with
-/// its claim. The branch is short enough for the fork choice to leave, which
+/// asked at the handshake, which is still choosing. A ledger is adopted only
+/// onto a node holding nothing past the first block (`ChainStore::adopt`), so
+/// a join asked of such a node would have every piece dropped as an answer
+/// that outlived its question, and the honest peer giving it would be failed
+/// for the silence. The branch is short enough for the fork choice to leave, which
 /// is why the choice is still open, so reading the chosen chain is what takes
 /// it: its blocks are held beside the branch until they outweigh it, and the
 /// switch is no deeper than the network undoes. Widening the adoption instead

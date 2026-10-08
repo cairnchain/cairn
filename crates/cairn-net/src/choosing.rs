@@ -487,8 +487,8 @@ impl Chooser {
     /// this node holds that block, and nought when it does not.
     ///
     /// Its words are replaced by that in both directions, as a weighing
-    /// replaces them in [`Self::shown`]. The height is now one past what this
-    /// node undoes, so the claim is one worth settling and opens the choice if
+    /// replaces them in [`Self::shown`]. The height is past what this node
+    /// undoes, so the claim is one worth settling and opens the choice if
     /// nothing had. The work is what this node saw rather than what it was
     /// told: a peer that said it had nought blocks and the work of a long
     /// chain, and then sent a short cheap branch, is ranked by the branch. Kept
