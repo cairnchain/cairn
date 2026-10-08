@@ -87,6 +87,18 @@ pub(crate) const MAX_MISSES: u8 = 3;
 /// dropped in the end.
 pub(crate) const MAX_TURNED_AWAY: u8 = 32;
 
+/// Dials in a row that ran out of time, or were made in line because this
+/// machine would not start a thread for them, before an address is dropped.
+///
+/// Counted apart from misses, because either is a fact about this machine as
+/// much as about the far end. A machine that is swapping, or whose disk has
+/// stalled, answers nothing within a dial's time and starts no thread, and
+/// booked as misses, three such rounds took out of the book honest addresses
+/// it had held for a month and kept the ones that answer fastest. Waited out
+/// as a miss is, so an address that hangs is not dialled every second, and
+/// still counted, so one that hangs for good is dropped in the end.
+pub(crate) const MAX_TIMED_OUT: u8 = 10;
+
 /// How long an address is left alone after one failed dial.
 ///
 /// It doubles twice over per further miss, so an address that has just missed
@@ -128,6 +140,9 @@ struct Known {
     misses: u8,
     /// Dials in a row taken and shut before a word, cleared the same way.
     turned_away: u8,
+    /// Dials in a row that ran out of time or were made in line, cleared the
+    /// same way.
+    timed_out: u8,
     /// When it last spoke, or when it was first written down.
     heard: u64,
     /// The moment before which this address is not dialled again.
@@ -800,6 +815,7 @@ impl AddressBook {
         };
         known.misses = 0;
         known.turned_away = 0;
+        known.timed_out = 0;
         known.quiet_until = 0;
         let before = known.heard;
         known.heard = now;
@@ -840,6 +856,25 @@ impl AddressBook {
         known.turned_away = known.turned_away.saturating_add(1);
         known.quiet_until = now.saturating_add(Known::quiet_for(known.turned_away));
         if known.turned_away < MAX_TURNED_AWAY || known.seed {
+            return false;
+        }
+        self.remove(address);
+        true
+    }
+
+    /// Notes that a dial to this address ran out of time, or was made in line
+    /// because this machine would not start a thread for it.
+    ///
+    /// Returns whether that was the last chance it had. Waits as a miss does,
+    /// and is allowed [`MAX_TIMED_OUT`] of them rather than [`MAX_MISSES`]:
+    /// see the first for why.
+    pub(crate) fn timed_out(&mut self, address: &SocketAddr, now: u64) -> bool {
+        let Some(known) = self.known.get_mut(address) else {
+            return false;
+        };
+        known.timed_out = known.timed_out.saturating_add(1);
+        known.quiet_until = now.saturating_add(Known::quiet_for(known.timed_out));
+        if known.timed_out < MAX_TIMED_OUT || known.seed {
             return false;
         }
         self.remove(address);
@@ -928,6 +963,7 @@ impl AddressBook {
         for known in self.known.values_mut() {
             known.misses = 0;
             known.turned_away = 0;
+            known.timed_out = 0;
             known.quiet_until = 0;
         }
     }
@@ -2364,6 +2400,34 @@ mod tests {
             "an address that shuts every connection was never dropped"
         );
         assert!(!book.contains(&busy));
+    }
+
+    /// An address whose dials ran out of time is kept for more of them than
+    /// one that refused, is left alone between them as after a miss, and is
+    /// dropped in the end.
+    ///
+    /// Every failed dial was a miss, so three rounds on a machine too busy to
+    /// finish a dial in time took an honest address out of the book.
+    #[test]
+    fn an_address_whose_dials_ran_out_of_time_is_tried_for_longer_and_then_dropped() {
+        let mut book = AddressBook::new();
+        let slow = address(1, 9000);
+        book.insert(slow);
+        let mut now = 1_000;
+        for _ in 1..MAX_TIMED_OUT {
+            assert!(
+                !book.timed_out(&slow, now),
+                "an address whose dials ran out of time was dropped before its last chance"
+            );
+            assert!(book.ready(now).is_empty(), "it was dialled again at once");
+            now += MAX_QUIET;
+            assert_eq!(book.ready(now), vec![slow], "and never again");
+        }
+        assert!(
+            book.timed_out(&slow, now),
+            "an address whose every dial runs out of time was never dropped"
+        );
+        assert!(!book.contains(&slow));
     }
 
     /// What is held against an address that shut the door goes the way a

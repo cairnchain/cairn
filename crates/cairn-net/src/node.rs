@@ -9858,7 +9858,7 @@ where
         if wave.is_empty() {
             return;
         }
-        for (address, dialled) in dial_side_by_side(&wave, dial) {
+        for (address, dialled, in_line) in dial_side_by_side(&wave, dial) {
             match dialled {
                 // Asked again, because the room was judged before the wave
                 // for each address alone, and two in one wave can be one
@@ -9875,9 +9875,7 @@ where
                 }
                 // An address that never answers would otherwise be dialled every
                 // second forever, and handed to every peer that asks.
-                Err(_) => {
-                    shared.book().missed(&address, now);
-                }
+                Err(error) => file_a_failed_dial(shared, &address, &error, in_line, now),
             }
         }
         width = DIALS_AT_ONCE;
@@ -9885,18 +9883,22 @@ where
 }
 
 /// Dials every address in `wave` at once, and answers for each in the order
-/// they were given.
+/// they were given, and whether it was made in line because no thread would
+/// start for it.
 ///
 /// Side by side, so a wave costs its slowest dial rather than the sum of them:
 /// a thread each, all joined before this returns. A machine that will not
 /// start one gets that dial made here instead, after the others, which is how
 /// every dial was made before.
-fn dial_side_by_side<D>(wave: &[SocketAddr], dial: &D) -> Vec<(SocketAddr, io::Result<TcpStream>)>
+fn dial_side_by_side<D>(
+    wave: &[SocketAddr],
+    dial: &D,
+) -> Vec<(SocketAddr, io::Result<TcpStream>, bool)>
 where
     D: Fn(&SocketAddr) -> io::Result<TcpStream> + Sync,
 {
     if let [only] = wave {
-        return vec![(*only, dial(only))];
+        return vec![(*only, dial(only), false)];
     }
     thread::scope(|scope| {
         let started: Vec<_> = wave
@@ -9910,17 +9912,40 @@ where
             .collect();
         started
             .into_iter()
-            .map(|(address, dialling)| {
-                let dialled = match dialling {
-                    Ok(handle) => handle
+            .map(|(address, dialling)| match dialling {
+                Ok(handle) => (
+                    *address,
+                    handle
                         .join()
                         .unwrap_or_else(|_| Err(io::Error::other("the dial did not finish"))),
-                    Err(_) => dial(address),
-                };
-                (*address, dialled)
+                    false,
+                ),
+                Err(_) => (*address, dial(address), true),
             })
             .collect()
     })
+}
+
+/// Holds a dial that came to nothing against the address it went to.
+///
+/// A dial that ran out of time, or that was made in line because this
+/// machine would not start a thread for it, says as much about this machine
+/// as about the far end, and is allowed more before the address goes: see
+/// [`crate::book::MAX_TIMED_OUT`]. A refusal, or a far end nothing reaches,
+/// is a miss.
+fn file_a_failed_dial(
+    shared: &Shared,
+    address: &SocketAddr,
+    error: &io::Error,
+    in_line: bool,
+    now: u64,
+) {
+    let mut book = shared.book();
+    if in_line || error.kind() == io::ErrorKind::TimedOut {
+        book.timed_out(address, now);
+    } else {
+        book.missed(address, now);
+    }
 }
 
 /// Seconds between two feelers: see [`feel`].
@@ -9970,9 +9995,7 @@ fn feel(shared: &Arc<Shared>, connected: &HashSet<SocketAddr>, now: u64) {
                 }
             }
         }
-        Err(_) => {
-            shared.book().missed(&address, now);
-        }
+        Err(error) => file_a_failed_dial(shared, &address, &error, false, now),
     }
 }
 
@@ -13657,6 +13680,35 @@ mod peers_and_loops {
             "a round left refusing addresses undialled, as if each had hung"
         );
         assert_eq!(reached, 0, "a refused dial was taken for a connection");
+    }
+
+    /// **A dial that ran out of time is not a miss: one reported
+    /// [`MAX_MISSES`] times leaves the address in the book, where a refused
+    /// one still takes it out.**
+    ///
+    /// Every failed dial was a miss, so a machine too busy to finish three
+    /// dials in time forgot an honest address it may have held for a month.
+    #[test]
+    fn a_dial_that_ran_out_of_time_is_not_a_miss() {
+        let kept_after = |kind: io::ErrorKind| {
+            let (node, _socket, _far, vacant) = one_short_knowing_vacant(1);
+            let mut now = 1_000;
+            for _ in 0..MAX_MISSES {
+                dial_from_book_with(&node.shared, now, &|_: &SocketAddr| Err(kind.into()));
+                now += 10_000;
+            }
+            let kept = node.shared.book().contains(&vacant[0]);
+            stop_all(&node);
+            kept
+        };
+        assert!(
+            kept_after(io::ErrorKind::TimedOut),
+            "an address whose dials ran out of time {MAX_MISSES} times was taken out of the book"
+        );
+        assert!(
+            !kept_after(io::ErrorKind::ConnectionRefused),
+            "an address that refused {MAX_MISSES} dials was kept"
+        );
     }
 
     /// A round is not rationed by addresses that take seconds to refuse.
