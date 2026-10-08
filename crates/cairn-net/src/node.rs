@@ -1874,6 +1874,8 @@ struct Shared {
     /// the count of peers that goes before it, so that a stop and a round of
     /// upkeep write theirs one after the other: see [`keep_anchors`]. Taken
     /// before the peers and the book, and never the other way round.
+    /// [`keep_anchors`] is the one place that takes it, so that order lives
+    /// there.
     writing_anchors: Mutex<()>,
     /// Blocks this build turned out not to be able to read, and who sent them.
     ///
