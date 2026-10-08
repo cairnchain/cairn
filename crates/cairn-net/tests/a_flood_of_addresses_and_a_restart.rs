@@ -457,18 +457,22 @@ fn honest_in_book(victim: &Node, honest: &[Node]) -> usize {
         .count()
 }
 
-/// The honest nodes the file of anchors in `directory` names, which is what a
-/// start dials before the book's order.
-fn honest_anchored(directory: &Path, honest: &[Node]) -> usize {
-    let written = std::fs::read_to_string(directory.join(ANCHOR_FILE)).unwrap_or_default();
-    let anchors: HashSet<SocketAddr> = written
-        .lines()
-        .filter_map(|line| line.trim().parse().ok())
-        .collect();
-    honest
-        .iter()
-        .filter(|node| anchors.contains(&node.address()))
-        .count()
+/// Waits for the file of anchors in `directory`, which is what a start dials
+/// before the book's order, to name every honest node, and fails `when` it
+/// does not.
+fn anchors_name_the_honest(directory: &Path, honest: &[Node], when: &str) {
+    let named = wait_until(PATIENCE, || {
+        let written = std::fs::read_to_string(directory.join(ANCHOR_FILE)).unwrap_or_default();
+        let anchors: HashSet<SocketAddr> = written
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        honest.iter().all(|node| anchors.contains(&node.address()))
+    });
+    assert!(
+        named,
+        "{when}, the anchors on the victim's disk left out an honest peer it held"
+    );
 }
 
 /// The victim dials the first honest node, learns the other two from it and
@@ -577,14 +581,8 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
         "the honest block reached the victim during the flood"
     );
 
-    // What the restart below dials first is the file, so it is asked as well
-    // as the slots: written as the outbound peers change, it names the three
-    // honest peers the victim has held all along.
-    assert!(
-        wait_until(PATIENCE, || honest_anchored(&directory, &honest) == HONEST),
-        "the anchors on the victim's disk name {} of its {HONEST} honest outbound peers",
-        honest_anchored(&directory, &honest)
-    );
+    // A restart dials the file first, so it is asked as well as the slots.
+    anchors_name_the_honest(&directory, &honest, "before a clean restart");
 
     // A clean restart: the node is asked to stop, writes its anchors, and is
     // started again on the same directory.
@@ -602,11 +600,7 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
         honest_out, HONEST,
         "a clean restart did not dial every honest anchor again"
     );
-    assert_eq!(
-        honest_anchored(&directory, &honest),
-        HONEST,
-        "the restarted victim wrote over its anchors without the honest peers it holds"
-    );
+    anchors_name_the_honest(&directory, &honest, "after a clean restart");
     assert!(
         wait_until(PATIENCE, || restarted.id_at(3) == Some(next.id())),
         "the restarted victim follows the honest chain"

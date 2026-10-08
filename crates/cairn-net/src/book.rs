@@ -655,9 +655,10 @@ impl AddressBook {
     /// minute, or one killed between its first dial at a start and the answer
     /// to it, holds nobody it went out to, or one, and the anchors it had are
     /// still the best guess it has at where to start from. Taken as the whole
-    /// of its anchors, what it held at that instant was written down, a kill
-    /// then left a start with one anchor or none, and it dialled the book in
-    /// its order, which is the order an attacker who filled the book chose.
+    /// of its anchors, the peers held at that instant were written down, and
+    /// a kill then left the next start one anchor or none to dial ahead of
+    /// the book's order, which is the order an attacker who filled the book
+    /// chose.
     pub(crate) fn anchor(&mut self, outbound: impl IntoIterator<Item = SocketAddr>, most: usize) {
         let mut anchors: BTreeSet<SocketAddr> = outbound.into_iter().map(canonical).collect();
         let room = most.saturating_sub(anchors.len());
