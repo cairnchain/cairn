@@ -1150,10 +1150,7 @@ fn the_threat_model_quotes_the_tables_in_the_header() {
     );
     let (least, most) = DEEP_GAMMA_BEFORE_THE_BAND;
     let range = format!("deep gamma {least:.2} to {most:.2} in every placement");
-    assert!(
-        header.contains(&range),
-        "the header does not say `{range}`"
-    );
+    assert!(header.contains(&range), "the header does not say `{range}`");
 
     let threat = flat(include_str!("../../../docs/cairn-threat-model.md"));
     let quoted = |[slow, even, fast]: [f64; 3]| format!("{slow:.2}, {even:.2} and {fast:.2}");

@@ -8,7 +8,9 @@
     clippy::arithmetic_side_effects
 )]
 
-use cairn_chain::{Accepted, ChainError, ChainStore, MAX_REORG_DEPTH};
+use cairn_chain::{
+    Accepted, ChainError, ChainStore, HELD_OVERHEAD, MAX_REORG_DEPTH, MAX_SIDE_BYTES,
+};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::note::{NetworkId, Note, NoteId};
@@ -927,20 +929,42 @@ fn what_a_node_holds_is_bounded_on_a_chain_younger_than_the_window() {
     // nothing builds on, which on a single branch is its top, so the block
     // after it arrives over a parent this node has let go of and is refused
     // for that. Either way it is not followed and the branch does not move.
+    //
+    // Either answer alone would pass a node that held nothing aside at all,
+    // so the rivals are held until what they hold is past the side store's
+    // ceiling, and refused only from then on.
     let mut previous = chain[0].id();
+    let mut held_aside = 0usize;
+    let mut refused_from = None;
     for n in 0..20u64 {
         let block = fat_block(1 + n, previous, 2 * 1024 * 1024, &wallet(9));
         previous = block.id();
+        let bytes = block.encode().len() + HELD_OVERHEAD;
         let answer = store.add_block(block, NOW);
-        assert!(
-            matches!(
-                answer,
-                Ok(Accepted::SideBranch) | Err(ChainError::UnknownParent(_))
-            ),
-            "rival block {n} was answered {answer:?}"
-        );
+        match answer {
+            Ok(Accepted::SideBranch) => {
+                assert_eq!(
+                    refused_from, None,
+                    "rival block {n} was held over a parent already refused"
+                );
+                held_aside += bytes;
+            }
+            Err(ChainError::UnknownParent(_)) => {
+                assert!(
+                    held_aside > MAX_SIDE_BYTES,
+                    "rival block {n} was refused for its parent with {held_aside} bytes held \
+                     aside, which the side store's ceiling of {MAX_SIDE_BYTES} does not sweep"
+                );
+                refused_from.get_or_insert(n);
+            }
+            other => panic!("rival block {n} was answered {other:?}"),
+        }
         assert_eq!(store.height(), Some(29), "rival block {n} moved the branch");
     }
+    assert!(
+        refused_from.is_some(),
+        "twenty rivals of two megabytes never passed the side store's ceiling"
+    );
     let offered = store.held_bytes();
     assert!(
         offered <= ceiling,
