@@ -679,7 +679,7 @@ fn the_side_store_lets_the_deepest_switch_the_rules_allow_happen() {
 
     let params = ConsensusParams::testnet();
     let deepest = ChainStore::new(params).undo_limit();
-    let rival = (deepest as usize + 1) * (params.max_block_bytes + HELD_OVERHEAD);
+    let rival = (usize::try_from(deepest).unwrap() + 1) * (params.max_block_bytes + HELD_OVERHEAD);
     let ceiling = ChainStore::side_bytes_ceiling(&params);
     // An eighth under, which is where the sweep stops; written out here
     // rather than read off the crate, which keeps it to itself.

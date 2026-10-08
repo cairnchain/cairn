@@ -1147,14 +1147,17 @@ pub trait Bodies: std::fmt::Debug + Send + Sync {
 /// By identifier, because a block off the branch has no height to be filed
 /// under: several share one, and none of them is in the log [`Bodies`] reads.
 ///
-/// A cache and not a record. A body put here may be gone when it is asked for,
-/// after a crash, a restart or a write the disk refused, and the chain then
-/// holds the entry without a body, as it holds a block whose body a failed
-/// switch let go of. What comes back is checked against the identifier and
-/// the root the header names before anything reads it, which is the check
-/// the door made when the body arrived, so bytes that changed under the chain
-/// are a body it no longer has and never one it believes. And nothing written
-/// here is written anywhere the followed branch or the ledger is kept.
+/// A cache and not a record. A body put here may not come back: a disk can
+/// lose it or change it, and a node that restarts starts with none, since
+/// what said whose each one was lived in the memory of the process before.
+/// A spilled body that does not come back leaves the chain holding the entry
+/// without a body, as a failed switch can, and a switch through it fails as
+/// one through any block whose body is missing. What does come back is
+/// checked against the identifier and the root the header names before
+/// anything reads it, which is the check the door made when the body arrived,
+/// so bytes that changed under the chain are a body it no longer has and
+/// never one it believes. And nothing written here is written anywhere the
+/// followed branch or the ledger is kept.
 pub trait SideBodies: std::fmt::Debug + Send + Sync {
     /// Keeps `block` under `id`, answering whether it was kept.
     fn put(&mut self, id: &Hash32, block: &Block) -> bool;
@@ -2770,8 +2773,8 @@ impl ChainStore {
             // The door above sets the price now: a place beside the branch
             // costs the work its parent demands, and a block no larger than
             // the rules allow, so siblings on one parent are the dearest shape
-            // and not the cheapest. What it buys is still a place, and places
-            // are what this bounds.
+            // and not the cheapest. What it buys is still room beside the
+            // branch, and that room is what this bounds.
             //
             // Swept here, where the block lands. The decision costs a length
             // and a comparison when there is nothing to do, which is every
@@ -3604,8 +3607,10 @@ impl ChainStore {
     /// under a switch, beside the four [`Self::undo_limit`] names, and the one
     /// that was not counted: with memory as the side store's only bound, a
     /// switch reached two hundred and fifty six full blocks and no further.
-    /// `tests/audit_seams.rs` and `published_figures.rs` hold it to the
-    /// switch it is sized for and to the figure the README states.
+    /// `cairn-explorer`'s `published_figures.rs` holds it to the switch it is
+    /// sized for and to the figure the README states, and `cairn-net`'s
+    /// `audit_a_switch_as_deep_as_promised.rs` to a node putting together a
+    /// rival past memory over full blocks.
     #[must_use]
     pub fn side_bytes_ceiling(params: &ConsensusParams) -> usize {
         let rival = usize::try_from(undo_limit_under(params))

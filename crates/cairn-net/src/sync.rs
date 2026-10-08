@@ -1708,8 +1708,12 @@ fn on_a_refused_parent(
 }
 
 // The last two arms answer the same way for opposite reasons, and collapsing
-// them would bury which is which.
-#[allow(clippy::match_same_arms)]
+// them would bury which is which. And it is one arm for each way the chain can
+// answer, read side by side because who is blamed is decided by comparing
+// them; split across functions, the arm for a block let go of for want of room
+// would sit apart from the one for a branch out of reach that it must not be
+// mistaken for.
+#[allow(clippy::match_same_arms, clippy::too_many_lines)]
 fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64) -> Reaction {
     let id = block.id();
     let height = block.header.height;
