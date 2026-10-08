@@ -3499,12 +3499,16 @@ impl Shared {
         }
     }
 
-    /// The peers this node went out to, that have introduced themselves and
-    /// are not feelers: the ones it vouches for at its next start.
+    /// The peers this node went out to, that have introduced themselves, are
+    /// not feelers and are not on their way out: the ones it vouches for at
+    /// its next start.
+    ///
+    /// A peer marked as leaving, by [`make_room_in`] or [`Self::hang_up`], is
+    /// a connection this node has already let go of.
     fn went_out_to(&self) -> Vec<SocketAddr> {
         self.peers()
             .values()
-            .filter(|peer| peer.dialled && peer.greeted && !peer.feeler)
+            .filter(|peer| peer.dialled && peer.greeted && !peer.feeler && !peer.leaving)
             .filter_map(|peer| peer.dialled_to)
             .collect()
     }
@@ -8455,6 +8459,9 @@ fn save_book(shared: &Arc<Shared>) {
 /// Writes down the peers this node went out to and is talking to whenever
 /// they are not the ones last written, so that what a node killed outright
 /// leaves on its disk names them, and its next start dials them first.
+/// Topped up to [`TARGET_PEERS`] with the anchors it had, so a kill just
+/// after a moment that held few of them does not leave a start with one:
+/// see `AddressBook::anchor`.
 ///
 /// They were written by [`Node::shutdown`] and by nothing else, and `cairnd`
 /// never runs that: it has no handler for a signal, and
@@ -8489,7 +8496,7 @@ fn keep_anchors(shared: &Arc<Shared>, stopping: bool) {
     let went_out_to = shared.went_out_to();
     let (anchors, changes) = {
         let mut book = shared.book();
-        book.anchor(went_out_to);
+        book.anchor(went_out_to, TARGET_PEERS);
         let changes = book.anchor_changes();
         if shared.anchors_written_at.load(Ordering::Relaxed) == changes {
             return;
@@ -15698,19 +15705,19 @@ mod peers_and_loops {
         );
     }
 
-    /// Only a connection this node dialled, that has introduced itself and is
-    /// not a feeler, is written down as an anchor.
+    /// Only a connection this node dialled, that has introduced itself, is
+    /// not a feeler and is not on its way out, is written down as an anchor.
     ///
     /// Anchors are what the next start dials first, so a dial that never said
     /// who it was, or a feeler about to be let go, put there is a stranger
     /// this node vouches for. Nothing asked which connections become anchors,
-    /// so either passed.
+    /// so either passed. A connection already let go of was counted too.
     #[test]
     fn only_a_greeted_dial_that_is_no_feeler_becomes_an_anchor() {
         let node = quiet();
         let (socket, _far) = a_socket();
-        let vacant = vacant_addresses(3);
-        let (kept, silent, felt) = (vacant[0], vacant[1], vacant[2]);
+        let vacant = vacant_addresses(4);
+        let (kept, silent, felt, leaving) = (vacant[0], vacant[1], vacant[2], vacant[3]);
         {
             let mut peers = node.shared.peers();
             peers.insert(
@@ -15737,10 +15744,19 @@ mod peers_and_loops {
                     ..stand_in(&socket, true)
                 },
             );
+            peers.insert(
+                4,
+                Peer {
+                    dialled_to: Some(leaving),
+                    greeted: true,
+                    leaving: true,
+                    ..stand_in(&socket, true)
+                },
+            );
         }
         {
             let mut book = node.shared.book();
-            for address in [kept, silent, felt] {
+            for address in [kept, silent, felt, leaving] {
                 book.insert(address);
             }
         }
@@ -15760,6 +15776,11 @@ mod peers_and_loops {
             book.heard_from(&felt),
             0,
             "a feeler was written down as an anchor"
+        );
+        assert_eq!(
+            book.heard_from(&leaving),
+            0,
+            "a connection already let go of was written down as an anchor"
         );
     }
 
@@ -15848,6 +15869,39 @@ mod peers_and_loops {
         assert_eq!(
             after_nobody, two,
             "a node holding nobody wrote over the anchors it had"
+        );
+    }
+
+    /// **A node that held three peers and is left holding one still names
+    /// all three in its anchors.**
+    ///
+    /// The anchors were whoever was held at the instant of one round, so a
+    /// node whose connections dropped and that had redialled one peer wrote
+    /// down that one, and a kill in that second left the next start one
+    /// anchor and the book's order for the rest.
+    #[test]
+    fn a_node_left_holding_one_of_three_peers_still_names_all_three() {
+        let (node, directory) = anchoring("left-holding-one");
+        let (socket, _far) = a_socket();
+        let held = vacant_addresses(3);
+        for (id, address) in (1..).zip(&held) {
+            held_at(&node, &socket, id, *address);
+        }
+        keep_anchors(&node.shared, false);
+        let three = anchors_on_disk(&directory);
+
+        node.shared.peers().retain(|id, _| *id == 3);
+        keep_anchors(&node.shared, false);
+        let after = anchors_on_disk(&directory);
+
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        let all: BTreeSet<SocketAddr> = held.iter().copied().collect();
+        assert_eq!(three, Some(all.clone()), "fixture: the three were written");
+        assert_eq!(
+            after,
+            Some(all),
+            "a node left holding one of its three peers wrote down only that one"
         );
     }
 

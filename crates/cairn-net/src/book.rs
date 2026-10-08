@@ -633,21 +633,31 @@ impl AddressBook {
     }
 
     /// Tells the book which peers this node went out to and is talking to,
-    /// which are its anchors from now on.
+    /// which are its anchors from now on, topped up to `most` with the
+    /// anchors it had.
     ///
-    /// A node holding nobody it went out to tells it nothing new. It has
-    /// nobody to vouch for, and the anchors it had are still the best guess
-    /// it has at where to start from. Taken as news, a node whose network went
-    /// for a minute, or one killed between its first dial at a start and the
-    /// answer to it, would write down that it should start from nobody, and
-    /// the next start would dial the book in its order, which is the order an
-    /// attacker who filled the book chose.
-    pub(crate) fn anchor(&mut self, outbound: impl IntoIterator<Item = SocketAddr>) {
-        let told: BTreeSet<SocketAddr> = outbound.into_iter().map(canonical).collect();
-        if told.is_empty() || told == self.anchors {
+    /// Topped up rather than replaced. A node whose network went for a
+    /// minute, or one killed between its first dial at a start and the answer
+    /// to it, holds nobody it went out to, or one, and the anchors it had are
+    /// still the best guess it has at where to start from. Taken as the whole
+    /// of its anchors, what it held at that instant was written down, a kill
+    /// then left a start with one anchor or none, and it dialled the book in
+    /// its order, which is the order an attacker who filled the book chose.
+    pub(crate) fn anchor(&mut self, outbound: impl IntoIterator<Item = SocketAddr>, most: usize) {
+        let mut anchors: BTreeSet<SocketAddr> = outbound.into_iter().map(canonical).collect();
+        let room = most.saturating_sub(anchors.len());
+        let kept: Vec<SocketAddr> = self
+            .anchors
+            .iter()
+            .filter(|address| !anchors.contains(address))
+            .take(room)
+            .copied()
+            .collect();
+        anchors.extend(kept);
+        if anchors == self.anchors {
             return;
         }
-        self.anchors = told;
+        self.anchors = anchors;
         self.anchor_changes = self.anchor_changes.saturating_add(1);
     }
 
@@ -2847,32 +2857,52 @@ mod tests {
     #[test]
     fn being_told_nobody_leaves_the_anchors_where_they_were() {
         let mut book = AddressBook::new();
-        book.anchor([address(1, 9000)]);
+        book.anchor([address(1, 9000)], 8);
         assert_eq!(book.anchor_changes(), 1);
         let mapped = SocketAddr::new(
             IpAddr::V6(Ipv4Addr::new(203, 0, 113, 1).to_ipv6_mapped()),
             9000,
         );
-        book.anchor([mapped]);
+        book.anchor([mapped], 8);
         assert_eq!(
             book.anchor_changes(),
             1,
             "the same anchors, one spelt as IPv6, were counted as news"
         );
-        book.anchor(std::iter::empty());
+        book.anchor(std::iter::empty(), 8);
         assert_eq!(
             book.anchors().iter().copied().collect::<Vec<_>>(),
             vec![address(1, 9000)],
             "a node holding nobody wrote down that it should start from nobody"
         );
         assert_eq!(book.anchor_changes(), 1);
-        book.anchor([address(2, 9000)]);
+        book.anchor([address(2, 9000)], 8);
         assert_eq!(
             book.anchors().iter().copied().collect::<Vec<_>>(),
-            vec![address(2, 9000)],
-            "new anchors did not replace the old"
+            vec![address(1, 9000), address(2, 9000)],
+            "a peer held now was not added to the anchors"
         );
         assert_eq!(book.anchor_changes(), 2, "new anchors were not counted");
+    }
+
+    /// The peers held now are anchors whatever the count, and the anchors a
+    /// node had fill only the places they leave.
+    #[test]
+    fn the_anchors_a_node_had_fill_only_the_places_its_peers_leave() {
+        let mut book = AddressBook::new();
+        book.anchor([address(1, 9000), address(2, 9000)], 2);
+        book.anchor([address(3, 9000)], 2);
+        let anchors = book.anchors();
+        assert!(
+            anchors.len() == 2 && anchors.contains(&address(3, 9000)),
+            "the anchors past their count, or without the peer held now: {anchors:?}"
+        );
+        book.anchor([address(4, 9000), address(5, 9000), address(6, 9000)], 2);
+        assert_eq!(
+            book.anchors().iter().copied().collect::<Vec<_>>(),
+            vec![address(4, 9000), address(5, 9000), address(6, 9000)],
+            "a peer held now was left out for the count"
+        );
     }
 
     /// An anchor kept off the file is dialled first this run and never
@@ -2882,7 +2912,7 @@ mod tests {
         let mut book = AddressBook::new();
         book.insert_seed(address(1, 9000));
         book.keep_off_the_file(address(1, 9000));
-        book.anchor([address(1, 9000), address(2, 9000)]);
+        book.anchor([address(1, 9000), address(2, 9000)], 8);
         assert_eq!(
             book.anchors_to_write(),
             vec![address(2, 9000)],
