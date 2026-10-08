@@ -13010,6 +13010,40 @@ mod peers_and_loops {
         );
     }
 
+    /// Blocks let go of for want of room beside the branch are counted where
+    /// an operator reads them, from one machine as from several, and a count
+    /// whose last block is more than an hour old starts again.
+    ///
+    /// They were answered as held, so nothing counted them, and a node that
+    /// could not put a heavier branch together printed healthy lines under a
+    /// height that did not move.
+    #[test]
+    fn blocks_let_go_of_for_want_of_room_reach_the_operator() {
+        let node = quiet();
+        assert_eq!(node.let_go_lately(), 0, "nothing has been let go of");
+        let let_go = Reaction {
+            let_go: Some(7),
+            ..Reaction::default()
+        };
+        let from = Some(SocketAddr::from(([203, 0, 113, 1], 9_944)));
+        let now = unix_now();
+        note_what_was_not_taken(&node.shared, &let_go, from, now);
+        note_what_was_not_taken(&node.shared, &let_go, from, now);
+        assert_eq!(
+            node.let_go_lately(),
+            2,
+            "blocks let go of for want of room went uncounted"
+        );
+
+        let mut met = LetGo::default();
+        count_let_go(&mut met, 1_000);
+        count_let_go(&mut met, 1_000 + UNREACHABLE_MEMORY + 1);
+        assert_eq!(
+            met.blocks, 1,
+            "a count whose last block was an hour old was carried on"
+        );
+    }
+
     /// Blocks from a branch this node cannot reach are said once they have
     /// come from two machines lately, and not while they come from one,
     /// however many there are and however many ports it claims.

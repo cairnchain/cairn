@@ -3778,3 +3778,124 @@ mod a_tie_at_one_height {
         );
     }
 }
+
+/// A block the chain lets go of as it lands, for want of room beside its
+/// branch, is said and not held against anybody.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::arithmetic_side_effects
+)]
+mod a_full_side_store {
+    use super::{on_block, PeerState};
+    use cairn_chain::{ChainStore, HELD_OVERHEAD, MAX_SIDE_BYTES};
+    use cairn_crypto::SecretKey;
+    use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
+    use cairn_ledger::note::{Note, NoteId};
+    use cairn_ledger::pow::next_difficulty;
+    use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
+    use cairn_ledger::validation::{
+        assemble_block, connect_block, mine_block, mine_header, ConsensusParams,
+    };
+    use cairn_ledger::LedgerState;
+    use cairn_primitives::codec::Encode;
+    use cairn_primitives::{Amount, Hash32};
+
+    const NOW: u64 = 2_000_000_000;
+
+    /// A block on `parent` carrying what it demands, as large as a block may
+    /// be, with a root that matches a body worth nothing.
+    fn fat_on(params: &ConsensusParams, parent: &BlockHeader, nonce: u64) -> Block {
+        let height = parent.height + 1;
+        let value = Amount::from_pebbles(1).unwrap();
+        let owner = SecretKey::from_bytes(&[9; 32]).public_key();
+        let per = Note::new(value, owner).encode().len();
+        let room = ChainStore::room_for_transfers(params.max_block_bytes);
+        let difficulty =
+            next_difficulty(&parent.summary(), params.origin(), params.target_block_time);
+        let mut block = Block {
+            header: BlockHeader {
+                version: BLOCK_VERSION,
+                network: params.network,
+                height,
+                previous: parent.id(),
+                transactions_root: Hash32::ZERO,
+                state_root: Hash32::ZERO,
+                history: Hash32::ZERO,
+                timestamp: parent.timestamp + params.target_block_time,
+                difficulty,
+                total_work: parent.total_work + u128::from(difficulty),
+                nonce: 0,
+            },
+            coinbase: CoinbaseTransaction::with_extra(
+                height,
+                Vec::new(),
+                nonce.to_le_bytes().to_vec(),
+            ),
+            transfers: vec![Transfer::new(
+                vec![Input::hot(NoteId::new(Hash32::from_bytes([3; 32]), 0))],
+                (0..room / per).map(|_| Note::new(value, owner)).collect(),
+            )],
+        };
+        block.header.transactions_root = block.transactions_root();
+        block.header = mine_header(block.header, 1 << 22).unwrap();
+        block
+    }
+
+    /// A node with nowhere to spill, filled to within a block of its bound by
+    /// siblings of its tip, is handed a large block lighter than all of them:
+    /// the chain lets it go as it lands. The peer is not dropped, the body is
+    /// not written down as held, and the reaction names the height, which is
+    /// what the node counts for its operator.
+    #[test]
+    fn a_block_let_go_of_as_it_lands_is_said_and_blamed_on_nobody() {
+        let params = ConsensusParams::testnet();
+        let miner = SecretKey::from_bytes(&[4; 32]);
+        let mut state = LedgerState::new();
+        let mut chain = ChainStore::new(params);
+        let mut headers = Vec::new();
+        for at in 0..4u64 {
+            let height = state.next_height().unwrap();
+            let coinbase = CoinbaseTransaction::new(
+                height,
+                vec![Note::new(params.reward_at(height), miner.public_key())],
+            );
+            let block =
+                assemble_block(&state, coinbase, Vec::new(), &params, 1_000 + 60 * at, 0).unwrap();
+            let block = mine_block(block, 1 << 22).unwrap();
+            connect_block(&mut state, &block, &params, NOW).unwrap();
+            headers.push(block.header);
+            chain.add_block(block, NOW).unwrap();
+        }
+        let branch = chain.held_bytes();
+        let mut nonce = 0;
+        loop {
+            let sibling = fat_on(&params, &headers[2], nonce);
+            if chain.held_bytes() - branch + sibling.encode().len() + HELD_OVERHEAD > MAX_SIDE_BYTES
+            {
+                break;
+            }
+            chain.add_block(sibling, NOW).unwrap();
+            nonce += 1;
+        }
+
+        let light = fat_on(&params, &headers[0], u64::MAX);
+        let mut peer = PeerState {
+            greeted: true,
+            ..PeerState::default()
+        };
+        let reaction = on_block(&mut chain, &mut peer, light.clone(), NOW);
+        assert_eq!(reaction.let_go, Some(light.header.height));
+        assert!(
+            reaction.drop_peer.is_none(),
+            "a peer was dropped for a block this node had no room for: {:?}",
+            reaction.drop_peer
+        );
+        assert_eq!(
+            reaction.held_aside, None,
+            "a body this node let go of was written down as held"
+        );
+        assert!(!chain.contains(&light.id()));
+    }
+}
