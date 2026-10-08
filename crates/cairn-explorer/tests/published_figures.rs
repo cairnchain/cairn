@@ -661,6 +661,64 @@ fn what_a_node_holds_is_every_term_the_rules_bound() {
     }
 }
 
+/// **What a node holds beside its branch is the fifth floor under a switch,
+/// and its disk is sized to let the deepest switch the rules allow happen.**
+///
+/// A switch is tried only once every block of the rival is held off the
+/// branch, so what may be held there is the deepest switch a node can put
+/// together. In memory alone that was `MAX_SIDE_BYTES`, two hundred and fifty
+/// six blocks at the largest the rules allow, while `undo_limit` answered a
+/// thousand and twenty four and named four floors as the smallest. The README
+/// names the fifth now, with its budget, and this holds both to the build: the
+/// budget, swept, still holds a rival of the full depth at the largest block,
+/// with the room memory had beside it; and memory alone does not, which is why
+/// the disk is there at all.
+#[test]
+fn the_side_store_lets_the_deepest_switch_the_rules_allow_happen() {
+    use cairn_chain::{ChainStore, HELD_OVERHEAD, MAX_SIDE_BYTES};
+
+    let params = ConsensusParams::testnet();
+    let deepest = ChainStore::new(params).undo_limit();
+    let rival = (deepest as usize + 1) * (params.max_block_bytes + HELD_OVERHEAD);
+    let ceiling = ChainStore::side_bytes_ceiling(&params);
+    // An eighth under, which is where the sweep stops; written out here
+    // rather than read off the crate, which keeps it to itself.
+    let swept = ceiling - ceiling / 8;
+    println!(
+        "a rival of {} full blocks is {rival} bytes held; memory keeps {MAX_SIDE_BYTES} and the \
+         side store {ceiling}, {swept} once swept",
+        deepest + 1
+    );
+    assert!(
+        rival > MAX_SIDE_BYTES,
+        "memory alone now holds the deepest switch over full blocks, so the disk beside it is \
+         no longer what makes that switch possible and the README says otherwise"
+    );
+    assert!(
+        swept >= rival + MAX_SIDE_BYTES,
+        "the side store, swept, holds {swept} bytes, short of a rival of {} full blocks \
+         ({rival}) and the room memory had beside it",
+        deepest + 1
+    );
+
+    let megabytes = |bytes: usize| format!("{:.0} MB", bytes as f64 / 1e6);
+    let readme = README.split_whitespace().collect::<Vec<_>>().join(" ");
+    for said in [
+        "the fifth floor under a switch".to_owned(),
+        format!(
+            "Past {} of those blocks in memory",
+            megabytes(MAX_SIDE_BYTES)
+        ),
+        format!("up to {} of them in all", megabytes(ceiling)),
+        format!("a switch of the full {} blocks", grouped(deepest)),
+    ] {
+        assert!(
+            readme.contains(&said),
+            "the README does not say `{said}`, which is what this build holds"
+        );
+    }
+}
+
 /// A handover off a small chain that has run long enough for its hot set to
 /// fill and its grace window to hold every landing it can.
 fn running_handover() -> cairn_ledger::handover::Handover {

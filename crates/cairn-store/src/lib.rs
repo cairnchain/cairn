@@ -42,6 +42,12 @@
 //! which matters least for a node that can ask for it again, and most for an
 //! archivist, which is the one role that cannot.
 //!
+//! The bodies a node holds beside its branch, in [`side`], are the exception
+//! to all of this on purpose: a cache, never synced, emptied at every start,
+//! and believed only through the check the chain makes of each body it reads
+//! back. They live in a directory of their own so that being a cache is all
+//! they can be.
+//!
 //! The same rule covers the files that are replaced whole rather than appended
 //! to: the ledger a node starts from, its address book, the header log after a
 //! merge, the compacted block log. Those go through
@@ -54,6 +60,7 @@
 
 pub mod header_tree;
 pub mod headers;
+pub mod side;
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
@@ -103,6 +110,7 @@ pub const HANDED_LEDGER: &str = "ledger.dat";
 
 pub use header_tree::{HeaderTree, HEADER_TREE, NODE_BYTES};
 pub use headers::{HeaderLog, JoinFailed, HEADER_BYTES, HEADER_LOG};
+pub use side::{SideBodyFiles, SIDE_BODIES};
 
 /// Largest record the log will read or write.
 ///

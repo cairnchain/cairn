@@ -839,13 +839,13 @@ fn the_most_a_node_will_hold_stays_something_a_phone_has() {
 /// A block off the followed branch, filled to `bytes` and carrying the least
 /// work there is.
 ///
-/// Nothing sizes a side block. What bounds a block is applied when it is
-/// connected, and a block on a losing branch is never connected, so what a
-/// peer may make a node hold is bounded by the sweeps in `cairn-chain` and by
-/// nothing else. The one thing asked of its body is that it produces the root
-/// its header names, which anybody can work out, so the header here names it.
-/// Its header is asked what its parent alone settles, which on a network at
-/// the difficulty floor is difficulty one and the work behind it plus one.
+/// A block on a losing branch is never connected, so what a peer may make a
+/// node hold is bounded by the door beside the branch and the sweeps behind
+/// it. The door asks its body to produce the root its header names, which
+/// anybody can work out, so the header here names it, and to be no larger
+/// than the rules allow, which is the caller's to arrange. Its header is
+/// asked what its parent alone settles, which on a network at the difficulty
+/// floor is difficulty one and the work behind it plus one.
 fn fat_block(height: u64, previous: Hash32, bytes: usize, owner: &SecretKey) -> Block {
     let value = Amount::from_pebbles(1).unwrap();
     let per = Note::new(value, owner.public_key()).encode().len();
@@ -899,14 +899,18 @@ fn fat_block(height: u64, previous: Hash32, bytes: usize, owner: &SecretKey) -> 
 /// sweeps working rather than the gap they left, and nothing in the code told
 /// twenty rival blocks from twenty thousand.
 ///
-/// The block size here is lowered so the published ceiling is within reach of
-/// a test. Nothing else is contrived: the rivals fork at the first block, stay
-/// lighter than the branch throughout, and are held exactly as a peer's blocks
-/// are held.
+/// The block size here was lowered so that the published ceiling was within
+/// reach of a test, and the rivals were twice the size of anything a block
+/// may be. The door beside the branch sizes a block now, so it is raised to
+/// take them instead, which puts the ceiling out of reach; what this holds the
+/// node to is the side store's own bound, which is the one the early exit
+/// skipped. Nothing else is contrived: the rivals fork at the first block,
+/// stay lighter than the branch throughout, and are held exactly as a peer's
+/// blocks are held.
 #[test]
 fn what_a_node_holds_is_bounded_on_a_chain_younger_than_the_window() {
     let mut rules = params();
-    rules.max_block_bytes = 4096;
+    rules.max_block_bytes = 2 * 1024 * 1024 + 4096;
     let ceiling = ChainStore::held_bytes_ceiling(&rules);
 
     let miner = wallet(1);
@@ -921,18 +925,23 @@ fn what_a_node_holds_is_bounded_on_a_chain_younger_than_the_window() {
         "the chain has to be younger than the window, or there is nothing here"
     );
 
-    // A rival hanging off the first block, in blocks nothing sized. It stays
-    // lighter than the branch the whole way: twenty blocks of the least work
-    // there is against thirty of the same.
+    // A rival hanging off the first block, in blocks as large as these rules
+    // allow. It stays lighter than the branch the whole way: twenty blocks of
+    // the least work there is against thirty of the same.
     //
     // Past the side store's ceiling the sweep drops the lightest block
-    // nothing builds on, which on a single branch is its top, so the block
-    // after it arrives over a parent this node has let go of and is refused
-    // for that. Either way it is not followed and the branch does not move.
+    // nothing builds on, which on a single branch is its top, and says so
+    // rather than answering that the block was held; the block after it
+    // arrives over a parent this node has let go of and is refused for that.
+    // Either way it is not followed and the branch does not move.
     //
     // Either answer alone would pass a node that held nothing aside at all,
     // so the rivals are held until what they hold is past the side store's
     // ceiling, and refused only from then on.
+    let branch: usize = chain[..30]
+        .iter()
+        .map(|block| block.encode().len() + HELD_OVERHEAD)
+        .sum();
     let mut previous = chain[0].id();
     let mut held_aside = 0usize;
     let mut refused_from = None;
@@ -949,17 +958,23 @@ fn what_a_node_holds_is_bounded_on_a_chain_younger_than_the_window() {
                 );
                 held_aside += bytes;
             }
-            Err(ChainError::UnknownParent(_)) => {
+            Err(ChainError::NoRoom { .. } | ChainError::UnknownParent(_)) => {
                 assert!(
-                    held_aside > MAX_SIDE_BYTES,
-                    "rival block {n} was refused for its parent with {held_aside} bytes held \
-                     aside, which the side store's ceiling of {MAX_SIDE_BYTES} does not sweep"
+                    held_aside + bytes > MAX_SIDE_BYTES,
+                    "rival block {n} was let go of or refused for its parent with \
+                     {held_aside} bytes held aside, which the side store's ceiling of \
+                     {MAX_SIDE_BYTES} does not sweep"
                 );
                 refused_from.get_or_insert(n);
             }
             other => panic!("rival block {n} was answered {other:?}"),
         }
         assert_eq!(store.height(), Some(29), "rival block {n} moved the branch");
+        assert!(
+            store.held_bytes() - branch <= MAX_SIDE_BYTES,
+            "rival block {n} left {} bytes held beside the branch, against {MAX_SIDE_BYTES}",
+            store.held_bytes() - branch
+        );
     }
     assert!(
         refused_from.is_some(),

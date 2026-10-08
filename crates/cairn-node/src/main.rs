@@ -553,6 +553,11 @@ fn say_what_the_numbers_do_not(node: &Node, directory: &str) {
     if let Some(peers) = node.behind_what_peers_keep() {
         say(&further_behind_than_peers_keep(peers));
     }
+    // And one letting go of blocks of a branch it could switch to, for want of
+    // room beside its own, which reads the same way.
+    if let Some(text) = could_not_keep(node.let_go_lately()) {
+        say(&text);
+    }
     // And a node that has arrived and still cannot answer the question a
     // newcomer asks. Every other state above has had a line here for longer
     // than this one, which is the first stretch of every join and used to be
@@ -714,6 +719,22 @@ fn cannot_switch_to(blocks: u64) -> Option<String> {
              machines can still be one party. If they keep coming while the rest of the \
              network is not heard from, this node is on a branch the network has left, and \
              starting again from an empty directory is the only way onto theirs."
+        )
+    })
+}
+
+/// What an operator is told when this node has let go of blocks as it took
+/// them, for want of room beside its branch, or nothing.
+fn could_not_keep(blocks: u64) -> Option<String> {
+    (blocks > 0).then(|| {
+        format!(
+            "{blocks} blocks were let go of as they arrived within the last hour, because what \
+             this node holds beside the branch it follows is full and they ranked below \
+             everything held there. A heavier branch this node is being handed cannot be put \
+             together while that lasts, so its height may stay where it is. It clears as what \
+             is held there is let go of or becomes the branch. If it does not, check that the \
+             disk under this node's directory has room: that is where those blocks are kept \
+             once memory is full."
         )
     })
 }
@@ -2176,7 +2197,7 @@ mod what_the_exit_code_says {
 #[allow(clippy::unwrap_used)]
 mod what_an_operator_is_told {
     use super::{
-        addresses_not_written, addresses_set_aside, cannot_switch_to, clock,
+        addresses_not_written, addresses_set_aside, cannot_switch_to, clock, could_not_keep,
         further_behind_than_peers_keep, nobody_can_get_in, probation_line, refusing_the_network,
         short, stamp, will_not_read_back, wrapped, SEVERAL_REFUSED,
     };
@@ -2291,6 +2312,21 @@ mod what_an_operator_is_told {
             "the line does not say what the count took, or that it is not a verdict: {said}"
         );
         assert!(said.contains("empty directory"), "{said}");
+    }
+
+    /// Blocks let go of for want of room beside the branch are said, with
+    /// what to do about it, and nothing is said when there are none.
+    ///
+    /// They were answered as held, so a node that could not put a heavier
+    /// branch together printed healthy lines under a height that did not move.
+    #[test]
+    fn blocks_let_go_of_for_want_of_room_are_said() {
+        assert_eq!(could_not_keep(0), None);
+        let said = could_not_keep(9).unwrap();
+        eprintln!("{}", wrapped(&said).join("\n"));
+        assert!(said.contains("9 blocks"), "{said}");
+        assert!(said.contains("cannot be put together"), "{said}");
+        assert!(said.contains("disk under this node's directory"), "{said}");
     }
 
     /// Peers that can supply nothing above the tip are said, with what to

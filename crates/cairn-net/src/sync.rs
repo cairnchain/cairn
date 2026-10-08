@@ -1036,6 +1036,16 @@ pub struct Reaction {
     /// Set rather than acted on, because what it means is a question about
     /// this node and not about the block or the peer that sent it.
     pub unreachable: Option<u64>,
+    /// The height of a block this node let go of as it took it, for want of
+    /// room beside its branch: see [`ChainError::NoRoom`].
+    ///
+    /// Not the peer's doing and not the block's, and not the same news as a
+    /// block from a branch this node can never reach, though both leave its
+    /// height where it is: that one parts deeper than a switch may go, and
+    /// this one belongs to a branch this node could switch to and cannot put
+    /// together while what it holds beside its branch stays full. It was
+    /// answered as held, so nothing anywhere said it.
+    pub let_go: Option<u64>,
     /// Set when the block that arrived is judged by rules this software does
     /// not have.
     ///
@@ -1401,9 +1411,9 @@ fn past_what_arrived(chain: &ChainStore, start: u64, arrived: Option<Located>) -
                 last.height.saturating_add(1)
             };
         }
-        match (chain.block(&at.id), at.height.checked_sub(1)) {
-            (Some(block), Some(below)) if at.height >= start => {
-                at = Located::new(below, block.header.previous);
+        match (chain.held_header(&at.id), at.height.checked_sub(1)) {
+            (Some(header), Some(below)) if at.height >= start => {
+                at = Located::new(below, header.previous);
             }
             _ => return start,
         }
@@ -1714,7 +1724,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
     peer.offered.remove(&height);
     // Whether a body is already held under this identifier, in which case the
     // one this peer sent is not the one kept.
-    let held_before = chain.block(&id).is_some();
+    let held_before = chain.held_header(&id).is_some();
 
     match chain.add_block(block, now) {
         Ok(accepted @ (Accepted::Extended | Accepted::Reorganised { .. })) => {
@@ -1782,6 +1792,14 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
         // itself is in the wrong place, and it used to pass in silence.
         Err(ChainError::ForkTooDeep { .. } | ChainError::TooOld { .. }) => Reaction {
             unreachable: Some(height),
+            ..Reaction::idle()
+        },
+        // A block let go of as it was taken: what this node holds beside its
+        // branch was full, and the block ranked below everything there. Not
+        // the peer's doing, and asking it for the block again would only hand
+        // the block back to the same sweep, so it is said and nothing more.
+        Err(ChainError::NoRoom { .. }) => Reaction {
+            let_go: Some(height),
             ..Reaction::idle()
         },
         // A block written under rules this build does not have. The chain
@@ -2135,7 +2153,7 @@ fn on_block_charged(
     // node already held from this peer or from another. Not a block hanging
     // on a parent nobody has sent yet, which is not held at all, and would
     // otherwise put what did arrive out of reach of the next round.
-    if chain.block(&id).is_some() && chain.id_at(at) != Some(id) {
+    if chain.held_header(&id).is_some() && chain.id_at(at) != Some(id) {
         peer.aside = Some(Located::new(at, id));
     }
     reaction

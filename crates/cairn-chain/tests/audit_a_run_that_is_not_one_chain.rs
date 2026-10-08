@@ -261,3 +261,60 @@ fn a_run_carrying_what_its_parents_do_not_demand_is_refused_where_it_does() {
         assert!(joined.is_empty());
     }
 }
+
+/// A run too short to read a median time past off is refused, however well
+/// its headers agree with the ledger.
+///
+/// The walk above is a walk of pairs, so a run of one header was asked
+/// nothing at all: no link, no difficulty, and `BrokenRun` could not fire. It
+/// was taken whole, and the node answered about a branch one block long whose
+/// median time past was that block's timestamp until ten more had been
+/// applied. One of `adopt`'s two callers reads its run off `ledger.dat`, where
+/// a file cut short is what the checks beside this one exist to catch.
+///
+/// The window, and not the run the wire carries: a run of eleven is enough to
+/// stand behind, ten is not, and a chain younger than eleven blocks hands over
+/// the whole of itself.
+#[test]
+fn a_run_too_short_to_read_a_median_time_past_off_is_refused() {
+    let params = ConsensusParams::testnet();
+    let (state, headers) = handed(8);
+
+    let mut joined = ChainStore::new(params);
+    assert_eq!(
+        joined.adopt(state.clone(), &headers[7..8]),
+        Err(ChainError::ShortRun {
+            given: 1,
+            wanted: 8,
+            height: 7,
+        }),
+        "one header, at the tip the ledger belongs to and agreeing with it"
+    );
+    assert!(
+        joined.is_empty(),
+        "and a run refused leaves the node on no chain"
+    );
+    assert_eq!(
+        joined.adopt(state, &headers),
+        Ok(()),
+        "a chain of eight blocks hands over all eight, which is all there is"
+    );
+
+    let (older, longer) = handed(14);
+    let mut ten = ChainStore::new(params);
+    assert_eq!(
+        ten.adopt(older.clone(), &longer[4..]),
+        Err(ChainError::ShortRun {
+            given: 10,
+            wanted: 11,
+            height: 13,
+        }),
+        "one short of the window"
+    );
+    let mut eleven = ChainStore::new(params);
+    assert_eq!(
+        eleven.adopt(older, &longer[3..]),
+        Ok(()),
+        "the window itself"
+    );
+}
