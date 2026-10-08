@@ -68,10 +68,11 @@ Network options
   --wait <seconds>     how long to spend catching up (default: 30)
   --fee <cairn>        what to pay to be carried. Without one, the least
                        the network will carry, worked out from the transfer,
-                       and a little over it so that a note of it falling out
-                       of the hot set before a block carries it does not
-                       leave it paying too little, and so that a miner earns
-                       more carrying it than carrying filler paid the least
+                       and enough over it that a note of it falling out of
+                       the hot set before a block carries it does not leave
+                       it paying too little, and that a miner earns more
+                       carrying it than carrying filler paid the least,
+                       before such a fall and after it
   --fee-anyway         pay a fee out of all proportion to the amount. Without
                        this the wallet stops and asks, because a fee larger
                        than the payment is usually a decimal point in the
