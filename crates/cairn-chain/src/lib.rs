@@ -2180,6 +2180,19 @@ impl ChainStore {
                     height: header.height,
                 });
             }
+            // And each header after the first carries the difficulty and the
+            // total the one below it demands, by the question every run a
+            // newcomer takes is asked: one that does not is not the next block
+            // of that chain. `accept` has asked it of a handover's run already,
+            // so this is the door's own word, for the reason above.
+            cairn_ledger::validation::carries_what_its_parent_demands(
+                previous,
+                header,
+                &self.params,
+            )
+            .map_err(|_| ChainError::BrokenRun {
+                height: header.height,
+            })?;
         }
 
         // A ledger from a height this build has no rules for is one this node

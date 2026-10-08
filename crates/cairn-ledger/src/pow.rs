@@ -82,9 +82,13 @@ pub const HALF_LIFE_IN_BLOCKS: u64 = 60;
 /// leaves the chain further behind its schedule than the floor's edge, and
 /// the honest chain then mines hundreds or thousands of blocks at
 /// [`MIN_DIFFICULTY`], with almost no work behind them, while it catches the
-/// schedule up: a median of 874 after a departure from 4 096 times and 7 642
-/// after 8 192, which the bound brings on sooner and makes longer. Both are
-/// held in `tests/the_difficulty_follows_the_clock.rs`.
+/// schedule up: 3 455 after a departure from 4 096 times and 9 191 after 8 192
+/// when every block takes the mean time its difficulty asks, and a median of
+/// 2 244 and 7 793 over sixty four seeds of random block times, which the
+/// bound brings on sooner and makes longer. All four are held in
+/// `tests/the_difficulty_follows_the_clock.rs`. This said a median of 874
+/// after 4 096 times, over sixteen seeds: a low draw, which the testnet-9
+/// study found by running the same simulation on sixty four.
 ///
 /// Public because the weighing in [`crate::sampling`] reasons from it. Two
 /// headers a thousand blocks apart cannot state whatever work they like
@@ -105,8 +109,16 @@ pub const MAX_RETARGET_FACTOR: u128 = 4;
 /// ninety gaps, and it stays because the number is on the wire: a handover
 /// carries this many headers ending at its ledger, and the run a newcomer
 /// weighs starts [`crate::sampling::BELOW_THE_PINNED`] below the deepest
-/// header its draw pinned. Shrinking it to the median's eleven changes both
-/// exchanges, and it is an open question rather than part of the rule change.
+/// header its draw pinned.
+///
+/// What it is for now, besides the median's eleven, is the reach of what a
+/// newcomer judges. Every header of both runs from the second on is held to
+/// the retarget and the work sum, so a fork point within the window is one
+/// those checks see, and one below it is not. Shrinking it changes both
+/// exchanges, so old and new nodes could no longer hand each other a ledger or
+/// a weighing: a change for a network that restarts anyway. Its floor would
+/// then be twelve and not eleven, since `sampling` asserts the median's whole
+/// window below the pinned header, one more than the walk reads.
 pub const RECENT_HEADERS: usize = 91;
 
 const _: () = assert!(

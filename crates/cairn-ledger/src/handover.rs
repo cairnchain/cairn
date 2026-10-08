@@ -48,13 +48,11 @@ use cairn_primitives::{Amount, Hash32};
 
 use crate::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
 use crate::note::{NetworkId, Note, NoteId};
-use crate::pow::{
-    median_time_past, meets_target, next_difficulty, work_of, MEDIAN_TIME_WINDOW, RECENT_HEADERS,
-};
+use crate::pow::{median_time_past, meets_target, MEDIAN_TIME_WINDOW, RECENT_HEADERS};
 use crate::state::{
     header_leaf, HotEntry, LedgerState, Maturing, Pieces, GRACE_BLOCKS, GRACE_NOTES,
 };
-use crate::validation::ConsensusParams;
+use crate::validation::{carries_what_its_parent_demands, ConsensusParams, Undemanded};
 
 /// Blocks a handed over ledger must sit below the tip it belongs to.
 ///
@@ -260,6 +258,10 @@ pub enum HandoverError {
     RecentNotConsecutive,
     #[error("a recent header carries no work")]
     RecentWithoutWork,
+    #[error(
+        "the recent header at {at} states difficulty {stated}, and the rules demand {demanded}"
+    )]
+    RecentAtTheWrongDifficulty { at: u64, stated: u64, demanded: u64 },
     #[error("the work at {at} in the recent run does not add up")]
     RecentWorkDoesNotAddUp { at: u64 },
     #[error("the recent header at {at} is not later than the median of the window before it")]
@@ -930,19 +932,29 @@ fn belongs_to_this_network(
 /// `take_the_ledger` refuses a handover whose tip is not the one the sampling
 /// weighed.
 ///
-/// **So the version and the work below refuse nothing the chain would not
-/// already refuse, and they are here anyway.** Bending either changes the
-/// identifier the header above names, so the consecutive check catches the
-/// same tamper; what these buy is which sentence comes back. "The work at 812
-/// does not add up" is something somebody can act on, and "not consecutive" is
-/// the same fact with the reason removed. They are written before the chain
-/// check for that reason and no other, and both are free of any window.
+/// **So on a run cut from the honest chain, the version, the difficulty and
+/// the work below refuse nothing the chain would not already refuse, and they
+/// are here anyway.** Bending any of them changes the identifier the header
+/// above names, so the consecutive check catches the same tamper; what these
+/// buy is which sentence comes back. "The work at 812 does not add up" is
+/// something somebody can act on, and "not consecutive" is the same fact with
+/// the reason removed. They are written before the chain check for that reason
+/// and no other, and all three are free of any window.
 ///
 /// The second thing they buy is that this run carries its own argument. A
 /// guard that holds only because another guard covers it becomes wrong the day
 /// the other one moves, and nothing says so. This run seeds the window the
 /// burial above it is judged against, which makes it the wrong place to leave
 /// an argument borrowed from the forest.
+///
+/// The third is against a run the honest network never judged: a forger who
+/// mined its own burial mined this run too, and where its fork point lies
+/// inside the run, every header above that point is held to the rules a block
+/// is. The sender chooses the anchor anywhere from [`BURIAL`] to
+/// [`MOST_BURIED`] below the tip, so a forger can keep its fork point below
+/// the run at no cost, and where it does not, what the difficulty forces is
+/// the descent from the last honest header, at a quarter a block: about a third
+/// of a block at that header's difficulty. Small, and stated as small.
 ///
 /// **The median, where the run holds its window.** The median time past reads
 /// eleven headers, so it is the chain's own rule from the twelfth entry on and
@@ -956,17 +968,18 @@ fn belongs_to_this_network(
 /// It was not asked at all, and this run seeds the window the buried run is
 /// judged by.
 ///
-/// **What is not checked, and why not.** The difficulty. When the retarget
-/// was a moving average over ninety gaps no header of this run could be
-/// judged at all, since each needed ninety one below it. The retarget now
-/// reads only the header below and the network's first block, so every header
-/// from the second on could be judged here, the anchor included. It is not,
-/// for the reason the version and the work are: the run is the anchor's hash
-/// ancestry, so a difficulty bent anywhere in it breaks the chain of
-/// identifiers and is refused as not consecutive, and each header was judged
-/// as a block by every node that holds it. Asking would change which sentence
-/// comes back and refuse nothing more, and a refusal added to a handover's
-/// normative list is left to the wave that revisits the window itself.
+/// **The difficulty, from the second header on.** When the retarget was a
+/// moving average over ninety gaps no header of this run could be judged,
+/// since each needed ninety one below it. It reads only the header below and
+/// the network's first block now, so every header from the second on is held
+/// to it here, by the same [`carries_what_its_parent_demands`] every other run
+/// a newcomer takes is held to. That includes the anchor, the last header of
+/// this run, whose difficulty seeds the first buried header's demand and the
+/// bound of four around it, and which nothing judged until this did: the
+/// buried walk starts above it. The first header has no parent in the message
+/// and stays unjudged, as its work does; nothing here claims the whole run.
+/// The test holding the anchor is
+/// `tests::a_recent_header_at_the_wrong_difficulty_is_refused_by_name`.
 fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), HandoverError> {
     let at = &handover.at;
     let Some(last) = handover.recent.last() else {
@@ -1014,22 +1027,33 @@ fn check_recent(handover: &Handover, params: &ConsensusParams) -> Result<(), Han
             return Err(HandoverError::RecentWithoutWork);
         }
 
-        // The work adds up across the run, which ties `at.total_work` to the
-        // headers below it where `check_buried` ties it to the tip from above.
-        // The first header has nothing behind it in the message, so it is the
-        // one this cannot ask about.
+        // The difficulty the header below demands, and the work adding up
+        // across the run, which ties `at.total_work` to the headers below it
+        // where `check_buried` ties it to the tip from above. The first header
+        // has nothing behind it in the message, so it is the one this cannot
+        // ask about.
         //
         // Before the consecutive check on purpose. Both catch the same tamper,
-        // because changing a total changes the identifier the header above it
-        // names, and the one that runs first is the one that gets to say what
-        // was wrong. "The work at 812 does not add up" is a sentence somebody
-        // can act on; "not consecutive" is the same fact with the reason taken
-        // out.
+        // because changing a difficulty or a total changes the identifier the
+        // header above it names, and the one that runs first is the one that
+        // gets to say what was wrong. "The work at 812 does not add up" is a
+        // sentence somebody can act on; "not consecutive" is the same fact
+        // with the reason taken out.
         if let Some(behind) = behind {
-            if Some(header.total_work) != behind.total_work.checked_add(work_of(header.difficulty))
-            {
-                return Err(HandoverError::RecentWorkDoesNotAddUp { at: header.height });
-            }
+            carries_what_its_parent_demands(behind, header, params).map_err(
+                |fault| match fault {
+                    Undemanded::Difficulty {
+                        at,
+                        stated,
+                        demanded,
+                    } => HandoverError::RecentAtTheWrongDifficulty {
+                        at,
+                        stated,
+                        demanded,
+                    },
+                    Undemanded::Work { at } => HandoverError::RecentWorkDoesNotAddUp { at },
+                },
+            )?;
         }
 
         // Later than the median of the eleven below it, which is the rule
@@ -1191,23 +1215,24 @@ pub fn check_buried(
         // The retarget reads the parent alone, against the schedule from the
         // network's first block, which the rules carry: nothing in the run or
         // the window a sender hands over decides where the schedule starts.
-        let demanded = next_difficulty(
-            &previous.summary(),
-            params.origin(),
-            params.target_block_time,
-        );
-        if header.difficulty != demanded {
-            return Err(HandoverError::BuriedAtTheWrongDifficulty {
-                at: header.height,
-                stated: header.difficulty,
-                demanded,
-            });
-        }
+        // The first header is judged against the anchor, whose own difficulty
+        // `check_recent` has already held to the header below it.
+        carries_what_its_parent_demands(&previous, header, params).map_err(
+            |fault| match fault {
+                Undemanded::Difficulty {
+                    at,
+                    stated,
+                    demanded,
+                } => HandoverError::BuriedAtTheWrongDifficulty {
+                    at,
+                    stated,
+                    demanded,
+                },
+                Undemanded::Work { at } => HandoverError::BuriedWorkDoesNotAddUp { at },
+            },
+        )?;
         if median_time_past(&window).is_some_and(|median| header.timestamp <= median) {
             return Err(HandoverError::BuriedOutOfTime { at: header.height });
-        }
-        if Some(header.total_work) != previous.total_work.checked_add(work_of(header.difficulty)) {
-            return Err(HandoverError::BuriedWorkDoesNotAddUp { at: header.height });
         }
 
         // The tip is not in its own history, so its leaf is the one leaf the
@@ -1496,7 +1521,7 @@ fn decode_recent(reader: &mut Reader<'_>) -> Result<Vec<BlockHeader>, CodecError
 )]
 mod tests {
     use super::*;
-    use crate::pow::MIN_DIFFICULTY;
+    use crate::pow::{work_of, MIN_DIFFICULTY};
 
     fn params() -> ConsensusParams {
         ConsensusParams::testnet()
@@ -1533,10 +1558,34 @@ mod tests {
         run
     }
 
+    /// Timestamps a minute apart, starting behind the schedule of `params()`,
+    /// which opens at nought with a first block of difficulty one.
+    ///
+    /// Behind it at every height these tests use, so the retarget asks the
+    /// floor of every header and a run at the floor is the run the rules
+    /// demand. Started at a thousand, a run at height a thousand stood about
+    /// sixteen half lives ahead of its schedule, and the rules demanded four
+    /// times its parent of every header: nothing judged that until the recent
+    /// run's difficulties were.
     fn minutes(count: usize) -> Vec<u64> {
         (0..count)
-            .map(|index| 1_000 + 60 * u64::try_from(index).unwrap())
+            .map(|index| 100_000 + 60 * u64::try_from(index).unwrap())
             .collect()
+    }
+
+    /// Puts the run back together from `from` up after a test changed a
+    /// header there: each header names the one below, adds its own work to
+    /// that total, and is mined again at the difficulty it states. The header
+    /// at `from` keeps the total the test gave it.
+    fn rechained(mut run: Vec<BlockHeader>, from: usize) -> Vec<BlockHeader> {
+        for index in from..run.len() {
+            if index > from {
+                run[index].previous = run[index - 1].id();
+                run[index].total_work = run[index - 1].total_work + work_of(run[index].difficulty);
+            }
+            run[index] = crate::validation::mine_header(run[index], 1 << 20).unwrap();
+        }
+        run
     }
 
     /// A handover carrying nothing but a recent run, whose last header is the
@@ -1576,9 +1625,19 @@ mod tests {
         let works: Vec<u128> = (1..=91).collect();
         let recent = chained(&heights, &works, &minutes(RECENT_HEADERS));
         assert_eq!(recent.len(), RECENT_HEADERS);
+        // No timestamp is behind the schedule at these heights, so the rules
+        // demand four times the parent of every header, past what a test can
+        // mine within a few headers. Without a block time there is no
+        // schedule and the retarget answers the parent's difficulty, so a run
+        // at the floor is again the one the rules demand, and what is left to
+        // refuse is the height.
+        let rules = ConsensusParams {
+            target_block_time: 0,
+            ..params()
+        };
 
         assert_eq!(
-            check_recent(&handing(recent), &params()),
+            check_recent(&handing(recent), &rules),
             Err(HandoverError::RecentNotConsecutive),
             "two headers at the same height were taken as one following the other"
         );
@@ -1672,6 +1731,76 @@ mod tests {
             check_recent(&handing(from_the_start), &params()),
             Err(HandoverError::RecentOutOfTime { at: 2 }),
             "a run from the first block was not judged by the median its blocks were"
+        );
+    }
+
+    /// A recent header at a difficulty the one below it does not demand is
+    /// refused by name, at the second header and at the anchor, with every
+    /// identifier in the run intact.
+    ///
+    /// The retarget reads only the header below and the network's first
+    /// block, so every header of the run from the second on can be held to
+    /// it, and none was. The argument was that the run is the anchor's hash
+    /// ancestry, so a bent difficulty breaks the chain of identifiers; a run
+    /// mined again above the bend breaks nothing, and was taken. The anchor
+    /// is the case that mattered: its difficulty seeds the first buried
+    /// header's demand and the bound of four around it, and nothing judged
+    /// it, because it is the last header here and the buried walk starts
+    /// above it.
+    #[test]
+    fn a_recent_header_at_the_wrong_difficulty_is_refused_by_name() {
+        let heights: Vec<u64> = (1_000..1_091).collect();
+        let works: Vec<u128> = (1..=91).collect();
+        let honest = chained(&heights, &works, &minutes(RECENT_HEADERS));
+        assert_eq!(
+            check_recent(&handing(honest.clone()), &params()),
+            Ok(()),
+            "the control: a run at the floor the rules demand of it"
+        );
+
+        // The first header with a parent in the run, and the anchor.
+        for bent_at in [1, RECENT_HEADERS - 1] {
+            let mut run = honest.clone();
+            run[bent_at].difficulty = 2;
+            run[bent_at].total_work = run[bent_at - 1].total_work + 2;
+            let run = rechained(run, bent_at);
+
+            assert_eq!(
+                check_recent(&handing(run), &params()),
+                Err(HandoverError::RecentAtTheWrongDifficulty {
+                    at: heights[bent_at],
+                    stated: 2,
+                    demanded: 1,
+                }),
+                "a recent header at a difficulty the rules do not demand was taken"
+            );
+        }
+    }
+
+    /// A difficulty bent without the run being mined again above it is named
+    /// for the difficulty, not for the link it breaks.
+    ///
+    /// The header above still names the identifier the bent one had, so the
+    /// run is not one chain and "not consecutive" would be true. It is the
+    /// same fact with the reason taken out, and which sentence comes back is
+    /// decided by the order of the checks.
+    #[test]
+    fn a_bent_recent_difficulty_is_named_before_the_link_it_breaks() {
+        let heights: Vec<u64> = (1_000..1_091).collect();
+        let works: Vec<u128> = (1..=91).collect();
+        let mut run = chained(&heights, &works, &minutes(RECENT_HEADERS));
+        run[40].difficulty = 2;
+        run[40].total_work = run[39].total_work + 2;
+        run[40] = crate::validation::mine_header(run[40], 1 << 20).unwrap();
+        assert_ne!(run[41].previous, run[40].id(), "the link above is broken");
+
+        assert_eq!(
+            check_recent(&handing(run), &params()),
+            Err(HandoverError::RecentAtTheWrongDifficulty {
+                at: 1_040,
+                stated: 2,
+                demanded: 1,
+            })
         );
     }
 

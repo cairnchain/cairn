@@ -35,11 +35,11 @@ use cairn_primitives::Hash32;
 use crate::block::{BlockHeader, HeaderSummary, BLOCK_VERSION};
 use crate::note::NetworkId;
 use crate::pow::{
-    median_time_past, meets_target, next_difficulty, work_of, MAX_RETARGET_FACTOR,
-    MEDIAN_TIME_WINDOW, MIN_DIFFICULTY, RECENT_HEADERS,
+    median_time_past, meets_target, work_of, MAX_RETARGET_FACTOR, MEDIAN_TIME_WINDOW,
+    MIN_DIFFICULTY, RECENT_HEADERS,
 };
 use crate::state::header_leaf;
-use crate::validation::ConsensusParams;
+use crate::validation::{carries_what_its_parent_demands, ConsensusParams, Undemanded};
 
 /// Headers opened when a newcomer is deciding between chains.
 ///
@@ -328,7 +328,10 @@ pub struct SampledStart {
     /// stands within [`MOST_FALL`] of its hardest header. The
     /// window below the pinned header comes along too, and is honest because
     /// those headers have to chain into it: a forger cannot swap them without
-    /// having mined the pinned header on top of its own.
+    /// having mined the pinned header on top of its own. They are held to the
+    /// same difficulty and work rules from the run's second header on, so the
+    /// pinned header's own difficulty, where the tie starts, is the one the
+    /// header below it demands.
     ///
     /// Held together with the tip's timestamp being near the reader's own
     /// clock, that makes the cheap run cost the one thing a forger cannot
@@ -516,6 +519,15 @@ pub const MOST_TAIL: u64 = 16 * SHALLOWEST + BELOW_THE_PINNED;
 /// itself, and the median ten more. Ninety was the moving average's window and
 /// it stays while the window does, because the run's length is part of what
 /// a weighing says on the wire.
+///
+/// What it is for now, beyond the median's eleven, is reach. Every header of
+/// the run from its second on is held to the retarget and the work sum, so
+/// where the draw lands on a forger's header, the pinned header has to follow
+/// from an honest one if the fork point lies within these ninety. Below them
+/// the run's first header is the forger's to write, and the walk from it can
+/// reach the floor from testnet-8's opening difficulty in fourteen headers at a
+/// quarter each. Fewer headers below the pinned one would narrow that reach by
+/// as many.
 pub const BELOW_THE_PINNED: u64 = RECENT_HEADERS as u64 - 1;
 
 /// How far below the hardest header of the run a tip may stand, counting
@@ -1182,19 +1194,26 @@ fn check_the_genesis(start: &SampledStart, params: &ConsensusParams) -> Result<(
 // `check_the_tail` reads the median off the eleven headers below each one it
 // judges, and the first header above the pinned one has to have them in the
 // run, so the run below the pinned header has to hold the median's window.
+//
+// One stricter than the walk needs: the first header above the pinned one
+// reads the pinned header and the ten below it, so ten below would be exactly
+// enough and fail this. A window shrunk to the median's needs twelve headers
+// kept, not eleven, or this written as `MEDIAN_TIME_WINDOW - 1`.
 const _: () = assert!(MEDIAN_TIME_WINDOW as u64 <= BELOW_THE_PINNED);
 
 /// Walks the top of the chain, which the draw does not reach.
 ///
 /// Starts [`BELOW_THE_PINNED`] below the deepest header the draw landed on,
-/// so the window the first checked header is judged against is one a forger
-/// would have had to mine that header on top of. From there every header is
-/// held to the rules a node applies to any block it is handed: the difficulty
-/// its parent demands against the network's schedule, a timestamp past the
-/// median of the window below it, its own work
-/// added to the total, and real work behind its own identifier. The version
-/// its height requires needs no window, so every header of the run is held to
-/// that, below the pinned header too.
+/// so the window the first header above it is judged against is one a forger
+/// would have had to mine that header on top of. From the run's second header
+/// on, every header is held to the rules a node applies to any block it is
+/// handed: the difficulty its parent demands against the network's schedule,
+/// its own work added to the total, and a timestamp past the median of the
+/// window below it where the run holds that window. Real work behind its own
+/// identifier and the version its height requires need no parent, so every
+/// header of the run is held to those, its first too. The first header has no
+/// parent in the run, so its difficulty and its total are the two things here
+/// nothing asks.
 ///
 /// And once the whole run has been walked, the tip is held to it: no more
 /// than [`MOST_FALL`] times below the hardest header from the pinned one up.
@@ -1288,32 +1307,38 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
             if Some(header.height) != below.height.checked_add(1) || header.previous != below.id() {
                 return Err(StartError::TailNotConsecutive { at: header.height });
             }
-            // Below the pinned header only the chain itself is checked. When
-            // the retarget read ninety gaps the window that would have judged
-            // those difficulties was not here; it reads the header below now,
-            // so they could be judged, and are not: they are here to seed the
-            // median of the first header above, and what a weighing refuses is
-            // left as it was until the window itself is revisited. Above the
-            // pinned header the rules apply in full, and that is where a
-            // forger's cheap run would have to live.
-            if below.height >= pinned.height {
-                // The parent alone, against the schedule from the network's
-                // first block, which the rules carry rather than the run.
-                let demanded =
-                    next_difficulty(&below.summary(), params.origin(), params.target_block_time);
-                if header.difficulty != demanded {
-                    return Err(StartError::TailAtTheWrongDifficulty {
-                        at: header.height,
-                        stated: header.difficulty,
+            // The difficulty the header below demands, against the schedule
+            // from the network's first block, and the work adding up: from
+            // the run's second header on, the pinned header and the ninety
+            // below it included. They used to be asked only above the pinned
+            // header, so the pinned header's own difficulty, which `hardest`
+            // starts from and `MOST_FALL` measures the tip against, was a
+            // number a forger whose fork the draw landed above could write.
+            // The first header of the run has no parent here and is not asked.
+            carries_what_its_parent_demands(below, header, params).map_err(
+                |fault| match fault {
+                    Undemanded::Difficulty {
+                        at,
+                        stated,
                         demanded,
-                    });
-                }
-                // The median of the eleven headers below this one, read off
-                // the run itself. It used to be read off a window the walk
-                // kept and trimmed at the moving average's ninety one, which
-                // no rule reads any more; any trim of eleven or more gives
-                // the same median, so the trim was a number nothing could
-                // tell apart from its neighbours.
+                    } => StartError::TailAtTheWrongDifficulty {
+                        at,
+                        stated,
+                        demanded,
+                    },
+                    Undemanded::Work { at } => StartError::TailWorkDoesNotAddUp { at },
+                },
+            )?;
+            // The median of the eleven headers below this one, read off the
+            // run itself, where the run holds them: from its twelfth header
+            // on, and from its second when it starts at the first block, where
+            // the chain had no more headers than these and the rule read
+            // exactly them. Anywhere else a median over part of the window is
+            // not the rule, and over timestamps that do not rise it can stand
+            // above the real one and refuse an honest run. Above the pinned
+            // header that is always the case, since ninety headers lie below
+            // it or the run starts at the first block.
+            if index >= MEDIAN_TIME_WINDOW || from == 0 {
                 let below_it = start
                     .tail
                     .get(index.saturating_sub(MEDIAN_TIME_WINDOW)..index)
@@ -1323,11 +1348,10 @@ fn check_the_tail(start: &SampledStart, params: &ConsensusParams) -> Result<(), 
                 if median_time_past(&window).is_some_and(|median| header.timestamp <= median) {
                     return Err(StartError::TailOutOfTime { at: header.height });
                 }
-                if Some(header.total_work)
-                    != below.total_work.checked_add(work_of(header.difficulty))
-                {
-                    return Err(StartError::TailWorkDoesNotAddUp { at: header.height });
-                }
+            }
+            // The tip is held to the hardest header from the pinned one up, as
+            // before, so the tie means what it meant.
+            if below.height >= pinned.height {
                 hardest = hardest.max(header.difficulty);
             }
         }

@@ -72,8 +72,12 @@ const SEEDS: u64 = 256;
 /// the next header ask anything the bound allows, from a quarter of the last
 /// to four times it, and [`Walk::toward`] dates each header to come as near as
 /// it can to what the forger wants next. The headers below the pinned one are
-/// the forger's own and nothing judges them, so the run may start wherever on
-/// its schedule the forger likes, which [`Walk::at`] takes as an argument.
+/// the forger's own, and this model lets the run start wherever on its
+/// schedule the forger likes, which [`Walk::at`] takes as an argument. That
+/// is what the rules allowed when it was written; since every header after a
+/// run's first is judged against its parent, a run below the pinned header
+/// cannot start at an arbitrary point of its schedule, so the prices measured
+/// here are lower bounds on what a forger pays, not the price itself.
 #[derive(Clone)]
 struct Walk {
     target: u64,
@@ -292,8 +296,10 @@ fn band_from(from: u64, band: u128, lowest: u64, target: u64) -> Option<Walk> {
     let mut best: Option<Walk> = None;
     for shift in 2..16 {
         let plateau = u64::try_from(band >> shift).ok()?.max(from);
-        // Dated far ahead of its schedule below the pinned header, which
-        // nothing judges, so the climb is the bound's four a header.
+        // Dated far ahead of its schedule below the pinned header, so the
+        // climb is the bound's four a header. The rules now judge that run
+        // header by header and refuse this one at its second header, which
+        // makes the price this walk finds a lower bound.
         let mut walk = Walk::at(from, 64, target);
         while walk.demanded() < plateau {
             let level = walk.demanded();

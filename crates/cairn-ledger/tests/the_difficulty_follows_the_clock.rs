@@ -727,29 +727,104 @@ fn the_bound_adds_a_third_of_the_first_wait_to_a_large_departure() {
 /// the branch's lead plus that puts the chain there, and the bound, by
 /// lengthening the stall, puts it there sooner and further. The run is the
 /// schedule's debt being repaid: blocks with almost no work behind them,
-/// mined in minutes. Measured at sixteen seeds, the median: no block at the
-/// floor after a departure from 2 048 times, 874 after 4 096 times, which the
-/// 2 October intruder's rate reaches in under five hours, and 7 642 after
-/// 8 192 times; without the bound, `departure.py` finds none at 4 096 and
-/// 5 704 at 8 192.
+/// mined in minutes.
+///
+/// Pinned where every block takes the mean time its difficulty asks, which is
+/// one path and not a draw: 579 blocks at the floor after a departure from
+/// 2 048 times, 3 455 after 4 096 times, which the 2 October intruder's rate
+/// reaches in under five hours, and 9 191 after 8 192 times. Random block
+/// times put the median at 20.5, 2 244 and 7 793 over sixty four seeds. The
+/// median stands lower because the first honest block's wait is drawn from an
+/// exponential, whose median is `ln 2` of its mean, and a shorter wait leaves
+/// less debt. The figures at 4 096 and 8 192 times are what `departure.py`,
+/// the testnet-8 wave's simulator, prints for the same chain.
+///
+/// This test held a median over sixteen seeds, none at 2 048 times and 874 at
+/// 4 096, and four documents quoted it. Both were low draws: a median of a
+/// quantity one long gap decides moves by half or more between small sets of
+/// seeds, and the testnet-9 study found it by running the same script on
+/// sixty four. So the figure the documents lead with is the mean path, which
+/// no seed moves.
 #[test]
 fn a_departure_from_thousands_of_times_ends_in_a_run_at_the_floor() {
-    for (times, least, most) in [
-        (2_048u64, 0.0, 100.0),
-        (4_096, 500.0, 1_500.0),
-        (8_192, 6_000.0, 9_000.0),
+    for (times, mean, median) in [
+        (2_048u64, 579, 20.5),
+        (4_096, 3_455, 2_244.0),
+        (8_192, 9_191, 7_793.0),
     ] {
-        let mut runs: Vec<f64> = (0..16)
+        let path = departure(times, None).at_the_floor;
+        let mut runs: Vec<f64> = (0..64)
             .map(|seed| departure(times, Some(seed)).at_the_floor as f64)
             .collect();
         runs.sort_by(f64::total_cmp);
-        let run = f64::midpoint(runs[7], runs[8]);
-        println!("{times} times: a median of {run:.0} honest blocks at the floor");
+        let middle = f64::midpoint(runs[31], runs[32]);
+        println!(
+            "{times} times: {path} honest blocks at the floor on the mean path, a median \
+             of {middle:.1} over 64 seeds"
+        );
+        assert_eq!(
+            path, mean,
+            "{times} times left {path} blocks at the floor on the mean path"
+        );
         assert!(
-            (least..most).contains(&run),
-            "{times} times left {run:.0} blocks at the floor, outside {least} to {most}"
+            (middle - median).abs() <= 0.5,
+            "{times} times left a median of {middle:.1} blocks at the floor over 64 seeds"
         );
     }
+}
+
+/// The documents quote the floor run as measured, and no longer the low draw.
+///
+/// Read like the burst figures below, with the line breaks and the comment
+/// markers taken out.
+#[test]
+fn the_documents_quote_the_floor_run_as_measured() {
+    let flat = |text: &str| {
+        text.split_whitespace()
+            .filter(|word| !matches!(*word, "///" | "//!" | "//"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let everywhere: Vec<(&str, String)> = ELSEWHERE
+        .iter()
+        .map(|(name, text)| (*name, flat(text)))
+        .chain([("the specification", flat(SPECIFICATION))])
+        .collect();
+    for (name, text) in &everywhere {
+        for retired in [
+            "a median of 874 after a departure",
+            "no block at the floor after a departure from 2 048",
+            "aucun bloc au plancher après un départ de 2 048",
+            "874 blocks at the floor",
+            "874 après 4 096 fois, moins",
+            "7 642 after",
+            "7 642 après",
+            "médiane sur seize graines :",
+            "the median over sixteen seeds,",
+        ] {
+            assert!(!text.contains(retired), "{name} still says \"{retired}\"");
+        }
+    }
+    let quoted = |name: &str, phrase: &str| {
+        let (_, text) = everywhere.iter().find(|(named, _)| *named == name).unwrap();
+        assert!(text.contains(phrase), "{name} no longer says \"{phrase}\"");
+    };
+    for name in ["pow.rs", "the threat model"] {
+        quoted(name, "3 455 after a departure from 4 096 times");
+        quoted(name, "2 244 and 7 793 over sixty four seeds");
+    }
+    quoted(
+        "the specification",
+        "3 455 blocks at the floor after a departure from 4 096 times and 9 191 after 8 192",
+    );
+    quoted("the specification", "2 244 and 7 793 over sixty four seeds");
+    quoted(
+        "the open questions",
+        "579 blocs au plancher après un départ de 2 048 fois",
+    );
+    quoted("the open questions", "3 455 après 4 096 fois");
+    quoted("the open questions", "9 191 après 8 192 fois");
+    quoted("the open questions", "2 244 et de 7 793");
 }
 
 /// Nine tenths of the hash rate leaves for good, and the blocks are back near
