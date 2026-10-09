@@ -2920,6 +2920,29 @@ short enough to be undone, asks without that wait, and only for a claim its
 fork choice would follow (see *Fork choice*): following the wrong short branch
 is undone by the fork choice like any other.
 
+How long a peer's chain is, at the handshake, is the peer's word, so a node
+MUST hold a peer to it where its blocks arrive. **A node that could still undo
+everything it holds MUST NOT take a block above the depth it undoes from any
+peer but the one its choice has settled on.** Such a node holds no chain, only
+its network's first block, or a branch from that block no deeper than the
+network undoes; it is still choosing, whatever it holds, because the fork
+choice can still take it off what it holds for a heavier chain, and the choice
+stays open until it holds more than it can undo. While it is open, a peer that
+sends a block above the height it said is ranked from then on by what it sent:
+that block's height, and as much of the work behind it as the node holds, in
+place of the work it claimed. Without the hold, a peer saying it had nought
+blocks and the work of a long chain was asked for its chain at the handshake,
+pushed one block more than the network undoes, and the node read past the reach
+of every other chain. The first block a node takes no longer ends its choice:
+only a ledger handed over, or a block past the depth it undoes from the peer
+the choice settled on, does.
+
+Turns in the choice go round the connections: each claim standing when a round
+begins is asked once in it, heaviest first, and a claim heard during a round
+waits for the next, so a claim is asked within two rounds of a full peer table
+however many addresses the claims beside it come from, or within three when
+its own machine's claims have been failing.
+
 ### What a node MUST refuse
 
 Below the message set, a frame is a four byte network marker, a four byte

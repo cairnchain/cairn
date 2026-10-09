@@ -221,8 +221,8 @@ fn asks_at_the_handshake(chain: &mut ChainStore) -> bool {
 }
 
 /// A node holding only the first block its network pins leaves a long chain
-/// to the choice at the handshake, and a node with a chain of its own asks for
-/// it there.
+/// to the choice at the handshake, and a node holding more than it can undo
+/// asks for it there.
 ///
 /// The handshake is where a node decides whether to ask a peer for its chain
 /// at once or leave the choice of whom to follow to the chooser. It asked
@@ -230,6 +230,13 @@ fn asks_at_the_handshake(chain: &mut ChainStore) -> bool {
 /// newcomer asked the first long chain it met for its blocks and read it.
 /// Nothing asked this on a network that pins its first block, so that
 /// newcomer passed.
+///
+/// The second half held that one block of its own was enough to ask at the
+/// handshake. That was the gate a peer saying it had nought blocks went
+/// through: once the node held one block from it, every long claim after it
+/// was asked at once and the choice was over. A branch the node can still
+/// undo is still a choice (`sync::holds_nothing_it_cannot_undo`), so the node
+/// here holds one block more than its rules undo.
 #[test]
 fn a_node_holding_only_the_first_block_leaves_a_long_chain_to_the_choice() {
     let params = params();
@@ -242,23 +249,28 @@ fn a_node_holding_only_the_first_block_leaves_a_long_chain_to_the_choice() {
          for its blocks, which reads that chain rather than choosing whom to be handed one by"
     );
 
-    // Rules that pin nothing, so a first block of the test's own is a chain.
-    let unpinned = ConsensusParams::testnet();
+    // Rules that pin nothing and undo two blocks, so a branch of the test's
+    // own three blocks deep is a chain this node can no longer give up.
+    let unpinned = ConsensusParams::testnet().with_burial(2);
     let miner = SecretKey::from_bytes(&[1; 32]).public_key();
-    let coinbase = CoinbaseTransaction::new(0, vec![Note::new(unpinned.initial_reward, miner)]);
-    let block = assemble_block(
-        &LedgerState::new(),
-        coinbase,
-        Vec::<Transfer>::new(),
-        &unpinned,
-        1_000,
-        0,
-    )
-    .unwrap();
+    let mut state = LedgerState::new();
     let mut started = ChainStore::new(unpinned);
-    started
-        .add_block(mine_block(block, 1 << 20).unwrap(), wall_clock())
+    for height in 0..=started.undo_limit() + 1 {
+        let coinbase =
+            CoinbaseTransaction::new(height, vec![Note::new(unpinned.reward_at(height), miner)]);
+        let block = assemble_block(
+            &state,
+            coinbase,
+            Vec::<Transfer>::new(),
+            &unpinned,
+            1_000 + 600 * height,
+            0,
+        )
         .unwrap();
+        let block = mine_block(block, 1 << 20).unwrap();
+        connect_block(&mut state, &block, &unpinned, wall_clock()).unwrap();
+        started.add_block(block, wall_clock()).unwrap();
+    }
     assert!(
         asks_at_the_handshake(&mut started),
         "a node with a chain of its own left a heavier chain to a choice it no longer has"

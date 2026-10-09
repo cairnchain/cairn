@@ -454,8 +454,11 @@ fn two_connections_at_one_address_cannot_take_every_turn() {
 /// time round, and a stranger that wants the node's whole attention has to keep
 /// finding addresses it has not already spent. That is the price this module
 /// has always said a turn has. Past a handful it stopped being true, because
-/// the doubling stops: `tests/claims_nobody_shows.rs` measures where, and
-/// `choosing::Chooser::pause_for` is what repaired it.
+/// the doubling stops: `tests/claims_nobody_shows.rs` measures where. What
+/// repaired it was a round of every address on the list added to the pause,
+/// and what replaced that, once a stranger with more addresses than the list
+/// holds got round it, is turns going round the connections:
+/// `choosing::Chooser::pick`.
 ///
 /// Not bounded by [`HELD_OFF_AT_MOST`], which is about a chain a node has
 /// already proved and this node has proved nothing. What is asserted is that
