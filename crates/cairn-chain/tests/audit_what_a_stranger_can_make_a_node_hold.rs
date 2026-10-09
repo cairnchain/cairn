@@ -55,6 +55,8 @@ struct Chain {
     params: ConsensusParams,
     state: LedgerState,
     clock: u64,
+    /// What the last coinbase paid, for `mine_padded` to spend next.
+    paid: Vec<(NoteId, Note)>,
 }
 
 impl Chain {
@@ -63,6 +65,7 @@ impl Chain {
             params,
             state: LedgerState::new(),
             clock: 1_000,
+            paid: Vec::new(),
         }
     }
 
@@ -79,6 +82,49 @@ impl Chain {
                     &self.state,
                     coinbase,
                     Vec::new(),
+                    &self.params,
+                    self.clock,
+                    0,
+                )
+                .unwrap();
+                let block = mine_block(block, ATTEMPTS).expect("a nonce exists");
+                connect_block(&mut self.state, &block, &self.params, NOW).unwrap();
+                block
+            })
+            .collect()
+    }
+}
+
+impl Chain {
+    /// The same, with every block after the first spending the two notes the
+    /// coinbase before it paid into `outputs` notes each, so that every one of
+    /// them is the same size and that size is as large as `outputs` makes it.
+    fn mine_padded(&mut self, miner: &SecretKey, count: usize, outputs: usize) -> Vec<Block> {
+        let half = Amount::from_pebbles(self.params.initial_reward.as_pebbles() / 2).unwrap();
+        let dust = Amount::from_pebbles(1).unwrap();
+        let change = Amount::from_pebbles(half.as_pebbles() - (outputs as u64 - 1)).unwrap();
+        // What the coinbase before paid is the newest pair of notes held, so
+        // none of it has fallen by the time it is spent.
+        (0..count)
+            .map(|_| {
+                let height = self.state.next_height().unwrap();
+                self.clock += 600;
+                let coinbase =
+                    CoinbaseTransaction::new(height, vec![Note::new(half, miner.public_key()); 2]);
+                let transfers = std::mem::replace(&mut self.paid, coinbase.created_notes())
+                    .into_iter()
+                    .map(|(id, note)| {
+                        let mut notes = vec![Note::new(dust, miner.public_key()); outputs - 1];
+                        notes.push(Note::new(change, miner.public_key()));
+                        let mut transfer = Transfer::new(vec![Input::hot(id)], notes);
+                        transfer.sign_input(self.params.network, 0, &note, miner);
+                        transfer
+                    })
+                    .collect();
+                let block = assemble_block(
+                    &self.state,
+                    coinbase,
+                    transfers,
                     &self.params,
                     self.clock,
                     0,
@@ -751,12 +797,20 @@ fn what_a_rewind_can_no_longer_reach_is_dropped_before_it_is_oldest() {
 /// window then weighs more than the ceiling allows the window, and a little
 /// under `MAX_SIDE_BYTES` of rivals carries the total over while the sweep by
 /// age still has nothing to do.
+///
+/// The rivals are no larger than that block either, because the door beside
+/// the branch sizes a block against the rules. They were sixteen kilobytes
+/// against a limit of a few hundred bytes, which was a block the switch
+/// refuses held at the price of one that it takes. Within the limit, a little
+/// under `MAX_SIDE_BYTES` of them has to come in under `MAX_SIDE_BLOCKS`
+/// entries, so the branch's blocks are padded to sixteen kilobytes and the
+/// rivals made as large as they are.
 #[test]
 fn crossing_the_ceiling_is_enough_to_drop_what_a_rewind_cannot_reach() {
     let mining = params();
     let miner = wallet(1);
     let mut shared = Chain::new(mining);
-    let chain = shared.mine_empty(&miner, MAX_REORG_DEPTH + 60);
+    let chain = shared.mine_padded(&miner, MAX_REORG_DEPTH + 60, 128);
 
     let widest = chain
         .iter()
@@ -787,14 +841,19 @@ fn crossing_the_ceiling_is_enough_to_drop_what_a_rewind_cannot_reach() {
         .id_at(oldest)
         .expect("the oldest height the branch names");
 
-    // Sixteen kilobytes each, so that filling `MAX_SIDE_BYTES` takes about two
-    // thousand of them and the count never becomes the way in.
+    // As large as the rules allow, about sixteen kilobytes, so that filling
+    // `MAX_SIDE_BYTES` takes about two thousand of them and the count never
+    // becomes the way in.
     let mut ancient = Vec::new();
     for nonce in 0..MAX_SIDE_BLOCKS as u64 {
         if store.held_bytes() > ceiling {
             break;
         }
-        let block = side_block(at, parent, 16 * 1024, nonce, &wallet(9));
+        let block = side_block(at, parent, widest - 1024, nonce, &wallet(9));
+        assert!(
+            block.encode().len() <= widest,
+            "a rival larger than the rules allow"
+        );
         let id = block.id();
         assert_eq!(
             store.add_block(block, NOW).unwrap(),
@@ -831,7 +890,7 @@ fn crossing_the_ceiling_is_enough_to_drop_what_a_rewind_cannot_reach() {
 
     // Two, because the cutoff has to pass the height the rivals sit at, and it
     // stands one below them.
-    for block in shared.mine_empty(&miner, 2) {
+    for block in shared.mine_padded(&miner, 2, 128) {
         store.add_block(block, NOW).unwrap();
     }
 

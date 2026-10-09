@@ -390,6 +390,14 @@ blocks at most, rival branches included. On top of that come what its peers
 can make it queue, which is bounded per connection. `cargo test -p
 cairn-explorer --test published_figures` computes every one of these.
 
+What a node holds beside its branch is the fifth floor under a switch, after
+the identifiers, the block entries, the undo records and the block log, because
+a switch is tried only once the whole rival branch is held. Past 34 MB of those
+blocks in memory it puts the rest on its own disk, up to 193 MB of them in all,
+which is sized so that a switch of the full 1 024 blocks can happen over blocks
+as large as the rules allow. The disk copy is a cache: a restart starts without
+it, and nothing in it can reach the block log or the ledger.
+
 One cost does grow, and it is small and named: the headers and the forest they
 make, at 129 MB a year. A node keeps them so that anyone can join through it.
 Keeping every block, and archiving every note that ever fell out of the hot set,

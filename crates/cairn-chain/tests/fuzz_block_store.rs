@@ -22,6 +22,17 @@
 //! count or by bytes. Last, the heaviest honest branch is handed over once
 //! more, in order from the first block.
 //!
+//! A flood lands among the shuffled blocks or in the middle of that closing
+//! delivery, which is the one place the side store is full while a branch is
+//! still arriving, and the state the whole property is about. Before it could
+//! land there, the closing delivery handed every block over again after the
+//! flood had been swept, into the eighth the sweep leaves free, and a sweep
+//! that let an arriving branch go was never asked. Some cases mint honest
+//! blocks padded with payments to `max_block_bytes`, so that the branch being
+//! delivered weighs what a full block weighs and not a few hundred bytes. And
+//! half the stores have somewhere to spill bodies held off the branch, as a
+//! node with a disk does, standing in memory for the disk.
+//!
 //! A flood comes at one of two prices. Free junk claims difficulty one
 //! whatever its parent demands, which is what E05 was made of, and hangs just
 //! under the store's tip, where E05 hangs it; the store refuses every block
@@ -34,6 +45,15 @@
 //! those blocks displaces them by design, paying its parent's demand for
 //! every block it holds, and the closing property below is about junk that
 //! does not outweigh the branch it competes with.
+//!
+//! In the middle of the closing delivery paid junk hangs one block lower, so
+//! that it ties no block of the heaviest branch that arrived before it: two
+//! blocks on one parent weigh the same, and a full store lets the earlier go,
+//! so that displacing a block takes as many blocks of its work, sent after it,
+//! as the store holds. That is the price the sweep sets and not what this
+//! property is about. A fat flood on a store with a disk is the exception and
+//! hangs where it always does, since that store holds all of it without
+//! letting anything go, which is the switch the disk exists to let happen.
 //!
 //! After every block it holds, against the tree as minted rather than
 //! against anything the store reports about itself:
@@ -48,13 +68,18 @@
 //!    since a branch is weighed when a block of it arrives: the branch
 //!    followed can grow past a tie's height by a block lighter than the
 //!    tie's margin, and the tie stays aside until its next block comes.
-//! 4. What the store keeps off its branch stays within `MAX_SIDE_BLOCKS` and
-//!    `MAX_SIDE_BYTES`, counted here from the bodies it holds, and the count
-//!    it keeps of its own bytes is that count.
+//! 4. What the store keeps off its branch stays within `MAX_SIDE_BLOCKS`, and
+//!    within `MAX_SIDE_BYTES` in memory, counted here from the bodies it
+//!    holds; with somewhere to spill, within `ChainStore::side_bytes_ceiling`
+//!    in memory and spilled together, and what is spilled is exactly what the
+//!    store says is. The count it keeps of its own bytes is the count of what
+//!    it holds in memory.
 //! 5. A refusal changes nothing it follows: the tip and the ledger are as
 //!    they were, nothing valid is let go of, and the only block it may now
-//!    hold that it did not is the one it refused. A body held under an
-//!    identifier is never swapped for another.
+//!    hold that it did not is the one it refused. A block it could not keep
+//!    for want of room is the one refusal that runs the sweep, and is held to
+//!    the tip and the ledger alone, and to not being held. A body held under
+//!    an identifier is never swapped for another.
 //! 6. The same sequence handed to a second store gives the same answer and
 //!    the same tip at every step.
 //!
@@ -89,12 +114,14 @@
     clippy::too_many_lines
 )]
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use cairn_chain::{
-    Accepted, ChainError, ChainStore, HELD_OVERHEAD, MAX_SIDE_BLOCKS, MAX_SIDE_BYTES,
+    Accepted, ChainError, ChainStore, SideBodies, HELD_OVERHEAD, MAX_SIDE_BLOCKS, MAX_SIDE_BYTES,
 };
 use cairn_crypto::SecretKey;
 use cairn_fuzz::{Campaign, Rng};
@@ -139,14 +166,51 @@ const LIGHT: u64 = 16;
 /// hashes a flood.
 const HEAVY: u64 = 8_192;
 
-/// What one block of a fat flood is made to weigh.
-const FAT_BYTES: usize = 512 * 1024;
+/// What one block of a fat flood is made to weigh: as much as a block has
+/// room for, since the door sizes a block beside the branch against
+/// `max_block_bytes`.
+///
+/// It was half a megabyte, four times what a block may be, and those floods
+/// are refused at the door now. What presses the side store's bytes is the
+/// largest block the rules allow.
+const FAT_BYTES: usize = ChainStore::room_for_transfers(ConsensusParams::testnet().max_block_bytes);
 
 fn rules(opening: u64) -> ConsensusParams {
     let mut params = ConsensusParams::testnet();
     params.opens_at = OPENS;
     params.genesis_difficulty = opening;
     params
+}
+
+/// Somewhere to spill bodies held off the branch, standing in memory for the
+/// disk a node has, and shared with the run so that what is spilled can be
+/// weighed like what is not.
+#[derive(Clone, Debug, Default)]
+struct Disk(Arc<Mutex<HashMap<Hash32, Block>>>);
+
+impl Disk {
+    fn get(&self, id: &Hash32) -> Option<Block> {
+        self.0.lock().unwrap().get(id).cloned()
+    }
+
+    fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
+impl SideBodies for Disk {
+    fn put(&mut self, id: &Hash32, block: &Block) -> bool {
+        self.0.lock().unwrap().insert(*id, block.clone());
+        true
+    }
+
+    fn get(&self, id: &Hash32) -> Option<Block> {
+        Self::get(self, id)
+    }
+
+    fn remove(&mut self, id: &Hash32) {
+        self.0.lock().unwrap().remove(id);
+    }
 }
 
 fn wallet(seed: u8) -> SecretKey {
@@ -191,6 +255,11 @@ struct Network {
     /// The honest block with the most work behind it, earliest minted on a
     /// tie.
     heaviest: usize,
+    /// Whether the honest blocks are padded with payments to the largest
+    /// block the rules allow.
+    padded: bool,
+    /// Whether the store has somewhere to spill bodies held off its branch.
+    spills: bool,
 }
 
 /// Whether the fork choice takes a branch ending at `rival` over one ending
@@ -257,6 +326,65 @@ fn mint(params: &ConsensusParams, state: &LedgerState, timestamp: u64, salt: u64
     mine_block(block, ATTEMPTS).expect("a nonce at this difficulty")
 }
 
+/// Mints the next honest block on `state`, padded with payments to the
+/// largest block the rules allow.
+///
+/// Its coinbase pays the miner in sixteen notes, and the block spends the
+/// miner's notes the state holds, each into two hundred and fifty five notes
+/// of a pebble and the change, until the next would not fit; then one more,
+/// cut to what room is left. So every block but the first is full to within a
+/// note of the limit, and every one of them is valid: the closing branch is
+/// applied.
+fn mint_padded(params: &ConsensusParams, state: &LedgerState, timestamp: u64, salt: u64) -> Block {
+    let height = state.next_height().unwrap();
+    let miner = wallet(1);
+    let owner = miner.public_key();
+    let each = Amount::from_pebbles(params.reward_at(height).as_pebbles() / 16).unwrap();
+    let coinbase = CoinbaseTransaction::with_extra(
+        height,
+        vec![Note::new(each, owner); 16],
+        salt.to_le_bytes().to_vec(),
+    );
+    let room = ChainStore::room_for_transfers(params.max_block_bytes);
+    let dust = Amount::from_pebbles(1).unwrap();
+    let spend = |id: NoteId, note: Note, outputs: usize| {
+        let mut notes = vec![Note::new(dust, owner); outputs - 1];
+        notes.push(Note::new(
+            Amount::from_pebbles(note.value.as_pebbles() - (outputs as u64 - 1)).unwrap(),
+            owner,
+        ));
+        let mut transfer = Transfer::new(vec![Input::hot(id)], notes);
+        transfer.sign_input(params.network, 0, &note, &miner);
+        transfer
+    };
+    let per = Note::new(dust, owner).encode().len();
+    let mut transfers = Vec::new();
+    let mut used = 0usize;
+    for (id, entry) in state.hot_notes() {
+        if entry.note.owner != owner.into() || entry.note.value.as_pebbles() < 256 {
+            continue;
+        }
+        let whole = spend(id, entry.note, 256);
+        let size = whole.encode().len();
+        if used + size <= room {
+            used += size;
+            transfers.push(whole);
+            continue;
+        }
+        let one = spend(id, entry.note, 1).encode().len();
+        if used + one <= room {
+            transfers.push(spend(id, entry.note, 1 + (room - used - one) / per));
+        }
+        break;
+    }
+    let block = assemble_block(state, coinbase, transfers, params, timestamp, 0).unwrap();
+    assert!(
+        block.encode().len() <= params.max_block_bytes,
+        "a padded block is past the limit"
+    );
+    mine_block(block, ATTEMPTS).expect("a nonce at this difficulty")
+}
+
 /// The gap a branch leaves before its next block.
 ///
 /// Tight ones climb the difficulty slowly, loose ones bring it down by up to
@@ -269,7 +397,14 @@ fn gap(rng: &mut Rng) -> u64 {
 
 /// The honest tree: a first block, then each block on one already minted,
 /// mostly the newest or one below it, sometimes anywhere.
-fn honest_tree(rng: &mut Rng, params: &ConsensusParams, count: usize, salt: u64) -> Vec<Honest> {
+fn honest_tree(
+    rng: &mut Rng,
+    params: &ConsensusParams,
+    count: usize,
+    salt: u64,
+    padded: bool,
+) -> Vec<Honest> {
+    let mint = if padded { mint_padded } else { mint };
     let genesis = mint(params, &LedgerState::new(), OPENS, salt);
     let mut after = LedgerState::new();
     connect_block(&mut after, &genesis, params, NOW).unwrap();
@@ -439,19 +574,29 @@ fn malformed(
 }
 
 /// A case's network: the honest tree and what was made wrong beside it.
-fn network(rng: &mut Rng, flood: Option<Price>, salt: u64) -> Network {
+///
+/// A padded tree is a few blocks rather than tens, and spends its rewards at
+/// once: what it is for is the weight of the branch being delivered, and a
+/// hot set the size of tens of full blocks, cloned for every block of the
+/// tree, is a minute a case for nothing more.
+fn network(rng: &mut Rng, flood: Option<Price>, salt: u64, padded: bool, spills: bool) -> Network {
     let flooded = flood.is_some();
-    let params = rules(if flood == Some(Price::Free) {
+    let mut params = rules(if flood == Some(Price::Free) {
         HEAVY
     } else {
         LIGHT
     });
-    let count = if flooded {
+    if padded {
+        params.coinbase_maturity = 0;
+    }
+    let count = if padded {
+        rng.between(3, 8)
+    } else if flooded {
         rng.between(6, 16)
     } else {
         rng.between(2, 40)
     };
-    let honest = honest_tree(rng, &params, count, salt);
+    let honest = honest_tree(rng, &params, count, salt, padded);
     let mut universe: Vec<Entry> = honest
         .iter()
         .enumerate()
@@ -489,7 +634,90 @@ fn network(rng: &mut Rng, flood: Option<Price>, salt: u64) -> Network {
         universe,
         honest_by_id,
         heaviest,
+        padded,
+        spills,
     }
+}
+
+/// The case a disk is for, built rather than drawn.
+///
+/// A branch of two blocks the store follows, and a heavier branch of three
+/// beside it from the first block, every block padded to the largest a block
+/// may be. The store is handed the branch it follows, then the closing
+/// delivery begins, and after the first block of the heavier branch a fat
+/// flood lands on the first block: siblings tying that block, which arrived
+/// before them, past what memory holds beside the branch. A store with
+/// nowhere to spill lets the earlier of equal blocks go, which is the
+/// heavier branch's first, and refuses the rest of it for that parent; a
+/// store with a disk holds all of it and follows the heavier branch.
+///
+/// A draw reaches this seldom, since it needs the store on another branch,
+/// that branch's first block a leaf, and the flood just after it, so the
+/// campaign holds it every run.
+fn the_case_a_disk_is_for(rng: &mut Rng, salt: u64) -> (Network, Vec<Step>) {
+    let mut params = rules(LIGHT);
+    params.coinbase_maturity = 0;
+    let mut honest: Vec<Honest> = Vec::new();
+    // Each on its parent, a minute after it, which is the schedule, so every
+    // block asks the same difficulty and the work is the height.
+    for (index, parent) in [None, Some(0), Some(1), Some(0), Some(3), Some(4)]
+        .into_iter()
+        .enumerate()
+    {
+        let before = parent.map_or_else(LedgerState::new, |at: usize| honest[at].after.clone());
+        let timestamp = parent.map_or(OPENS, |at| honest[at].block.header.timestamp + 60);
+        let block = mint_padded(&params, &before, timestamp, salt ^ index as u64);
+        let mut after = before;
+        connect_block(&mut after, &block, &params, NOW).unwrap();
+        honest.push(Honest {
+            work: block.header.total_work,
+            block,
+            parent,
+            after,
+        });
+    }
+    assert!(honest[5].work > honest[2].work && honest[3].work < honest[2].work);
+    let universe = honest
+        .iter()
+        .enumerate()
+        .map(|(index, minted)| Entry {
+            block: minted.block.clone(),
+            kind: Kind::Honest(index),
+            near: index,
+        })
+        .collect();
+    let honest_by_id = honest
+        .iter()
+        .enumerate()
+        .map(|(index, minted)| (minted.block.id(), index))
+        .collect();
+    let network = Network {
+        params,
+        honest,
+        universe,
+        honest_by_id,
+        heaviest: 5,
+        padded: true,
+        spills: true,
+    };
+    let steps = vec![
+        Step::Offer(0),
+        Step::Offer(1),
+        Step::Offer(2),
+        Step::Close(0),
+        Step::Close(3),
+        Step::Flood {
+            depth: 1,
+            count: MAX_SIDE_BYTES / FAT_BYTES + rng.between(1, 8),
+            shape: Shape::Fat,
+            price: Price::Paid,
+            salt: rng.edgy_u64(),
+            closing: true,
+        },
+        Step::Close(4),
+        Step::Close(5),
+    ];
+    (network, steps)
 }
 
 /// How the junk of a flood hangs together.
@@ -500,8 +728,8 @@ enum Shape {
     Chain,
     /// Every block on the same parent, at one height.
     Siblings,
-    /// Siblings of half a megabyte, past the ceiling on bytes long before the
-    /// one on count.
+    /// Siblings as large as a block may be, past the ceiling on bytes long
+    /// before the one on count.
     Fat,
 }
 
@@ -520,6 +748,12 @@ enum Price {
 enum Step {
     /// A block of the case's universe, by its place there.
     Offer(usize),
+    /// A block of the heaviest honest branch, by its place in the universe,
+    /// handed over as part of the closing delivery.
+    ///
+    /// Told apart from an offer so that cutting a failing case down never
+    /// cuts the delivery the closing property is about.
+    Close(usize),
     /// Junk claiming the least work there is, hung off the block `depth`
     /// below the store's tip when the flood lands.
     ///
@@ -530,14 +764,17 @@ enum Step {
     /// nothing.
     ///
     /// Paid junk hangs no higher than where the store's branch leaves the
-    /// heaviest honest one, so it hangs off that branch too. See the module
-    /// documentation for why.
+    /// heaviest honest one, so it hangs off that branch too, and a block
+    /// lower when it lands in the middle of the closing delivery. See the
+    /// module documentation for why.
     Flood {
         depth: u64,
         count: usize,
         shape: Shape,
         price: Price,
         salt: u64,
+        /// Whether it lands in the middle of the closing delivery.
+        closing: bool,
     },
 }
 
@@ -600,13 +837,21 @@ fn paid_junk(params: &ConsensusParams, parent: &BlockHeader, nonce: u64, bytes: 
     block
 }
 
+/// How a case's flood is drawn, where it is not left to the draw.
+#[derive(Clone, Copy, Debug, Default)]
+struct Drawn {
+    shape: Option<Shape>,
+    closing: Option<bool>,
+}
+
 /// The heights of a case, in the order the store is handed them.
 ///
 /// The universe in the order it was minted, each malformed block placed
 /// after the honest block it was made beside; then neighbours swapped, a few
-/// blocks moved anywhere, some withheld, some handed over twice, and maybe a
-/// flood.
-fn sequence(rng: &mut Rng, network: &Network, flood: Option<Price>) -> Vec<Step> {
+/// blocks moved anywhere, some withheld, some handed over twice; then the
+/// heaviest honest branch in order from the first block; and maybe a flood,
+/// among the shuffled blocks or in the middle of that delivery.
+fn sequence(rng: &mut Rng, network: &Network, flood: Option<Price>, drawn: Drawn) -> Vec<Step> {
     let honest = network.honest.len();
     let mut order: Vec<usize> = (0..honest).collect();
     for index in honest..network.universe.len() {
@@ -638,18 +883,30 @@ fn sequence(rng: &mut Rng, network: &Network, flood: Option<Price>) -> Vec<Step>
         let to = rng.between(from, steps.len());
         steps.insert(to, copy);
     }
+    let shuffled = steps.len();
+    steps.extend(in_order(network));
     if let Some(price) = flood {
         // Off the tip's parent or close to it, which is where E05 hangs it:
         // the junk then sits above the heights an honest rival arrives at.
         let depth = rng.between(1, 3) as u64;
-        let shape = *rng
-            .pick(&[Shape::Chain, Shape::Chain, Shape::Siblings, Shape::Fat])
-            .unwrap();
+        let shape = drawn.shape.unwrap_or_else(|| {
+            *rng.pick(&[Shape::Chain, Shape::Chain, Shape::Siblings, Shape::Fat])
+                .unwrap()
+        });
         let count = match shape {
             Shape::Fat => MAX_SIDE_BYTES / FAT_BYTES + rng.between(1, 8),
             _ => MAX_SIDE_BLOCKS + rng.between(1, 200),
         };
-        let at = rng.between(steps.len() / 3, steps.len());
+        let closing = drawn.closing.unwrap_or_else(|| rng.bool());
+        // Never ahead of the first block of the closing delivery, which is
+        // the first block of all and always held, so a flood in the middle of
+        // it has something to hang off; and ahead of its last where there is
+        // more than one, so a block of the branch still arrives after it.
+        let at = if closing {
+            rng.between(shuffled + 1, steps.len() - 1)
+        } else {
+            rng.between(shuffled / 3, shuffled)
+        };
         steps.insert(
             at,
             Step::Flood {
@@ -658,6 +915,7 @@ fn sequence(rng: &mut Rng, network: &Network, flood: Option<Price>) -> Vec<Step>
                 shape,
                 price,
                 salt: rng.edgy_u64(),
+                closing,
             },
         );
     }
@@ -670,7 +928,7 @@ fn in_order(network: &Network) -> Vec<Step> {
     network
         .ancestry(network.heaviest)
         .into_iter()
-        .map(Step::Offer)
+        .map(Step::Close)
         .collect()
 }
 
@@ -699,6 +957,14 @@ struct Tally {
     /// Honest blocks kept aside as a tie: heavier than the tip followed, at
     /// its height, by no more than half its difficulty.
     ties_kept: usize,
+    /// Cases whose honest blocks were padded to the largest a block may be.
+    padded: usize,
+    /// Floods that landed in the middle of the closing delivery, by shape.
+    closing_floods: BTreeMap<String, usize>,
+    /// The most a store held spilled at once, in bytes.
+    most_spilled: usize,
+    /// Switches that applied a body the store had spilled.
+    applied_from_disk: usize,
 }
 
 /// The name of an answer, without what it carries.
@@ -733,6 +999,8 @@ struct Held {
 struct Run<'a> {
     network: &'a Network,
     store: ChainStore,
+    /// Where the store spills, when it can.
+    disk: Option<Disk>,
     junk: Vec<Block>,
     /// Every body handed over under each identifier, with its encoded size.
     known: HashMap<Hash32, Vec<(Source, usize)>>,
@@ -751,9 +1019,15 @@ impl<'a> Run<'a> {
                 .or_default()
                 .push((Source::Universe(index), entry.block.encode().len()));
         }
+        let mut store = ChainStore::new(network.params);
+        let disk = network.spills.then(Disk::default);
+        if let Some(disk) = &disk {
+            store.spills_side_bodies_to(Box::new(disk.clone()));
+        }
         Self {
             network,
-            store: ChainStore::new(network.params),
+            store,
+            disk,
             junk: Vec::new(),
             known,
             tied: HashSet::new(),
@@ -768,19 +1042,27 @@ impl<'a> Run<'a> {
         }
     }
 
+    /// The body the store holds under `id`, in memory or spilled.
+    fn body_held(&self, id: &Hash32) -> Option<Cow<'_, Block>> {
+        if let Some(body) = self.store.block(id) {
+            return Some(Cow::Borrowed(body));
+        }
+        self.store.held_header(id)?;
+        self.disk.as_ref()?.get(id).map(Cow::Owned)
+    }
+
     /// The encoded size of the body the store holds under `id`, and whether
     /// it is valid, or what is wrong with it.
     fn weigh(&self, id: &Hash32) -> Result<(usize, bool), String> {
         let held = self
-            .store
-            .block(id)
+            .body_held(id)
             .ok_or_else(|| format!("{id:?} is held with no body, and nothing here lets one go"))?;
         let candidates = self.known.get(id).map_or(&[][..], Vec::as_slice);
         let (_, size) = candidates
             .iter()
-            .find(|(source, _)| self.body(*source) == held)
+            .find(|(source, _)| *self.body(*source) == *held)
             .ok_or_else(|| format!("{id:?} is held under a body nobody handed over"))?;
-        Ok((*size, self.network.is_valid(id, held)))
+        Ok((*size, self.network.is_valid(id, &held)))
     }
 
     fn held(&self) -> Result<Held, String> {
@@ -913,10 +1195,14 @@ impl<'a> Run<'a> {
             }
         }
 
-        // 4. What is kept off the branch, counted from the bodies.
+        // 4. What is kept off the branch, counted from the bodies, in memory
+        // and spilled.
         let mut side_blocks = 0usize;
         let mut side_bytes = 0usize;
+        let mut side_total = 0usize;
         let mut all_bytes = 0usize;
+        let mut spilled = 0usize;
+        let mut spilled_bytes = 0usize;
         for id in self.known.keys() {
             if !self.store.contains(id) {
                 continue;
@@ -925,18 +1211,38 @@ impl<'a> Run<'a> {
                 .weigh(id)
                 .map_err(|said| fail("the store holds what it was handed", said))?;
             let held = size + HELD_OVERHEAD;
-            all_bytes += held;
+            let in_memory = self.store.block(id).is_some();
+            if in_memory {
+                all_bytes += held;
+            } else {
+                spilled += 1;
+                spilled_bytes += held;
+            }
             if !self.store.is_active(id) {
                 side_blocks += 1;
-                side_bytes += held;
+                side_total += held;
+                if in_memory {
+                    side_bytes += held;
+                }
+            } else if !in_memory {
+                return Err(fail(
+                    "the side store stays within its bounds",
+                    format!("{id:?} is on the branch followed and its body is spilled"),
+                ));
             }
         }
-        if side_blocks > MAX_SIDE_BLOCKS || side_bytes > MAX_SIDE_BYTES {
+        let ceiling = if network.spills {
+            ChainStore::side_bytes_ceiling(&network.params)
+        } else {
+            MAX_SIDE_BYTES
+        };
+        if side_blocks > MAX_SIDE_BLOCKS || side_bytes > MAX_SIDE_BYTES || side_total > ceiling {
             return Err(fail(
                 "the side store stays within its bounds",
                 format!(
-                    "{side_blocks} blocks and {side_bytes} bytes held off the branch, against \
-                     {MAX_SIDE_BLOCKS} and {MAX_SIDE_BYTES}"
+                    "{side_blocks} blocks, {side_bytes} bytes in memory and {side_total} in all \
+                     held off the branch, against {MAX_SIDE_BLOCKS}, {MAX_SIDE_BYTES} and \
+                     {ceiling}"
                 ),
             ));
         }
@@ -949,10 +1255,22 @@ impl<'a> Run<'a> {
                 ),
             ));
         }
+        let on_disk = self.disk.as_ref().map_or(0, Disk::len);
+        if spilled_bytes != self.store.spilled_bytes() || spilled != on_disk {
+            return Err(fail(
+                "the side store stays within its bounds",
+                format!(
+                    "{spilled} bodies are spilled, {spilled_bytes} bytes, and the store counts \
+                     {} while its disk holds {on_disk}",
+                    self.store.spilled_bytes()
+                ),
+            ));
+        }
         if let Some(tally) = tally {
             if side_blocks == MAX_SIDE_BLOCKS || side_bytes > MAX_SIDE_BYTES - FAT_BYTES {
                 tally.at_the_ceiling += 1;
             }
+            tally.most_spilled = tally.most_spilled.max(spilled_bytes);
         }
         Ok(())
     }
@@ -988,6 +1306,20 @@ impl<'a> Run<'a> {
             }
         }
         match answer {
+            Err(ChainError::NoRoom { id: let_go }) => {
+                if after.tip != before.tip || after.state_root != before.state_root {
+                    return Err(fail(
+                        "a side block leaves the branch alone",
+                        "a block let go of for want of room moved the tip or the ledger".to_owned(),
+                    ));
+                }
+                if *let_go != id || after.blocks.contains_key(&id) {
+                    return Err(fail(
+                        "a block let go of is not held",
+                        format!("answered {answer:?} for {id:?}, which is held"),
+                    ));
+                }
+            }
             Err(refused) => {
                 if after.tip != before.tip
                     || after.work != before.work
@@ -1063,6 +1395,12 @@ impl<'a> Run<'a> {
         })?;
         let height_before = self.store.height();
         let followed_before = self.network.followed(&self.store).copied();
+        let spilled_before: HashSet<Hash32> = self
+            .known
+            .keys()
+            .filter(|id| self.store.held_header(id).is_some() && self.store.block(id).is_none())
+            .copied()
+            .collect();
         let answer = self.store.add_block(block.clone(), NOW);
         let id = block.id();
         // Weighed by its header, so a twin offered under an honest identifier
@@ -1094,6 +1432,11 @@ impl<'a> Run<'a> {
             {
                 tally.went_down += 1;
             }
+            if let Ok(Accepted::Reorganised { added, .. }) = &answer {
+                if added.iter().any(|came| spilled_before.contains(came)) {
+                    tally.applied_from_disk += 1;
+                }
+            }
         }
         Ok(())
     }
@@ -1109,6 +1452,7 @@ impl<'a> Run<'a> {
         shape: Shape,
         price: Price,
         salt: u64,
+        closing: bool,
         tally: &mut Option<&mut Tally>,
     ) -> Result<(), Failure> {
         let fail = |property: &'static str, said: String| Failure {
@@ -1141,7 +1485,26 @@ impl<'a> Run<'a> {
                         .is_some_and(|index| heaviest.contains(index))
                 })
                 .unwrap_or(0);
-            at = at.min(shared);
+            // In the middle of the closing delivery, one lower, so the junk
+            // ties no block of that branch already handed over; unless the
+            // store can hold the whole flood without letting anything go. See
+            // the module documentation.
+            let holds_it_all = shape == Shape::Fat && network.spills;
+            let highest = if closing && !holds_it_all {
+                let Some(below) = shared.checked_sub(1) else {
+                    if let Some(tally) = tally {
+                        *tally
+                            .floods
+                            .entry("nothing under the branch to hang off".to_owned())
+                            .or_default() += 1;
+                    }
+                    return Ok(());
+                };
+                below
+            } else {
+                shared
+            };
+            at = at.min(highest);
         }
         let hung = self
             .store
@@ -1166,6 +1529,11 @@ impl<'a> Run<'a> {
             }
         }
         let params = network.params;
+        let ceiling = if network.spills {
+            ChainStore::side_bytes_ceiling(&params)
+        } else {
+            MAX_SIDE_BYTES
+        };
         let mut previous = hung.header;
         for index in 0..count {
             let nonce = salt.wrapping_add(index as u64);
@@ -1214,12 +1582,15 @@ impl<'a> Run<'a> {
             }
             let side_blocks = self.store.len().saturating_sub(on_branch);
             let side_bytes = self.store.held_bytes().saturating_sub(branch_bytes);
-            if side_blocks > MAX_SIDE_BLOCKS || side_bytes > MAX_SIDE_BYTES {
+            let side_total = side_bytes + self.store.spilled_bytes();
+            if side_blocks > MAX_SIDE_BLOCKS || side_bytes > MAX_SIDE_BYTES || side_total > ceiling
+            {
                 return Err(fail(
                     "the side store stays within its bounds",
                     format!(
-                        "after junk block {index} of the flood: {side_blocks} blocks and \
-                         {side_bytes} bytes held off the branch"
+                        "after junk block {index} of the flood: {side_blocks} blocks, \
+                         {side_bytes} bytes in memory and {side_total} in all held off the \
+                         branch"
                     ),
                 ));
             }
@@ -1237,6 +1608,12 @@ impl<'a> Run<'a> {
                 .floods
                 .entry(format!("{shape:?} {price:?}"))
                 .or_default() += 1;
+            if closing {
+                *tally
+                    .closing_floods
+                    .entry(format!("{shape:?} {price:?}"))
+                    .or_default() += 1;
+            }
         }
         self.check(step, tally)
     }
@@ -1248,7 +1625,7 @@ impl<'a> Run<'a> {
         tally: &mut Option<&mut Tally>,
     ) -> Result<(), Failure> {
         match what {
-            Step::Offer(index) => {
+            Step::Offer(index) | Step::Close(index) => {
                 let entry = &self.network.universe[*index];
                 if let (Some(tally), Kind::Malformed(kind)) = (tally.as_deref_mut(), entry.kind) {
                     *tally.malformed.entry(kind).or_default() += 1;
@@ -1262,27 +1639,28 @@ impl<'a> Run<'a> {
                 shape,
                 price,
                 salt,
-            } => self.flood(step, *depth, *count, *shape, *price, *salt, tally),
+                closing,
+            } => self.flood(step, *depth, *count, *shape, *price, *salt, *closing, tally),
         }
     }
 }
 
-/// Runs a case: the sequence, then the heaviest honest branch in order, and
-/// then whether the store follows a branch that heavy.
+/// Runs a case: the sequence, which ends with the heaviest honest branch in
+/// order, and then whether the store follows a branch that heavy.
 fn run(
     network: &Network,
     steps: &[Step],
     mut tally: Option<&mut Tally>,
 ) -> Result<Vec<String>, Failure> {
     let mut run = Run::new(network);
+    let mut tip_before_closing = None;
     for (at, what) in steps.iter().enumerate() {
+        if tip_before_closing.is_none() && matches!(what, Step::Close(_)) {
+            tip_before_closing = Some(run.store.tip());
+        }
         run.step(at, what, &mut tally)?;
     }
-    let tip_before_closing = run.store.tip();
-    let closing = in_order(network);
-    for (offset, what) in closing.iter().enumerate() {
-        run.step(steps.len() + offset, what, &mut tally)?;
-    }
+    let tip_before_closing = tip_before_closing.unwrap_or_else(|| run.store.tip());
     let heaviest = &network.honest[network.heaviest].block.header;
     if network
         .followed(&run.store)
@@ -1290,7 +1668,7 @@ fn run(
     {
         return Err(Failure {
             property: "an honest heavier branch delivered in order is followed",
-            step: steps.len() + closing.len(),
+            step: steps.len(),
             said: format!(
                 "the heaviest honest branch, worth {} and ending at honest block {}, was handed \
                  over in order from its first block, and the store follows {:?}, worth {}",
@@ -1329,7 +1707,8 @@ fn still_fails(network: &Network, steps: &[Step], property: &'static str) -> boo
 const REPLAY: &str = "the same sequence replayed gives the same tip";
 
 /// The shortest sequence this reaches that still breaks `property`: runs cut
-/// out largest first, then each flood made as small as it can be.
+/// out largest first, then each flood made as small as it can be. The
+/// closing delivery is never cut, since the closing property is about it.
 fn cut_down(network: &Network, steps: &[Step], property: &'static str) -> Vec<Step> {
     let mut best = steps.to_vec();
     let mut span = best.len().max(1);
@@ -1337,9 +1716,16 @@ fn cut_down(network: &Network, steps: &[Step], property: &'static str) -> Vec<St
         let mut at = 0;
         while at < best.len() {
             let end = (at + span).min(best.len());
-            let mut shorter = best[..at].to_vec();
-            shorter.extend_from_slice(&best[end..]);
-            if still_fails(network, &shorter, property) {
+            let cut = (at..end).any(|index| !matches!(best[index], Step::Close(_)));
+            let shorter: Vec<Step> = best
+                .iter()
+                .enumerate()
+                .filter(|(index, step)| {
+                    !(at..end).contains(index) || matches!(step, Step::Close(_))
+                })
+                .map(|(_, step)| step.clone())
+                .collect();
+            if cut && still_fails(network, &shorter, property) {
                 best = shorter;
             } else {
                 at += span;
@@ -1406,15 +1792,24 @@ fn keep(network: &Network, steps: &[Step], failure: &Failure, seed: u64, case: u
             header.previous
         );
     }
-    let _ = writeln!(record, "\nthe sequence, cut down to {} steps:", steps.len());
+    let _ = writeln!(
+        record,
+        "\nthe store {} spill; the honest blocks are {}",
+        if network.spills { "can" } else { "cannot" },
+        if network.padded {
+            "padded to the largest a block may be"
+        } else {
+            "empty"
+        }
+    );
+    let _ = writeln!(
+        record,
+        "\nthe sequence, cut down to {} steps, the closing delivery included:",
+        steps.len()
+    );
     for (index, step) in steps.iter().enumerate() {
         let _ = writeln!(record, "  {index}: {step:?}");
     }
-    let _ = writeln!(
-        record,
-        "  then the heaviest honest branch in order: {:?}",
-        network.ancestry(network.heaviest)
-    );
     let folder: String = CAMPAIGN
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -1454,19 +1849,44 @@ fn the_block_store_follows_the_heaviest_valid_branch_whatever_order_it_hears_it_
     let mut tally = Tally::default();
 
     let ran = campaign.run(160, |case, rng| {
-        // One case in thirty two, and the first two, carry a flood: it is
+        // One case in thirty two, and the first three, carry a flood: it is
         // what reaches the side store's ceiling, and it costs a second or so.
         // The first is paid and the second free, so a short run holds both.
+        //
+        // The first is also built rather than drawn: see
+        // `the_case_a_disk_is_for`. The third is a fat flood in the middle of
+        // the closing delivery on a store without a disk, where it hangs a
+        // block lower.
         let flood = match case {
-            0 => Some(Price::Paid),
+            0 | 2 => Some(Price::Paid),
             1 => Some(Price::Free),
             _ => rng
                 .chance(32)
                 .then(|| if rng.bool() { Price::Paid } else { Price::Free }),
         };
+        let (padded, spills, drawn) = match case {
+            0 => (true, true, Drawn::default()),
+            2 => (
+                true,
+                false,
+                Drawn {
+                    shape: Some(Shape::Fat),
+                    closing: Some(true),
+                },
+            ),
+            _ => (rng.chance(16), rng.bool(), Drawn::default()),
+        };
+        if padded {
+            tally.padded += 1;
+        }
         let salt = rng.edgy_u64();
-        let network = network(rng, flood, salt);
-        let steps = sequence(rng, &network, flood);
+        let (network, steps) = if case == 0 {
+            the_case_a_disk_is_for(rng, salt)
+        } else {
+            let network = network(rng, flood, salt, padded, spills);
+            let steps = sequence(rng, &network, flood, drawn);
+            (network, steps)
+        };
 
         let first = run(&network, &steps, Some(&mut tally));
         let failure = match first {
@@ -1507,7 +1927,7 @@ fn the_block_store_follows_the_heaviest_valid_branch_whatever_order_it_hears_it_
                  handed over, the closing branch included ({}); cut down to {} steps, {kept}",
                 failure.property,
                 failure.step,
-                steps.len() + in_order(&network).len(),
+                steps.len(),
                 failure.said,
                 shortest.len()
             );
@@ -1558,5 +1978,26 @@ fn the_block_store_follows_the_heaviest_valid_branch_whatever_order_it_hears_it_
         tally.ties_kept > 0,
         "no honest block came within half a block of the tip at its height, so the \
          tie that makes was never asked"
+    );
+    assert!(
+        tally.padded > 0,
+        "no case padded its honest blocks, so the branch delivered never weighed what a full \
+         block weighs"
+    );
+    assert!(
+        !tally.closing_floods.is_empty(),
+        "no flood landed in the middle of the closing delivery, so the store was never full \
+         while a branch arrived: {:?}",
+        tally.floods
+    );
+    assert!(
+        tally.most_spilled > 0,
+        "no store spilled a body, so what a node with a disk does with a full store was never \
+         asked"
+    );
+    assert!(
+        tally.applied_from_disk > 0,
+        "no switch applied a body that had been spilled, so a branch put together past memory \
+         was never followed"
     );
 }

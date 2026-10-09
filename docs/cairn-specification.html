@@ -2238,18 +2238,22 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
 
     <p>
       A node SHOULD also refuse to hold a block off the followed branch that fails a
-      header rule its parent alone settles: the network, the opening, the version
-      its height asks for, the difficulty the retarget demands of the parent, the
-      total work, and the drift bound against the node's own clock, asked in the
-      order the header rules ask them. The retarget reads the parent alone, so a
-      block claiming less than its parent demands is otherwise held at the price of
-      the work it claims, which for difficulty one is one hash. None of the first
-      five refusals changes a verdict: each is a rule the block fails when its branch
-      is applied, and it is answered and charged as that failure would be. The drift
-      bound is read against the node's own clock, so it is the one refusal here that
-      two honest nodes can disagree about and that a node reverses by waiting: a node
-      MUST NOT remember it against the block, and SHOULD NOT charge the peer that
-      offered it.
+      rule the block and its parent alone settle: the network, the opening, the
+      version its height asks for, the difficulty the retarget demands of the
+      parent, the total work, the block's encoded size against the size limit, and
+      the drift bound against the node's own clock, asked in the order a block is
+      asked them when its branch is applied. The retarget reads the parent alone, so
+      a block claiming less than its parent demands is otherwise held at the price of
+      the work it claims, which for difficulty one is one hash; and a block past the
+      size limit is otherwise held at the price of one block's work for as many bytes
+      as a message carries. None of the first six refusals changes a verdict: each
+      is a rule the block fails when its branch is applied, and it is answered and
+      charged as that failure would be. The size refusal is not remembered against
+      the identifier, which is taken over the header alone and so is shared by a
+      copy of a real block with a larger body. The drift bound is read against the
+      node's own clock, so it is the one refusal here that two honest nodes can
+      disagree about and that a node reverses by waiting: a node MUST NOT remember it
+      against the block, and SHOULD NOT charge the peer that offered it.
     </p>
 
     <p>
@@ -2265,6 +2269,19 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       honest branch leaves the followed one ties that branch's first block exactly.
       Letting the earlier go means that displacing a block takes as many blocks of
       its work, sent after it, as the store holds.
+    </p>
+
+    <p>
+      A switch is tried only once every block of the branch it switches to is held,
+      so the bound on bytes is also the deepest switch a node can put together. A
+      node SHOULD size it to hold a branch as deep as the deepest switch it makes,
+      every block of it at the size limit, with room beside it. A node with a disk
+      MAY keep part of that bound in memory and put the rest of the bodies on disk;
+      the implementation here keeps 32 MiB in memory and about 193 MB in all on this
+      network, enough for a switch of 1 024 blocks at the size limit. Bodies kept on
+      disk this way are a cache and not a record: a node MAY lose them, at a restart
+      or otherwise, and MUST check each against the identifier and the transactions
+      root its header names before using it.
     </p>
 
     <h3 id="burial"><span class="sub">8.6</span>Burial</h3>

@@ -22,7 +22,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cairn_accumulator::forest::{Forest, ForestProof};
 use cairn_chain::{
-    first_to_offer, Accepted, Bodies, ChainError, ChainStore, Located, Outdated, MAX_REORG_DEPTH,
+    first_to_offer, Accepted, Bodies, ChainError, ChainStore, Located, Outdated, SideBodies,
+    MAX_REORG_DEPTH,
 };
 use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::genesis;
@@ -40,7 +41,8 @@ use cairn_primitives::codec::{Decode, Encode};
 use cairn_primitives::Hash32;
 use cairn_store::{
     staged_beside, write_beside_and_move, BlockLog, DirectoryLock, HeaderLog, HeaderTree,
-    JoinFailed, StoreError, BLOCK_LOG, HANDED_LEDGER, HEADER_BYTES, HEADER_LOG, HEADER_TREE,
+    JoinFailed, SideBodyFiles, StoreError, BLOCK_LOG, HANDED_LEDGER, HEADER_BYTES, HEADER_LOG,
+    HEADER_TREE, SIDE_BODIES,
 };
 
 use crate::book::{drawn_place, group_of_host, machine_of, AddressBook, Group};
@@ -1759,6 +1761,14 @@ struct Shared {
     /// Counted with the machines they came from, and said only once several
     /// sent them: see [`UNREACHABLE_MACHINES`].
     out_of_reach: Mutex<Unreachable>,
+    /// Blocks let go of as they were taken, for want of room beside the
+    /// branch, and when the last one was.
+    ///
+    /// Counted without the machines they came from, unlike the line above:
+    /// what it says is that this node's own store is full, which is true of
+    /// this node whoever made it so, and each block of it carried the work its
+    /// parent demands.
+    let_go: Mutex<LetGo>,
     /// Set once, if this node turns out to be somewhere it cannot get on from.
     ///
     /// Kept rather than only acted on, for the same reason [`Shared::outdated`]
@@ -2355,6 +2365,25 @@ fn unreachable_lately(met: &Unreachable, now: u64) -> u64 {
     } else {
         0
     }
+}
+
+/// Blocks this node let go of as it took them, for want of room beside its
+/// branch, since the count last started again.
+#[derive(Debug, Default)]
+struct LetGo {
+    blocks: u64,
+    /// When the last of them arrived.
+    last: u64,
+}
+
+/// Counts one block let go of as it was taken, starting the count again when
+/// the last was more than [`UNREACHABLE_MEMORY`] ago.
+fn count_let_go(met: &mut LetGo, now: u64) {
+    if now < met.last || now.saturating_sub(met.last) > UNREACHABLE_MEMORY {
+        *met = LetGo::default();
+    }
+    met.blocks = met.blocks.saturating_add(1);
+    met.last = now;
 }
 
 /// Blocks written under rules this build does not have, as they add up.
@@ -4714,6 +4743,13 @@ impl Node {
         for owner in owners {
             chain.watch_owner(*owner);
         }
+        // Where the bodies of blocks held beside the branch go once memory has
+        // no more room for them, which is what lets this node put together a
+        // switch as deep as the rules allow over full blocks. Emptied as it
+        // opens: what a node wrote there before it stopped belongs to no block
+        // it holds now.
+        let side = SideBodyFiles::open(&directory).map_err(in_file(SIDE_BODIES))?;
+        chain.spills_side_bodies_to(Box::new(SpillToDisk(side)));
         let now = unix_now();
         // One block at a time, straight off the disk. Reading them all into a
         // vector first would make the largest allocation this process ever
@@ -5092,6 +5128,7 @@ impl Node {
             probation: Mutex::new(probation),
             stranding_patience: AtomicU64::new(STRANDING_PATIENCE),
             out_of_reach: Mutex::new(Unreachable::default()),
+            let_go: Mutex::new(LetGo::default()),
             stranded: Mutex::new(None),
             filling_from: Mutex::new(None),
             threads: Mutex::new(Vec::new()),
@@ -5794,6 +5831,28 @@ impl Node {
             .filter(|at| **at == tip)
             .count();
         (peers >= SHORT_PEERS).then_some(peers)
+    }
+
+    /// Blocks let go of as they were taken, because what this node holds
+    /// beside its branch was full and they ranked below everything there,
+    /// when the last of them arrived within the hour; nought otherwise.
+    ///
+    /// Each is a block of a branch this node could switch to and cannot put
+    /// together while that lasts, which from outside looks like a node whose
+    /// height has simply stopped. They were answered as held, so nothing said
+    /// it.
+    pub fn let_go_lately(&self) -> u64 {
+        let met = self
+            .shared
+            .let_go
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let lately = unix_now().saturating_sub(met.last) <= UNREACHABLE_MEMORY;
+        if lately {
+            met.blocks
+        } else {
+            0
+        }
     }
 
     /// Sets how long this node waits for the blocks above an anchor it was
@@ -7036,6 +7095,31 @@ impl Bodies for FromLog {
                 None
             }
         }
+    }
+}
+
+/// Keeps the bodies of blocks the chain holds off its branch on disk, for the
+/// chain that has no more room for them in memory.
+///
+/// Owned by the chain rather than shared with the node, because nothing else
+/// reads it: unlike the log, it is no record of anything, and what it holds is
+/// whatever the chain last put there. A write the disk refuses is answered as
+/// not kept, and the chain then holds the body in memory or lets it go as it
+/// would with no disk at all.
+#[derive(Debug)]
+struct SpillToDisk(SideBodyFiles);
+
+impl SideBodies for SpillToDisk {
+    fn put(&mut self, id: &Hash32, block: &Block) -> bool {
+        self.0.put(id, block).is_ok()
+    }
+
+    fn get(&self, id: &Hash32) -> Option<Block> {
+        self.0.get(id)
+    }
+
+    fn remove(&mut self, id: &Hash32) {
+        self.0.remove(id);
     }
 }
 
@@ -9347,7 +9431,7 @@ fn decide(
                 peer: id,
                 host: peer.remote,
             };
-            aside.record(held, handed, |held| chain.block(held).is_some());
+            aside.record(held, handed, |held| chain.held_header(held).is_some());
         }
         reaction.failed_below.and_then(|failed| aside.take(&failed))
     };
@@ -10384,6 +10468,13 @@ fn note_what_was_not_taken(
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         count_unreachable(&mut met, from.map(|sender| sender.ip()), now);
+    }
+    // A block of a branch this node could switch to, let go of as it was
+    // taken because what it holds beside its branch is full. A node meeting
+    // these is being handed a heavier branch it cannot put together.
+    if reaction.let_go.is_some() {
+        let mut met = shared.let_go.lock().unwrap_or_else(PoisonError::into_inner);
+        count_let_go(&mut met, now);
     }
     // A block written under rules this build does not have. It is carrying
     // what its own chain carries, and this node is the one that cannot read
@@ -11475,10 +11566,12 @@ mod disk_and_headers {
     #[test]
     fn headers_below_what_the_chain_can_compare_against_stand() {
         let params = ConsensusParams::testnet();
-        let (blocks, states) = forged(11, params);
-        let recent: Vec<BlockHeader> = blocks[6..].iter().map(|block| block.header).collect();
+        // A run of eleven, the least a ledger is adopted with, starting
+        // above height 3.
+        let (blocks, states) = forged(16, params);
+        let recent: Vec<BlockHeader> = blocks[5..].iter().map(|block| block.header).collect();
         let mut chain = ChainStore::new(params);
-        chain.adopt(states[10].clone(), &recent).unwrap();
+        chain.adopt(states[15].clone(), &recent).unwrap();
         assert!(
             chain.id_at(3).is_none(),
             "the fixture has to be a chain with nothing to say about height 3"
@@ -13087,6 +13180,62 @@ mod peers_and_loops {
             node.out_of_reach(),
             2,
             "blocks from a branch this node cannot reach went uncounted"
+        );
+    }
+
+    /// Blocks let go of for want of room beside the branch are counted where
+    /// an operator reads them, from one machine as from several, and a count
+    /// whose last block is more than an hour old starts again.
+    ///
+    /// They were answered as held, so nothing counted them, and a node that
+    /// could not put a heavier branch together printed healthy lines under a
+    /// height that did not move.
+    #[test]
+    fn blocks_let_go_of_for_want_of_room_reach_the_operator() {
+        let node = quiet();
+        assert_eq!(node.let_go_lately(), 0, "nothing has been let go of");
+        let let_go = Reaction {
+            let_go: Some(7),
+            ..Reaction::default()
+        };
+        let from = Some(SocketAddr::from(([203, 0, 113, 1], 9_944)));
+        let now = unix_now();
+        note_what_was_not_taken(&node.shared, &let_go, from, now);
+        note_what_was_not_taken(&node.shared, &let_go, from, now);
+        assert_eq!(
+            node.let_go_lately(),
+            2,
+            "blocks let go of for want of room went uncounted"
+        );
+
+        // Within the hour, to the second, the count goes on; a second past
+        // it, or behind the last one on a clock stepped back, it starts again.
+        let counted = |seconds: &[u64]| {
+            let mut met = LetGo::default();
+            for at in seconds {
+                count_let_go(&mut met, *at);
+            }
+            met.blocks
+        };
+        assert_eq!(
+            counted(&[1_000, 1_001]),
+            2,
+            "two a second apart were not counted together"
+        );
+        assert_eq!(
+            counted(&[1_000, 1_000 + UNREACHABLE_MEMORY]),
+            2,
+            "a block an hour to the second after the last started the count again"
+        );
+        assert_eq!(
+            counted(&[1_000, 1_000 + UNREACHABLE_MEMORY + 1]),
+            1,
+            "a count whose last block was more than an hour old was carried on"
+        );
+        assert_eq!(
+            counted(&[1_000, 999]),
+            1,
+            "a clock stepped back behind the last block carried the count on"
         );
     }
 
