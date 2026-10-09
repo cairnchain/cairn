@@ -97,8 +97,8 @@ const OWED_PATIENCE: u64 = PROVEN_PATIENCE.saturating_add(FIRST_ANSWER_PATIENCE)
 /// What it does not cover, and must not be read as covering: the time before
 /// anything has been proved at all. The clock in both terms starts at the first
 /// showing, so a node that nobody has yet shown a chain to is outside this, and
-/// how long a stranger can keep it there is bounded by what turns cost rather
-/// than by any number here. That is [`Chooser::pause_for`]'s side of the
+/// how long a stranger can keep it there is bounded by how turns go round
+/// rather than by any number here. That is [`Chooser::pick`]'s side of the
 /// argument, and the same test file measures it. Being held there is a node with no
 /// chain, which is loud; being held off one it has proved is a node that has
 /// the answer and will not use it, which is not.
@@ -128,10 +128,10 @@ const RETRY_PAUSE: u64 = 30;
 /// to dials, and `tests/audit_owed_a_turn.rs` measures the worst case it buys
 /// against the worst case it costs.
 ///
-/// It is not the longest pause there is. An address that has failed more than
-/// once also waits out a round of every address on the list, which grows with
-/// what the stranger has spent rather than with time: see
-/// [`Chooser::pause_for`].
+/// It is the longest pause there is. An address that had failed more than once
+/// used to wait out a round of every address on the list as well, and that
+/// round is gone: see [`Chooser::pick`] for what replaced it, and
+/// [`Chooser::held_off`] for what the pause still does and what it costs.
 ///
 /// What keeps the pause affordable is that a pause is never the end of the
 /// road. [`Chooser::last_resort`] ignores it and reads from the heaviest claim
@@ -144,6 +144,25 @@ const MAX_HELD_OFF: u64 = 1_800;
 /// Seconds one turn takes a claim nobody shows: its answering window, and the
 /// round of upkeep in which the next turn is handed out.
 const TURN: u64 = FIRST_ANSWER_PATIENCE.saturating_add(1);
+
+/// The longest, in seconds, that a claim waits for its turn beside a full
+/// table of strangers that each claim more and say nothing when asked, however
+/// many addresses they have.
+///
+/// Two rotations of a full peer table at one [`TURN`] a connection: one for
+/// the rotation under way when the claim was heard, and one for the rotation
+/// it waits in. See [`Chooser::pick`]. Stated here rather than left to be
+/// worked out because it is what the rotation exists for, and
+/// `tests/a_stranger_s_addresses_run_out.rs` measures a running chooser
+/// against it.
+///
+/// What it does not cover, and must not be read as covering: a turn somebody
+/// answers slowly, which runs up to [`ATTEMPT_PATIENCE`] rather than a
+/// [`TURN`], and a claim from a machine waiting out a pause, which is passed
+/// over for one rotation more (see [`Chooser::held_off`]).
+pub const ASKED_WITHIN: u64 = (crate::node::MAX_PEERS as u64)
+    .saturating_mul(2)
+    .saturating_mul(TURN);
 
 /// How long an address is left alone after `failures` claims of its went
 /// unshown.
@@ -165,8 +184,9 @@ const TURN: u64 = FIRST_ANSWER_PATIENCE.saturating_add(1);
 /// answering window each, the first is out of its pause before the last has
 /// failed. Sixty two addresses, reused and never fresh, kept a newcomer off an
 /// honest chain standing beside them for two days of its clock, and the
-/// honest peer was never asked. What closes that is [`Chooser::pause_for`],
-/// which reads this and stretches it to a round of every address on the list.
+/// honest peer was never asked. What closes that is the way turns go round:
+/// a turn a connection, and none a second before every connection has had
+/// one. See [`Chooser::pick`].
 fn held_off_for(failures: u32) -> u64 {
     let steps = failures.saturating_sub(1).saturating_mul(2);
     RETRY_PAUSE
@@ -204,6 +224,20 @@ fn held_off_for(failures: u32) -> u64 {
 /// Dropping the oldest keeps the ceiling, which is about memory, and keeps the
 /// pause, which is what the list is for. The whole lot is dropped the moment
 /// the choice is made, which is the only thing it was ever for.
+///
+/// And the pause is all it is for now; nothing the bound on a newcomer's wait
+/// rests on reads it. Each address used to add a round to the pause, a turn
+/// for every address on the list, and the round was what kept a stranger's
+/// reused addresses from going round for ever. Counted off a table with a
+/// ceiling it bought nothing past the ceiling: an address the list forgets has
+/// failed no times, so a stranger with one more address than this never
+/// earned a second failure, never paid a round, and kept a newcomer off the
+/// honest chain beside it for good. The bound comes from the rotation instead
+/// ([`Chooser::pick`]), which counts connections, and the peer table caps
+/// those whatever the stranger's supply of addresses. What the list still
+/// buys is that a machine whose claims keep failing is not asked from its
+/// fresh connections while its pause runs, so its reconnections cost the node
+/// fewer turns. An entry it forgets costs at most such a turn.
 pub const MAX_UNBACKED_HOSTS: usize = 1_024;
 
 /// What one address has spent, in claims it was asked to show and could not.
@@ -245,6 +279,9 @@ struct Claim {
     /// never asked. Arriving later does not buy a turn ahead of somebody who
     /// was already there.
     heard: u64,
+    /// The rotation in which this claim is next owed a turn: see
+    /// [`Chooser::pick`].
+    due: u64,
 }
 
 /// How a chosen peer is asked to show its chain.
@@ -309,9 +346,15 @@ pub struct Chooser {
     ///
     /// When each last failed, and how many times, because what the pause after
     /// one costs has to grow with how often an address has spent one: see
-    /// [`held_off_for`], and with how many addresses are on it: see
-    /// [`Self::pause_for`].
+    /// [`held_off_for`].
     unbacked_hosts: HashMap<IpAddr, Unshown>,
+    /// The rotation turns are being handed out in, counted from nought: see
+    /// [`Self::pick`].
+    rotation: u64,
+    /// Whether a turn has been handed out in the current rotation yet. A claim
+    /// heard before the first one joins it, and one heard after waits for the
+    /// next.
+    turned: bool,
     /// When the first claim long enough to be final arrived, while there is
     /// still one to settle. Without one there is no choice to make: a short
     /// chain is never past the reorganisation limit, so following the wrong
@@ -357,6 +400,8 @@ impl Default for Chooser {
         Self {
             claims: HashMap::new(),
             unbacked_hosts: HashMap::new(),
+            rotation: 0,
+            turned: false,
             first_claim_at: None,
             asked: None,
             proven: None,
@@ -396,9 +441,13 @@ impl Chooser {
         if self.done || work == 0 {
             return;
         }
-        // A peer that says something new keeps the moment it first spoke, so
-        // revising a claim upward is not a way to jump the queue either.
-        let heard = self.claims.get(&peer).map_or(now, |known| known.heard);
+        // A peer that says something new keeps the moment it first spoke, and
+        // its place in the rotation, so revising a claim upward is not a way
+        // to jump the queue either.
+        let (heard, due) = self
+            .claims
+            .get(&peer)
+            .map_or((now, self.joining()), |known| (known.heard, known.due));
         self.claims.insert(
             peer,
             Claim {
@@ -410,10 +459,109 @@ impl Chooser {
                 proved: false,
                 tried: None,
                 heard,
+                due,
             },
         );
         if height >= self.final_from && self.first_claim_at.is_none() {
             self.first_claim_at = Some(now);
+        }
+    }
+
+    /// The rotation a claim heard now waits in: the current one until its
+    /// first turn is handed out, and the next one after that.
+    fn joining(&self) -> u64 {
+        if self.turned {
+            self.rotation.saturating_add(1)
+        } else {
+            self.rotation
+        }
+    }
+
+    /// What a peer sent, in place of what it said.
+    ///
+    /// `peer` sent a block at `height`, above the height it claimed, while
+    /// this node could still undo everything it holds. `work` is as much of
+    /// the work behind that block as this node can stand behind: the block's
+    /// own when this node holds it, and when it does not, because the block
+    /// stood past the depth this node undoes and the choice had not fallen on
+    /// the peer, the work of the block it hangs on, or nought.
+    ///
+    /// Its words are replaced by that in both directions, as a weighing
+    /// replaces them in [`Self::shown`]. A height as long as the network
+    /// undoes makes it a claim worth settling, which opens the choice if
+    /// nothing had. The work is what this node saw rather than what it was
+    /// told: a peer that said it had nought blocks and the work of a long
+    /// chain, and then sent a short cheap branch, is ranked by the branch. Kept
+    /// at its word, it was the heaviest claim in front of the choice and the
+    /// first asked to show it, which is the same capture by another door.
+    pub fn outgrew(
+        &mut self,
+        peer: u64,
+        host: Option<IpAddr>,
+        height: u64,
+        work: u128,
+        shows_the_chain: bool,
+        now: u64,
+    ) {
+        if self.done {
+            return;
+        }
+        let known = self.claims.get(&peer);
+        let heard = known.map_or(now, |known| known.heard);
+        let due = known.map_or_else(|| self.joining(), |known| known.due);
+        let tried = known.and_then(|known| known.tried);
+        let unbacked = known.is_some_and(|known| known.unbacked);
+        self.claims.insert(
+            peer,
+            Claim {
+                work,
+                height,
+                shows_the_chain,
+                host: host.map(machine_of),
+                unbacked,
+                proved: false,
+                tried,
+                heard,
+                due,
+            },
+        );
+        if height >= self.final_from && self.first_claim_at.is_none() {
+            self.first_claim_at = Some(now);
+        }
+    }
+
+    /// Whether this node's choice has fallen on `peer`, or is over.
+    ///
+    /// What the sync layer is told before every message, as
+    /// `PeerState::chosen`: a node that could still undo everything it holds
+    /// takes no block past that depth from a peer this does not answer yes
+    /// for. See `crate::sync::holds_nothing_it_cannot_undo`.
+    #[must_use]
+    pub fn has_chosen(&self, peer: u64) -> bool {
+        self.done || self.asked.is_some_and(|(asked, _, _)| asked == peer)
+    }
+
+    /// A block `peer` delivered has moved the branch this node follows. When
+    /// `peer` is the one asked, its attempt is moving, and the moment it was
+    /// asked is moved up to now.
+    ///
+    /// A read used to be given one answering window in all, because the first
+    /// block it delivered ended the choice. The choice now stays open until
+    /// the node holds a branch it cannot undo, and reading that far is many
+    /// windows of blocks, so a read is given its window between blocks
+    /// instead: one that stops delivering is given up on, and one that keeps
+    /// delivering is not cut off for having taken more than a window.
+    ///
+    /// Only a block that moved the branch, which is real work at the
+    /// difficulty the branch demands and takes the node a block nearer the end
+    /// of the choice. A block held beside the branch does neither, and renewed
+    /// by those a peer the choice asked could keep it asked for ever, a block
+    /// of the lowest difficulty there is a window.
+    pub fn delivered(&mut self, peer: u64, now: u64) {
+        if let Some((asked, _, at)) = self.asked.as_mut() {
+            if *asked == peer {
+                *at = now;
+            }
         }
     }
 
@@ -612,13 +760,23 @@ impl Chooser {
 
     /// One round of the choice.
     ///
-    /// `without_a_chain` is whether the node holds no chain of its own: none
-    /// at all, or only the first block its network pins, which every chain on
-    /// that network starts from.
+    /// `undoable` is whether the node could still undo everything it holds:
+    /// no chain at all, only the first block its network pins, which every
+    /// chain on that network starts from, or a branch from that block no
+    /// deeper than the network undoes. See
+    /// `crate::sync::holds_nothing_it_cannot_undo`.
+    ///
+    /// It was whether the node held anything of its own past the first block,
+    /// so the choice ended with the first block the node took from anybody.
+    /// That block need not have come from the choice: a peer that said its
+    /// chain was short was asked for it at the handshake, and the node read
+    /// past what it could undo from whoever got a block in first. The choice
+    /// now lasts as long as what the node holds can still be given up, which
+    /// is exactly as long as there is still a choice to make.
     pub fn step(
         &mut self,
         now: u64,
-        without_a_chain: bool,
+        undoable: bool,
         chain_work: u128,
         join: JoinProgress,
         connected: &[u64],
@@ -626,13 +784,10 @@ impl Chooser {
         if self.done {
             return Step::Quiet;
         }
-        if !without_a_chain {
+        if !undoable {
             return self.finish(chain_work, connected);
         }
         self.clock_went_back(now);
-        let Some(first) = self.first_claim_at else {
-            return Step::Quiet;
-        };
 
         // A peer that left mid attempt took its answer with it, and a claim
         // that leaves when asked is a claim that was not going to be shown.
@@ -643,7 +798,15 @@ impl Chooser {
         }
         // The rest leave with their claims and nothing held against them: a
         // claim that was never tested is only gone, not broken.
+        //
+        // Before asking whether a choice is open, because a node on a young
+        // network, every chain on it shorter than it undoes, is now choosing
+        // for as long as the network stays that young, and notes a claim for
+        // every connection that greets it meanwhile.
         self.claims.retain(|peer, _| connected.contains(peer));
+        let Some(first) = self.first_claim_at else {
+            return Step::Quiet;
+        };
 
         // And a choice with nothing left in it is not a choice. The note on
         // `first_claim_at` says that until a long claim arrives "there is no
@@ -691,9 +854,9 @@ impl Chooser {
                         || (join == JoinProgress::NothingYet && age >= FIRST_ANSWER_PATIENCE)
                         || age >= ATTEMPT_PATIENCE
                 }
-                // A read shows its first block or it shows nothing; the
-                // moment one lands the chain is no longer empty and this is
-                // never reached again.
+                // A read is given its answering window between blocks: each
+                // one it delivers moves the moment it was asked up to now.
+                // See [`Self::delivered`].
                 Approach::Read => age >= FIRST_ANSWER_PATIENCE,
             };
             if !stalled {
@@ -719,23 +882,60 @@ impl Chooser {
         });
         // A paused claim is never the end of the road: [`Self::last_resort`]
         // ignores the pause and reads from the heaviest claim there is, which
-        // is what makes it affordable for a pause to run half an hour, or a
-        // whole round of [`Self::pause_for`].
+        // is what makes it affordable for a pause to run half an hour.
         // Reading rather than a handover, deliberately: a handover is taken on
         // the strength of the claim behind it, and a read is checked block by
         // block as it arrives.
-        let pick = self
-            .pick(ceiling, now)
-            .or_else(|| self.pick(None, now))
-            .or_else(|| self.last_resort(now));
-        let Some((peer, approach)) = pick else {
+        let Some((peer, approach)) = self.next_turn(ceiling, now) else {
             return Step::Quiet;
         };
+        let next = self.rotation.saturating_add(1);
         if let Some(claim) = self.claims.get_mut(&peer) {
             claim.tried = Some(now);
+            claim.due = next;
         }
+        self.turned = true;
         self.asked = Some((peer, approach, now));
         Step::Ask(peer, approach)
+    }
+
+    /// The claim the next turn goes to, beginning the next rotation when
+    /// nobody is left that is owed one in this.
+    ///
+    /// The ceiling first, rotations and all, and only then without it: once
+    /// the patience after a proof has run out, the claims it shuts out have
+    /// had their time, and the claimant whose chain was shown is the one worth
+    /// a turn even if it already had one in this rotation.
+    fn next_turn(&mut self, ceiling: Option<(u128, u64)>, now: u64) -> Option<(u64, Approach)> {
+        if ceiling.is_some() {
+            if let Some(found) = self.in_rotation(ceiling, now) {
+                return Some(found);
+            }
+        }
+        self.in_rotation(None, now)
+            .or_else(|| self.last_resort(now))
+    }
+
+    /// The turn in this rotation under `ceiling`, or in the next when nobody
+    /// is left owed one in this and somebody is waiting for the next.
+    ///
+    /// Only for somebody waiting: with nobody there a new rotation would only
+    /// hand a paused claim the turn its pause is keeping from it, which the
+    /// last resort reads instead.
+    fn in_rotation(&mut self, ceiling: Option<(u128, u64)>, now: u64) -> Option<(u64, Approach)> {
+        if let Some(found) = self.pick(ceiling, now) {
+            return Some(found);
+        }
+        let standing = self.best_standing();
+        let waiting = self.claims.values().any(|claim| {
+            claim.due > self.rotation && Self::worth_a_turn(claim, standing, ceiling, now)
+        });
+        if !waiting {
+            return None;
+        }
+        self.rotation = self.rotation.saturating_add(1);
+        self.turned = false;
+        self.pick(ceiling, now)
     }
 
     /// Pulls every moment written down here back to `now` when the clock has
@@ -856,6 +1056,24 @@ impl Chooser {
     /// Read at the moment a turn is handed out, the pause covers every claim
     /// from that address, which is what the address was ever being kept for.
     ///
+    /// What it costs, now that the rotation is what bounds a newcomer's wait
+    /// and the pause only saves turns (see [`MAX_UNBACKED_HOSTS`]). A stranger
+    /// pays it for every address it holds: a fresh connection from a machine
+    /// whose claim went unshown is passed over while the pause runs, which is
+    /// [`RETRY_PAUSE`] after one failure, doubling twice a failure up to
+    /// [`MAX_HELD_OFF`], so its reconnections are asked a rotation at a time at
+    /// most rather than as fast as it can dial. An honest neighbour on the same
+    /// machine, behind one gateway or in one IPv6 /64, pays the same while
+    /// that machine's pause runs, and no more than that: a claim passed over
+    /// for a pause in one rotation is owed its turn in the next whatever the
+    /// pause says (see [`Self::pick`]), so a stranger that keeps failing beside
+    /// it delays it by one rotation and cannot keep it from being asked. It is
+    /// read then rather than handed a ledger, since a handover is taken on the
+    /// strength of the claim and a claim inside its pause must not buy one. It
+    /// used to be kept out for as long as a round of every address on the list,
+    /// up to eight hours and fifty minutes with the list full, and then only
+    /// [`Self::last_resort`] reached it.
+    ///
     /// Two things it must never reach, both measured rather than reasoned about.
     ///
     /// A claim that has been shown is not a word, and this is against words. It
@@ -881,70 +1099,88 @@ impl Chooser {
         };
         self.unbacked_hosts
             .get(&host)
-            .is_some_and(|spent| now < spent.at.saturating_add(self.pause_for(spent.failures)))
+            .is_some_and(|spent| now < spent.at.saturating_add(held_off_for(spent.failures)))
     }
 
-    /// How long an address is left alone after `failures` claims of its went
-    /// unshown: [`held_off_for`], and past the first failure at least one turn
-    /// for every address on the list.
+    /// The claim owed a turn in this rotation that the turn goes to: the
+    /// heaviest of them, among those standing and worth asking.
     ///
-    /// The doubling alone stops at [`MAX_HELD_OFF`], so a stranger with enough
-    /// addresses to outlast it went round them for ever: the first was out of
-    /// its pause before the last had failed, and the honest peer standing
-    /// beside them was never the heaviest claim left. With a turn for every
-    /// address on the list, none of them is back before every other one has
-    /// had its turn, so each round of the stranger's leaves a gap, and the
-    /// honest peer is asked in it. Measured on the chooser: sixty two
-    /// addresses, which held a newcomer off for two days and counting, now
-    /// cost it two hours fifty five minutes.
+    /// Turns go round the connections. Every claim standing when a rotation's
+    /// first turn is handed out is owed one turn in it, and a claim heard
+    /// after that waits for the next rotation, which begins once nobody is
+    /// left that is owed one in this. A turn taken is a turn: the claim is
+    /// owed its next one a rotation on, however its attempt ended.
     ///
-    /// The first failure keeps its own pause. One failure is a bad minute,
-    /// and an honest neighbour behind the same gateway as a stranger, or a
-    /// peer whose one answer was lost, is not made to wait out every address
-    /// a stranger has spent.
+    /// It was the heaviest claim standing and not paused, every time, and
+    /// what stopped a stranger taking every turn was the pause its addresses
+    /// earned, stretched to a round of every address on the list. The list has
+    /// a ceiling and forgets its oldest entry, and an address it forgot had
+    /// failed no times, so its next failure was a first one and paused it for
+    /// less than a turn takes. A stranger with one address more than the list
+    /// holds, one connection at a time, claimed more than the honest peer
+    /// beside it on every connection and was handed every turn: seven days of
+    /// a newcomer's clock went by, nineteen thousand five hundred turns, and
+    /// the honest peer was not asked once.
     ///
-    /// What still bounds the wait is how many addresses the stranger has, as
-    /// [`crate::book::machine_of`] counts them: one per IPv4 address and one
-    /// per IPv6 /64, and /64s are cheap, a /48 holding sixty five thousand of
-    /// them. The wait grows faster than the addresses do. A turn takes its
-    /// window and the round is a second longer, so the addresses coming back
-    /// leave about a second a turn free, and every fresh address takes its
-    /// first two turns out of that. Measured against a stranger that knows
-    /// this rule and dials each address back the second its pause is over: a
-    /// hundred addresses cost seven and a half hours, four hundred two and a
-    /// half days, a thousand eight days. Past [`MAX_UNBACKED_HOSTS`] the
-    /// oldest entry is forgotten, and an address nothing remembers is fresh
-    /// again: eleven hundred went sixty days without the honest peer being
-    /// asked once, and nothing here bounds that.
-    fn pause_for(&self, failures: u32) -> u64 {
-        let pause = held_off_for(failures);
-        if failures < 2 {
-            return pause;
-        }
-        let round = u64::try_from(self.unbacked_hosts.len())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(TURN);
-        pause.max(round)
-    }
-
+    /// Counted by connection, what bounds the wait is the peer table and not
+    /// the stranger's supply of addresses. A claim standing when a rotation
+    /// begins is asked within it, after at most one turn for every other
+    /// connection then, so within [`crate::node::MAX_PEERS`] turns, and one
+    /// heard during a rotation within the next as well, so within twice that:
+    /// [`ASKED_WITHIN`], about fifty minutes against a full table of strangers
+    /// that say nothing.
+    ///
+    /// Within a rotation a claim from a machine waiting out a pause is passed
+    /// over, which is what the pause still buys (see [`Self::held_off`]),
+    /// unless the claim was already passed over in an earlier rotation: then
+    /// it is owed its turn whatever the pause says, and is read rather than
+    /// handed a ledger, so a pause delays a claim by a rotation and costs it
+    /// the cheap way in, and never keeps it from its turn.
+    ///
+    /// A claim no heavier than a chain already shown and still standing is not
+    /// worth a turn, since nothing it could show would be taken over that one.
+    /// The claim that showed it is, because asking it again is how that chain
+    /// is taken.
     fn pick(&self, ceiling: Option<(u128, u64)>, now: u64) -> Option<(u64, Approach)> {
+        let standing = self.best_standing();
         let (peer, claim) = self
             .claims
             .iter()
-            .filter(|(_, claim)| !claim.unbacked)
-            .filter(|(_, claim)| !self.held_off(claim, now))
-            .filter(|(_, claim)| {
-                ceiling.is_none_or(|(most, proven_at)| {
-                    claim.work <= most || Self::owed_a_turn(claim, proven_at, now)
-                })
-            })
+            .filter(|(_, claim)| claim.due <= self.rotation)
+            .filter(|(_, claim)| claim.due < self.rotation || !self.held_off(claim, now))
+            .filter(|(_, claim)| Self::worth_a_turn(claim, standing, ceiling, now))
             .max_by_key(|(peer, claim)| (claim.work, **peer))?;
-        let approach = if claim.shows_the_chain && claim.height >= JOIN_RATHER_THAN_READ {
+        // A claim owed its turn past its machine's pause is read and not
+        // handed a ledger: a handover is taken on the strength of the claim,
+        // and one inside its pause must not buy that. What the pause costs is
+        // the cheap way in, never the chain, as at the last resort.
+        let approach = if claim.shows_the_chain
+            && claim.height >= JOIN_RATHER_THAN_READ
+            && !self.held_off(claim, now)
+        {
             Approach::Join
         } else {
             Approach::Read
         };
         Some((*peer, approach))
+    }
+
+    /// Whether a claim is worth a turn at all, whatever the rotation: it has
+    /// not failed, it could show more than any chain already shown and still
+    /// standing, unless it is the one that showed it, and once the patience
+    /// after a proof has run out it is one the proof covers or one still owed
+    /// a turn.
+    fn worth_a_turn(
+        claim: &Claim,
+        standing: Option<u128>,
+        ceiling: Option<(u128, u64)>,
+        now: u64,
+    ) -> bool {
+        !claim.unbacked
+            && (claim.proved || standing.is_none_or(|best| claim.work > best))
+            && ceiling.is_none_or(|(most, proven_at)| {
+                claim.work <= most || Self::owed_a_turn(claim, proven_at, now)
+            })
     }
 
     /// When every claim has failed, the heaviest of them is read anyway.
@@ -967,7 +1203,20 @@ impl Chooser {
         Some((*peer, Approach::Read))
     }
 
-    /// The node has a chain, so the choice is made and this is over.
+    /// The node holds a chain it can no longer undo, so the choice is made and
+    /// this is over.
+    ///
+    /// Not the first block the node holds, which is what ended it before. A
+    /// node that took one block from anybody, a peer it asked at the handshake
+    /// on the strength of a short chain it said it had, gave up the weighed
+    /// join for the life of the process and was held off from nobody, and the
+    /// peer that got that block in first went on to push it past what it could
+    /// undo. Until the node holds more than it can undo, a branch it holds can
+    /// still be left for a heavier one, by the fork choice, so there is still a
+    /// choice and this stays open: see `crate::sync::holds_nothing_it_cannot_undo`.
+    /// What ends it is a ledger handed over, which is a branch the node cannot
+    /// undo below, or the first block past that depth, which only the peer
+    /// this choice asked can deliver while it is open.
     ///
     /// What is handed back is every peer still claiming more work than that
     /// chain carries. They were held off while the choice was open, and
@@ -1897,6 +2146,121 @@ mod tests {
         );
     }
 
+    /// A block the asked peer delivers renews its read's answering window,
+    /// and one from anybody else does not.
+    ///
+    /// The choice now stays open while a read takes the node as far as it
+    /// undoes, many windows of blocks, and a read given one window in all was
+    /// cut off while it was still delivering. Renewed by anybody, a peer that
+    /// was asked and sent nothing would be kept asked by the blocks of others.
+    #[test]
+    fn a_read_is_given_its_window_between_the_blocks_it_delivers() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, false, 100);
+        chooser.noted(2, Some(host(2)), 500, LONG, false, 100);
+        assert_eq!(
+            chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Read)
+        );
+        let delivered = 200 + FIRST_ANSWER_PATIENCE - 1;
+        chooser.delivered(1, delivered);
+        assert_eq!(
+            chooser.step(
+                200 + FIRST_ANSWER_PATIENCE,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2]
+            ),
+            Step::Quiet,
+            "a read that delivered a block was given up on a window after it was asked"
+        );
+        chooser.delivered(2, delivered + FIRST_ANSWER_PATIENCE - 1);
+        assert_eq!(
+            chooser.step(
+                delivered + FIRST_ANSWER_PATIENCE,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2]
+            ),
+            Step::Ask(2, Approach::Read),
+            "a read was kept waiting by a block somebody else delivered"
+        );
+    }
+
+    /// A claim passed over for its machine's pause is owed its turn in the
+    /// next rotation whatever the pause says, and is read rather than handed a
+    /// ledger.
+    ///
+    /// A stranger and an honest neighbour behind one gateway: the stranger's
+    /// claim fails, which pauses the gateway, and it dials straight back from
+    /// it claiming more. Without the turn owed, the neighbour was passed over
+    /// in every rotation while the stranger kept failing, and the last resort,
+    /// which reads the heaviest claim, read the stranger's fresh connection
+    /// each time.
+    #[test]
+    fn a_claim_passed_over_for_a_pause_is_read_in_the_next_rotation() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(7)), 2_000, LONG, true, 100);
+        chooser.noted(2, Some(host(7)), 500, LONG, true, 100);
+        assert_eq!(
+            chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join),
+            "fixture: the stranger claims more and is asked first"
+        );
+        let back = 100 + SETTLING + FIRST_ANSWER_PATIENCE;
+        chooser.noted(3, Some(host(7)), 3_000, LONG, true, back);
+        assert_eq!(
+            chooser.step(back, true, 0, JoinProgress::NothingYet, &[2, 3]),
+            Step::Ask(2, Approach::Read),
+            "the neighbour was passed over again for a pause its gateway's stranger keeps \
+             earning"
+        );
+    }
+
+    /// A new rotation begins only for a claim waiting in it.
+    ///
+    /// With nobody waiting, beginning one would only hand a claim passed over
+    /// for its machine's pause the turn the pause is keeping from it, so the
+    /// last resort is what asks it, after its own retry pause.
+    #[test]
+    fn a_rotation_begins_only_for_somebody_waiting_in_it() {
+        let mut chooser = two_at_one_address();
+        assert_eq!(
+            chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join)
+        );
+        chooser.failed(1, 100 + SETTLING);
+        let rotation = chooser.rotation;
+        chooser.step(101 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]);
+        assert_eq!(
+            chooser.rotation, rotation,
+            "a rotation began with nobody waiting in it but a claim inside its pause"
+        );
+    }
+
+    /// A claim no heavier than a chain already shown and still standing is
+    /// not asked, and the claimant that showed it is.
+    #[test]
+    fn a_claim_as_heavy_as_a_chain_shown_is_not_worth_a_turn() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 1_000, LONG, true, 100);
+        chooser.noted(2, Some(host(2)), 900, LONG, true, 100);
+        assert_eq!(
+            chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join)
+        );
+        // It shows less than it said, and a heavier claim has turned up since.
+        chooser.noted(3, Some(host(3)), 1_500, LONG, true, 110);
+        assert!(!chooser.shown(1, 900, 110), "fixture: not taken yet");
+        assert_eq!(
+            chooser.step(111, true, 0, JoinProgress::NothingYet, &[1, 2, 3]),
+            Step::Ask(3, Approach::Join),
+            "a claim exactly as heavy as the chain already shown was asked to show it"
+        );
+    }
+
     /// A claim heard in the same second the proof landed stood when it
     /// landed, and is owed its turn.
     ///
@@ -2025,43 +2389,63 @@ mod tests {
             .is_some_and(|claim| chooser.held_off(claim, now))
     }
 
-    /// An address that has failed twice waits a turn for every address on
-    /// the list, so none is back before every other one has had its turn.
+    /// A claim heard after a turn was handed out waits for the next rotation,
+    /// so a claim that was already standing is asked first, however much more
+    /// the newer one says and from however fresh an address.
     ///
-    /// The doubling alone stopped at [`MAX_HELD_OFF`], so sixty two addresses
-    /// at one answering window each went round for ever and the honest peer
-    /// beside them was never asked: see `tests/claims_nobody_shows.rs`. Ten
-    /// addresses here make a round of three hundred and ten seconds, which is
-    /// longer than the doubling's two minutes, so the round is what decides.
+    /// Turns went to the heaviest claim not paused, and a stranger's next
+    /// connection from an address nothing remembered was never paused: each
+    /// claimed more than the honest peer, took the turn and went quiet, and
+    /// the honest peer beside them was never asked. See
+    /// `tests/a_stranger_s_addresses_run_out.rs` for the same at the scale
+    /// that found it.
     #[test]
-    fn an_address_that_failed_twice_waits_a_turn_for_every_address_on_the_list() {
-        let mut chooser = with_failed(10);
-        chooser.failed(10, 200);
-        chooser.noted(11, Some(host(10)), 900, LONG, true, 201);
-        let round = 10 * TURN;
-        assert!(
-            round > held_off_for(2),
-            "the fixture: the round is longer than the doubling"
+    fn a_claim_heard_after_a_turn_waits_for_the_next_rotation() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 1_000, LONG, true, 100);
+        chooser.noted(2, Some(host(2)), 2_000, LONG, true, 100);
+        assert_eq!(
+            chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Join),
+            "the fixture: the heavier claim is asked first"
         );
-        assert!(
-            holds_off_peer(&chooser, 11, 200 + round - 1),
-            "an address that failed twice was back before every address on the list had \
-             had a turn"
+        chooser.failed(2, 100 + SETTLING + TURN);
+        // The stranger comes back from an address nobody has seen, claiming
+        // more than ever.
+        chooser.noted(3, Some(host(3)), 3_000, LONG, true, 100 + SETTLING + TURN);
+        assert_eq!(
+            chooser.step(
+                101 + SETTLING + TURN,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 3]
+            ),
+            Step::Ask(1, Approach::Join),
+            "a fresh connection took the turn of a claim that had been waiting since \
+             before the last one was handed out"
         );
-        assert!(
-            !holds_off_peer(&chooser, 11, 200 + round),
-            "an address that failed twice was kept past its round"
+        chooser.failed(1, 102 + SETTLING + 2 * TURN);
+        assert_eq!(
+            chooser.step(
+                103 + SETTLING + 2 * TURN,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 3]
+            ),
+            Step::Ask(3, Approach::Join),
+            "and the newer claim is asked in the rotation after"
         );
     }
 
     /// One failure is paused for [`RETRY_PAUSE`] however many addresses are
     /// on the list.
     ///
-    /// The round is for an address that keeps failing. An honest neighbour
-    /// behind a stranger's gateway, or a peer whose one answer was lost, is
-    /// not made to wait out every address a stranger has spent, and
-    /// `tests/shared_address_claims.rs` holds the neighbour to its thirty
-    /// seconds.
+    /// An honest neighbour behind a stranger's gateway, or a peer whose one
+    /// answer was lost, is not made to wait out every address a stranger has
+    /// spent, and `tests/shared_address_claims.rs` holds the neighbour to its
+    /// thirty seconds.
     #[test]
     fn one_failure_waits_its_own_pause_however_long_the_list() {
         let chooser = with_failed(10);
@@ -2075,11 +2459,12 @@ mod tests {
         );
     }
 
-    /// Where the doubling is the longer of the two, the doubling decides.
+    /// The pause is the doubling and nothing else.
     ///
-    /// Two addresses make a round of a minute, and a third failure earns
-    /// eight. Taking the round instead would hand a stranger with a handful
-    /// of addresses back the turn the doubling exists to take from it.
+    /// It was the longer of the doubling and a round of every address on the
+    /// list, and this held that the doubling decided where it was the longer.
+    /// The round is gone (see [`Chooser::pick`]); what is left of this is that
+    /// a third failure is paused for the doubling's eight minutes.
     #[test]
     fn the_doubling_decides_when_it_is_the_longer() {
         let mut chooser = with_failed(2);

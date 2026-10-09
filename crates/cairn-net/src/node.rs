@@ -52,7 +52,7 @@ use crate::message::{
 };
 use crate::refusal::{can_be_refused, Refusals};
 use crate::sync::{
-    a_window_has_turned, asked_for_the_chain, local_handshake, on_message, tick, Allowance,
+    self, a_window_has_turned, asked_for_the_chain, local_handshake, on_message, tick, Allowance,
     DropReason, Local, PeerState, Reaction, Window,
 };
 use crate::wire::{most_from, read_frame, write_message, Framed, WireError};
@@ -8710,10 +8710,10 @@ fn keep_the_undertaking(shared: &Arc<Shared>, connected: &[PeerId], now: u64, aw
 /// Asked of the same peer, because a collection belongs to the peer it was
 /// started from and a piece from anybody else is refused.
 fn ask_again_for_the_join(shared: &Arc<Shared>, now: u64) {
-    // An archivist reads rather than joins (see `drive_choosing`), and the
-    // chooser still has the turn down as a join. Asking again here is what
-    // started the join it had not asked for.
-    if shared.chain().is_archiving() {
+    // A node that reads rather than joins (see `reads_rather_than_joins`)
+    // still has the turn down as a join in the chooser. Asking again here is
+    // what started the join it had not asked for.
+    if reads_rather_than_joins(&shared.chain()) {
         return;
     }
     let Some((peer, asked_at)) = shared.choosing().asking_join() else {
@@ -9406,14 +9406,16 @@ fn was_away(previous: u64, now: u64) -> bool {
 }
 
 /// Notes what a peer introduced itself as having, for the choice a node
-/// with no chain of its own has in front of it.
+/// that could still undo everything it holds has in front of it.
 ///
-/// Only such a node has that choice: one with a chain weighs branches by
-/// their work as they arrive, and what anyone claims is neither here nor
-/// there. The first block a named network pins is not a chain of its own,
-/// since every chain on that network starts with it.
+/// Only such a node has that choice: one holding more than it can undo weighs
+/// branches by their work as they arrive, and what anyone claims is neither
+/// here nor there. The first block a named network pins is not a chain of its
+/// own, since every chain on that network starts with it, and nor is a branch
+/// from it no deeper than the network undoes, which the fork choice can still
+/// leave: see [`sync::holds_nothing_it_cannot_undo`].
 fn note_claim(shared: &Arc<Shared>, id: PeerId, peer: &PeerState) {
-    let choosing = shared.chain().holds_nothing_of_its_own();
+    let choosing = sync::holds_nothing_it_cannot_undo(&shared.chain());
     if !choosing {
         return;
     }
@@ -9445,12 +9447,12 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
         }
     };
     let connected: Vec<PeerId> = shared.peers().keys().copied().collect();
-    let (choosing, work, archiving) = {
+    let (choosing, work, reads) = {
         let chain = shared.chain();
         (
-            chain.holds_nothing_of_its_own(),
+            sync::holds_nothing_it_cannot_undo(&chain),
             chain.total_work(),
-            chain.is_archiving(),
+            reads_rather_than_joins(&chain),
         )
     };
     let step = shared
@@ -9458,12 +9460,10 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
         .step(now, choosing, work, join, &connected);
     match step {
         choosing::Step::Quiet => {}
-        // An archivist reads the chain rather than being handed it. A ledger
-        // carries the cold set as sixty four roots, so an archivist that took
-        // one held none of its leaves and never archived anything from then
-        // on. Reading is asked of the same peer, and the chooser's patience
-        // for a first answer is the same for both.
-        choosing::Step::Ask(peer, Approach::Join | Approach::Read) if archiving => {
+        // A node that reads rather than joins asks the same peer for its
+        // chain, and the chooser's patience for an answer is the same for
+        // both: see [`reads_rather_than_joins`].
+        choosing::Step::Ask(peer, Approach::Join | Approach::Read) if reads => {
             let locator = shared.chain().locator();
             shared.send_to(peer, Message::GetChain { locator });
         }
@@ -9505,6 +9505,27 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
             }
         }
     }
+}
+
+/// Whether a turn the chooser hands out as a join is asked as a read instead.
+///
+/// For an archivist, which reads the chain rather than being handed it: a
+/// ledger carries the cold set as sixty four roots, so an archivist that took
+/// one held none of its leaves and never archived anything from then on.
+///
+/// And for a node that holds a short branch of its own, read from a peer it
+/// asked at the handshake, which is still choosing. A ledger is adopted only
+/// onto a node holding nothing past the first block (`ChainStore::adopt`), so
+/// a join asked of such a node would have every piece dropped as an answer
+/// that outlived its question, and the honest peer giving it would be failed
+/// for the silence. The branch is short enough for the fork choice to leave, which
+/// is why the choice is still open, so reading the chosen chain is what takes
+/// it: its blocks are held beside the branch until they outweigh it, and the
+/// switch is no deeper than the network undoes. Widening the adoption instead
+/// would mean a ledger replacing blocks this node applied and wrote down,
+/// which is a reorganisation the store has no undo records for.
+fn reads_rather_than_joins(chain: &ChainStore) -> bool {
+    chain.is_archiving() || !chain.holds_nothing_of_its_own()
 }
 
 /// Of the peers a finished choice names as still claiming more work than
@@ -10446,6 +10467,12 @@ fn paid_and_decoded(
 /// the reorganisation limit is the choice being made by a stranger. The peer's
 /// turn comes when the chooser asks it, or once the choice is made.
 ///
+/// This holds off only while a claim long enough to be final stands, which is
+/// a peer's word about its own height. A peer that said its chain was short
+/// is held to that in the sync layer instead, which takes no block past what
+/// the node can undo from a peer the choice has not fallen on: see
+/// `PeerState::chosen`, written just after this is asked.
+///
 /// A transfer is judged against the ledger this node holds, and a node on
 /// probation has not stood behind that ledger: taking the transfer would be
 /// answering off somebody else's word, and passing it on would be spreading
@@ -10647,7 +10674,24 @@ fn read_loop(
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
         let asked = outbound.take_the_question_asked_from_outside();
+        peer.chosen = shared.choosing().has_chosen(id);
         let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message, asked);
+        // What the choice is told about this peer's blocks: one of the asked
+        // peer's that moved the branch is its read moving, and one past what
+        // this peer claimed is what it sent in place of what it said.
+        if reaction.applied.is_some() {
+            shared.choosing().delivered(id, last_heard);
+        }
+        if let Some((height, work)) = reaction.outgrew {
+            shared.choosing().outgrew(
+                id,
+                peer.remote,
+                height,
+                work,
+                peer.keeps.headers,
+                last_heard,
+            );
+        }
         shared.turn_away(blamed);
         shared.credit(id, &reaction, &passing, last_heard);
 

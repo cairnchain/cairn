@@ -44,6 +44,9 @@ pub struct Local<'a> {
 }
 
 /// What this node knows about one peer.
+// Four facts about one connection, each written in a different place and none
+// excluding another, so they are four fields and not one state.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default)]
 pub struct PeerState {
     /// Whether the peer has introduced itself. Nothing else is answered until
@@ -239,7 +242,25 @@ pub struct PeerState {
     /// block this peer had refused adds nothing a stranger could not already
     /// buy by sending the refused block again, which a refusal does not
     /// remember and counts again.
+    ///
+    /// That argument holds while the refusal does, and so does this: it is
+    /// cleared when a block from this peer goes onto the branch followed or is
+    /// one this node already holds. It was never cleared, so once the clock
+    /// had caught up and the refused block was taken, the peer went on having
+    /// blocks hanging on the last one counted, orphans at a difficulty it
+    /// chose, while sending the refused block again would have counted
+    /// nothing.
     pub clock_refused: Option<Hash32>,
+    /// Whether this node's choice of whom to follow has fallen on this peer,
+    /// or is over, as the node writes it before every message from the
+    /// chooser's answer (`Chooser::has_chosen`).
+    ///
+    /// A peer the choice has not fallen on never carries a node that could
+    /// still undo everything it holds past that depth, whatever it said about
+    /// its chain: see [`holds_nothing_it_cannot_undo`] and the arm of
+    /// [`on_block`] that asks it. False until the node says otherwise, so this
+    /// layer on its own holds every peer to it.
+    pub chosen: bool,
     /// Where the connection came from, filled in by whoever opened it.
     pub remote: Option<IpAddr>,
     /// Whether this node went out and opened this connection.
@@ -738,6 +759,17 @@ impl PeerState {
     ///
     /// A claim of no more work leaves the one already heard, whatever its
     /// height, as a branch of no more work leaves the branch a node follows.
+    ///
+    /// A claim of more work at a lower height than the one held is taken all
+    /// the same, the height going down with it, and the pair is then one no
+    /// tip ever was. Kept so because no honest peer sends one: its tip carries
+    /// the most work on its branch, so a block it delivers below its tip
+    /// claims less. Only a peer understating where it stands sends one, and
+    /// what that buys it is this node asking it less: `follow_up` can read the
+    /// lower height with more work as a tie at this node's own height, where
+    /// the real claim was a branch this node would take, and stop asking that
+    /// peer, and nobody else, for its chain. Its next block above raises the
+    /// claim again.
     fn claims(&mut self, height: u64, total_work: u128) {
         if total_work > self.total_work {
             self.total_work = total_work;
@@ -1093,6 +1125,20 @@ pub struct Reaction {
     /// of these is a number a peer writes, and what a node should conclude
     /// from several is a question about the node.
     pub cannot_supply: Option<u64>,
+    /// The height of a block a peer sent above the height it claimed while
+    /// this node could still undo everything it held, with as much of the work
+    /// behind it as this node can stand behind: the block's own, when this
+    /// node now holds the block, and the work of the block beneath it when it
+    /// did not take it, because it stood past that depth and the choice had
+    /// not fallen on the peer. See [`PeerState::chosen`].
+    ///
+    /// Named for the node to tell its chooser, which ranks the peer by what it
+    /// sent from then on rather than by what it said (`Chooser::outgrew`). A
+    /// peer that said it had nought blocks and the work of a long chain was
+    /// asked for its chain at the handshake on the strength of the first
+    /// number, and would have been the heaviest claim in front of the choice
+    /// on the strength of the second.
+    pub outgrew: Option<(u64, u128)>,
 }
 
 impl Reaction {
@@ -1225,18 +1271,32 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         )));
     }
     if local.chain.outweighed_by(theirs.height, theirs.total_work) {
-        // A node with no chain of its own facing one long enough to be final
-        // does not ask here at all. Whatever it starts following first is
-        // what it keeps, so the choice of whom to ask is made once, by the
-        // node, against every claim it has heard, rather than by whichever
-        // handshake this happens to be. A short chain carries no such
-        // weight: following the wrong one is undone by the fork choice like
-        // any other branch, so it is simply asked for.
+        // A node that could still undo everything it holds, facing a chain
+        // long enough to be final, does not ask here at all. Whatever it
+        // first follows past what it can undo is what it keeps, so the choice
+        // of whom to ask is made once, by the node, against every claim it
+        // has heard, rather than by whichever handshake this happens to be.
         //
-        // No chain of its own includes the first block a named network pins,
-        // which a node lays down the moment it starts. Asking whether the
-        // chain was empty instead meant no newcomer on a real network ever
-        // held off here, so every one of them read the chain block by block.
+        // A chain short enough to be undone is asked for at once, and how
+        // long it is is the peer's word: `theirs.height` is the number it
+        // wrote. This said that following the wrong short chain "is undone by
+        // the fork choice like any other branch", which is true of a chain
+        // that is short and was offered for one that only said so. A peer
+        // saying it had nought blocks and the work of a long chain was asked
+        // here, pushed one block more than the network undoes, and nothing
+        // afterwards held it to what it had said, so the node read past the
+        // reach of every other chain. It is held to it where its blocks
+        // arrive rather than here: a peer the choice has not fallen on is
+        // never followed past what this node can undo, whatever it said. See
+        // [`PeerState::chosen`] and the arm of [`on_block`] that asks it.
+        //
+        // Nothing it cannot undo includes the first block a named network
+        // pins, which a node lays down the moment it starts. Asking whether
+        // the chain was empty instead meant no newcomer on a real network
+        // ever held off here, so every one of them read the chain block by
+        // block. And it includes a short branch read from somebody else, so
+        // a peer that got in first with one does not make every long claim
+        // after it an ask at the handshake.
         //
         // Long enough to be final is the depth this network undoes. It was
         // [`JOIN_RATHER_THAN_READ`], which is that depth on every public
@@ -1244,7 +1304,7 @@ fn greet(local: &Local<'_>, peer: &mut PeerState, theirs: Handshake, answer: boo
         // on devnet asked the first chain it was greeted with for its blocks,
         // and had read past the reach of any other before the next peer spoke.
         let held_for_the_choice =
-            local.chain.holds_nothing_of_its_own() && theirs.height >= local.chain.undo_limit();
+            holds_nothing_it_cannot_undo(local.chain) && theirs.height >= local.chain.undo_limit();
         if !held_for_the_choice {
             peer.chain_asked = true;
             peer.work_when_asked = Some(local.chain.total_work());
@@ -1294,6 +1354,27 @@ pub const BATCH_PATIENCE: u64 = 60;
 pub const JOIN_RATHER_THAN_READ: u64 = 1_024;
 
 const _: () = assert!(JOIN_RATHER_THAN_READ == cairn_chain::MAX_REORG_DEPTH as u64);
+
+/// Whether `chain` could still be given up whole for another chain: it holds
+/// no chain at all, only the first block its network pins, or a branch from
+/// the first block no deeper than the network undoes.
+///
+/// Such a node has not chosen whom to follow yet, whatever it holds, because
+/// the fork choice can still take it off what it holds for any heavier branch,
+/// since every branch starts where its own does. The first block past that
+/// depth is the choice made: a branch parting at the first block is too deep
+/// to take from then on. So this is what both halves of the choice ask, the
+/// chooser whether it is still open and this layer whether a peer the choice
+/// has not fallen on may carry the node past that block. See
+/// [`PeerState::chosen`].
+///
+/// A node handed a ledger holds a branch starting above the first block, which
+/// it cannot undo below, and is past choosing however short what it holds is.
+pub fn holds_nothing_it_cannot_undo(chain: &ChainStore) -> bool {
+    chain.holds_nothing_of_its_own()
+        || (chain.branch_start() == Some(0)
+            && chain.height().is_some_and(|tip| tip <= chain.undo_limit()))
+}
 
 /// Heights one peer may have outstanding at any moment.
 ///
@@ -1697,9 +1778,57 @@ fn on_a_refused_parent(
     Some(dated.saturating_sub(now))
 }
 
+/// What a block at `height`, hanging on `parent`, says about a peer whose
+/// block this node does not take because it stands past the depth this node
+/// undoes and the choice has not fallen on the peer. See
+/// [`PeerState::chosen`].
+///
+/// What [`past_its_word`] says, with the work of `parent` when this node holds
+/// it and nought when it does not: the block's own work is the peer's word
+/// until the block is judged, which it is not here.
+fn held_to_its_word(
+    chain: &ChainStore,
+    peer: &mut PeerState,
+    height: u64,
+    parent: Hash32,
+) -> Reaction {
+    let work = chain
+        .block(&parent)
+        .map_or(0, |block| block.header.total_work);
+    Reaction {
+        outgrew: past_its_word(peer, height, work),
+        ..Reaction::idle()
+    }
+}
+
+/// Takes a block `peer` sent at `height`, `work` being as much of the work
+/// behind it as this node can vouch for, as what the peer holds, when it
+/// stands above the height the peer claimed. Says so, for the node to tell its
+/// chooser: see [`Reaction::outgrew`].
+///
+/// Nothing, when the peer claimed a chain at least that long: its word stands
+/// and the choice will weigh it. Above it, the peer has said two things about
+/// its chain and the block is the one this node can check, so what the peer
+/// claims becomes what it sent, the height with the work, in both directions:
+/// a peer whose chain grew since it greeted this node is raised to it, and one
+/// that said it had nought blocks and the work of a long chain is taken down
+/// to the branch it sent. Kept at its word, that peer was asked for its chain
+/// after every block it pushed, since it claimed more than this node would
+/// ever hold, and it was the heaviest claim in front of the choice.
+fn past_its_word(peer: &mut PeerState, height: u64, work: u128) -> Option<(u64, u128)> {
+    if height <= peer.height {
+        return None;
+    }
+    peer.height = height;
+    peer.total_work = work;
+    Some((height, work))
+}
+
 // The last two arms answer the same way for opposite reasons, and collapsing
-// them would bury which is which.
-#[allow(clippy::match_same_arms)]
+// them would bury which is which. And it is one arm for each answer
+// `add_block` can give, with what it means beside it: split, the reasons would
+// sit away from the arms they are about.
+#[allow(clippy::match_same_arms, clippy::too_many_lines)]
 fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64) -> Reaction {
     let id = block.id();
     let height = block.header.height;
@@ -1716,21 +1845,46 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
     // one this peer sent is not the one kept.
     let held_before = chain.block(&id).is_some();
 
+    // A node that could still undo everything it holds takes no block past
+    // that depth from a peer its choice has not fallen on. Taking it is the
+    // choice made, and made by whichever peer got there first. See
+    // [`PeerState::chosen`].
+    let choosing = holds_nothing_it_cannot_undo(chain);
+    if choosing && !peer.chosen && height > chain.undo_limit() {
+        return held_to_its_word(chain, peer, height, parent);
+    }
+
     match chain.add_block(block, now) {
         Ok(accepted @ (Accepted::Extended | Accepted::Reorganised { .. })) => {
+            // See [`PeerState::clock_refused`]: what this peer sends now goes
+            // onto the branch, so whatever it had refused is behind it.
+            peer.clock_refused = None;
+            // Held, so the work its header states is the work behind it, and
+            // while the choice is open the choice hears it.
+            let outgrew = choosing
+                .then(|| past_its_word(peer, height, claimed))
+                .flatten();
             let mut reaction = follow_up(chain, peer, now);
             reaction.applied = Some(accepted);
+            reaction.outgrew = outgrew;
             reaction.broadcast.push(Located::new(height, id));
             reaction
         }
         Ok(Accepted::SideBranch) => {
+            let outgrew = choosing
+                .then(|| past_its_word(peer, height, claimed))
+                .flatten();
             let mut reaction = follow_up(chain, peer, now);
+            reaction.outgrew = outgrew;
             if !held_before {
                 reaction.held_aside = Some(id);
             }
             reaction
         }
-        Ok(Accepted::Duplicate) => follow_up(chain, peer, now),
+        Ok(Accepted::Duplicate) => {
+            peer.clock_refused = None;
+            follow_up(chain, peer, now)
+        }
         // Missing history rather than a bad peer: the block is fine, this node
         // simply has not caught up to where it hangs. Asking again from a fresh
         // locator resolves it.
@@ -1759,10 +1913,15 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             let mut reaction = follow_up(chain, peer, now);
             if out_of_reach {
                 reaction.unreachable = Some(height);
+            } else {
+                // Hanging on a block this peer sent that the clock refused,
+                // and dated past the drift itself. See
+                // [`PeerState::clock_refused`]. Never below everything held:
+                // a child of a block refused for being ahead of the clock
+                // stands above the tip.
+                reaction.ahead_of_the_clock =
+                    on_a_refused_parent(chain, peer, id, parent, dated, now);
             }
-            // Hanging on a block this peer sent that the clock refused, and
-            // dated past the drift itself. See [`PeerState::clock_refused`].
-            reaction.ahead_of_the_clock = on_a_refused_parent(chain, peer, id, parent, dated, now);
             reaction
         }
         // The peer did nothing wrong and this node cannot judge what it sent.
@@ -3311,6 +3470,51 @@ mod a_slow_clock {
             said,
             Some(drift() + 1),
             "a block past the drift on the refused parent was not counted"
+        );
+    }
+
+    /// Once the block the clock refused has been taken, a block hanging on
+    /// the ones counted after it is counted no more.
+    ///
+    /// The count rests on the refusal: a block hanging on one this peer had
+    /// refused adds nothing a stranger could not buy by sending the refused
+    /// block again. Once the refused block is taken, sending it again counts
+    /// nothing, and the last block counted was still there to hang orphans
+    /// on, each one counted against a clock that now allowed them.
+    #[test]
+    fn a_refusal_the_clock_took_back_counts_nothing_further() {
+        let (mut chain, state) = settled();
+        let mut peer = greeted();
+        let mut blocks = ahead(&state).into_iter();
+        let (refused, counted, orphan) = (
+            blocks.next().unwrap(),
+            blocks.next().unwrap(),
+            blocks.next().unwrap(),
+        );
+        let allowed = refused.header.timestamp - drift();
+        assert!(
+            on_block(&mut chain, &mut peer, refused.clone(), NOW)
+                .ahead_of_the_clock
+                .is_some(),
+            "fixture: refused for the clock"
+        );
+        assert!(
+            on_block(&mut chain, &mut peer, counted, NOW)
+                .ahead_of_the_clock
+                .is_some(),
+            "fixture: the block on it is counted"
+        );
+        assert!(
+            on_block(&mut chain, &mut peer, refused, allowed)
+                .applied
+                .is_some(),
+            "fixture: the refused block is taken once the clock allows it"
+        );
+        assert_eq!(
+            on_block(&mut chain, &mut peer, orphan, allowed).ahead_of_the_clock,
+            None,
+            "a block hanging on one counted before the refusal was taken back was counted \
+             against a clock that allows it"
         );
     }
 }
