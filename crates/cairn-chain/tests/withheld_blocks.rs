@@ -893,6 +893,33 @@ fn a_withholding_miner_earns_what_the_papers_say() {
     );
 }
 
+/// The third table of the header, slow, even and fast: the share at which
+/// each lane's revenue crosses the share, as `the_tables_in_the_header`
+/// computes it. Measured figures: 0.318 only looks like the reciprocal of pi.
+#[allow(clippy::approx_constant)]
+const CROSSINGS: [(&str, [f64; 3]); 4] = [
+    ("SM1", [0.333, 0.294, 0.186]),
+    ("lead stubborn, real", [0.396, 0.323, 0.213]),
+    ("lead stubborn, flat", [0.394, 0.318, 0.196]),
+    ("best of the two, real", [0.333, 0.294, 0.186]),
+];
+
+/// The same table's last line, the study's crossings for the fork choice
+/// before the band, which this file no longer measures.
+const BEFORE_THE_BAND: [f64; 3] = [0.301, 0.266, 0.177];
+
+/// Deep gamma of lead stubbornness before the band, the least and the most
+/// over the three placements, as the header states it.
+const DEEP_GAMMA_BEFORE_THE_BAND: (f64, f64) = (0.87, 1.00);
+
+/// How far a crossing `the_tables_in_the_header` computes may stand from the
+/// one stated. The cells are seeded and come back the same on a rerun on the
+/// same platform, so anything further is a change in what the rules or the
+/// simulation give; and the threat model quotes these to the hundredth, so a
+/// move of more than half of one can change a published figure. Then the
+/// tables, this constant and the threat model are measured again together.
+const CROSSING_TOLERANCE: f64 = 0.005;
+
 /// The share at which revenue crosses the miner's own share, between the
 /// two grid points either side of the last crossing from under to over.
 fn crossing(points: &[(f64, f64)]) -> Option<f64> {
@@ -1042,25 +1069,147 @@ fn the_tables_in_the_header() {
             .collect();
         crossing(&points).unwrap_or(f64::NAN)
     };
+    let mut computed: Vec<(&str, [f64; 3])> = Vec::new();
     for (name, strategy, opening) in [
         ("SM1", Strategy::Selfish, TIMED),
         ("lead stubborn, real", Strategy::LeadStubborn, TIMED),
         ("lead stubborn, flat", Strategy::LeadStubborn, FLAT),
     ] {
+        computed.push((
+            name,
+            networks.map(|network| threshold(strategy, network.name, opening)),
+        ));
+    }
+    computed.push((
+        "best of the two, real",
+        networks.map(|network| {
+            threshold(Strategy::Selfish, network.name, TIMED).min(threshold(
+                Strategy::LeadStubborn,
+                network.name,
+                TIMED,
+            ))
+        }),
+    ));
+    for (name, crossings) in &computed {
         let mut line = format!("{name:<22}");
-        for network in &networks {
-            write!(line, "   {:.3}", threshold(strategy, network.name, opening)).unwrap();
+        for crossing in crossings {
+            write!(line, "   {crossing:.3}").unwrap();
         }
         println!("{line}");
     }
-    let mut line = format!("{:<22}", "best of the two, real");
-    for network in &networks {
-        let best = threshold(Strategy::Selfish, network.name, TIMED).min(threshold(
-            Strategy::LeadStubborn,
-            network.name,
-            TIMED,
-        ));
-        write!(line, "   {best:.3}").unwrap();
+
+    // Asserted after printing, so a run that fails still shows the tables to
+    // write into the header.
+    for ((name, crossings), (stated_name, stated)) in computed.iter().zip(CROSSINGS) {
+        assert_eq!(*name, stated_name);
+        for ((network, crossing), stated) in networks.iter().zip(crossings).zip(stated) {
+            assert!(
+                (crossing - stated).abs() <= CROSSING_TOLERANCE,
+                "{name}, {}: the crossing is {crossing:.3} where the header states {stated:.3}; \
+                 the header, `CROSSINGS` and the threat model are owed a new measurement",
+                network.name
+            );
+        }
     }
-    println!("{line}");
+}
+
+/// Text with every run of whitespace made one space and the comment markers
+/// of a Rust source left out, so that a phrase is found however it was
+/// wrapped or aligned.
+fn flat(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|word| !matches!(*word, "///" | "//!" | "//"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// **The threat model quotes the tables in the header, and the header is the
+/// table `the_tables_in_the_header` is held to.**
+///
+/// The selfish-mining row publishes six thresholds and a nine in ten from this
+/// file. The run that produces them takes an hour and a half and is ignored,
+/// so nothing that runs on a change compared the row, the header and the
+/// constants with each other; the floor run's figures were in that position
+/// and stood in four documents a factor of four low. Each is read here from
+/// `CROSSINGS`, `BEFORE_THE_BAND` and `DEEP_GAMMA_BEFORE_THE_BAND`, so editing
+/// any of the three apart from the others fails.
+#[test]
+fn the_threat_model_quotes_the_tables_in_the_header() {
+    let header = flat(include_str!("withheld_blocks.rs"));
+    for (name, [slow, even, fast]) in CROSSINGS {
+        let row = format!("{name} {slow:.3} {even:.3} {fast:.3}");
+        assert!(
+            header.contains(&row),
+            "the header's table does not hold `{row}`"
+        );
+    }
+    let [slow, even, fast] = BEFORE_THE_BAND;
+    let row = format!("best of the two, before {slow:.3} {even:.3} {fast:.3}");
+    assert!(
+        header.contains(&row),
+        "the header's table does not hold `{row}`"
+    );
+    let (least, most) = DEEP_GAMMA_BEFORE_THE_BAND;
+    let range = format!("deep gamma {least:.2} to {most:.2} in every placement");
+    assert!(header.contains(&range), "the header does not say `{range}`");
+
+    let threat = flat(include_str!("../../../docs/cairn-threat-model.md"));
+    let quoted = |[slow, even, fast]: [f64; 3]| format!("{slow:.2}, {even:.2} and {fast:.2}");
+    let best = CROSSINGS
+        .iter()
+        .find(|(name, _)| *name == "best of the two, real")
+        .unwrap()
+        .1;
+    for stated in [
+        format!(
+            "profited from {} of the work by placement",
+            quoted(BEFORE_THE_BAND)
+        ),
+        format!(
+            "withholding pays from {}, the papers' threshold",
+            quoted(best)
+        ),
+        "won nine in ten of them".to_owned(),
+    ] {
+        assert!(
+            threat.contains(&stated),
+            "the threat model does not say \"{stated}\""
+        );
+    }
+    assert!(
+        (0.85..0.95).contains(&least),
+        "nine in ten no longer rounds the least deep gamma the header states, {least:.2}"
+    );
+}
+
+/// **The manifest names every test that uses `cairn-fuzz`, this one
+/// included.**
+///
+/// The comment beside the dev-dependency named two of the four files that
+/// use it, and gave a reason, campaigns for the nightly run, that this file
+/// does not have: it takes only the seeded generator. Somebody pruning the
+/// dependency on the comment's word would break two targets, one of them in
+/// the nightly list.
+#[test]
+fn every_test_here_that_uses_the_fuzz_crate_is_named_in_the_manifest() {
+    let manifest = include_str!("../Cargo.toml");
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut using = Vec::new();
+    for entry in std::fs::read_dir(&tests).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "rs")
+            && std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("use cairn_fuzz")
+        {
+            using.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    assert!(using.contains(&"withheld_blocks.rs".to_owned()));
+    for file in using {
+        assert!(
+            manifest.contains(&format!("`tests/{file}`")),
+            "tests/{file} uses cairn-fuzz and the manifest does not say so"
+        );
+    }
 }
