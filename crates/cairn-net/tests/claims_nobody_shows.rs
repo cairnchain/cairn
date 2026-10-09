@@ -32,10 +32,12 @@
 //! again for ever without a fresh address. Measured below with no more
 //! connections than a node takes from outside: twenty addresses dialling back
 //! cost a newcomer thirty five minutes, and from sixty two the honest peer
-//! standing there the whole time was never asked at all. An address that has
-//! failed more than once now also waits a turn for every address on the list,
-//! and sixty two cost two hours fifty five minutes: see
-//! `choosing::Chooser::pause_for`, which says what still bounds the wait.
+//! standing there the whole time was never asked at all. An address that had
+//! failed more than once was then made to wait a turn for every address on the
+//! list, and sixty two cost two hours fifty five minutes; past the list's
+//! ceiling that bought nothing. Turns now go round the connections, and sixty
+//! two cost twenty two and a half minutes: see `choosing::Chooser::pick`,
+//! which says what bounds the wait.
 
 #![allow(
     clippy::unwrap_used,
@@ -525,11 +527,16 @@ fn against_reused_addresses(hosts: u64, dial_back: bool, watch: u64) -> (Option<
 /// twenty strangers that claim once each, costs ten minutes against its
 /// fifteen; the same twenty dialling back as their pauses end cost thirty five.
 ///
-/// The repair ties the pause to the round: an address past its first failure
-/// waits at least one turn for every address on the list, so none is back
-/// before all the others have had their turn. Measured with it: sixty two
-/// addresses cost two hours fifty five minutes and the wait ends, sixty one
+/// The first repair tied the pause to the round: an address past its first
+/// failure waited at least one turn for every address on the list, so none was
+/// back before all the others had had their turn. Measured with it: sixty two
+/// addresses cost two hours fifty five minutes and the wait ended, sixty one
 /// two hours fifty two, and the same twenty dialling back thirty two minutes.
+/// The list it counted forgot its oldest entry past its ceiling, so a stranger
+/// with more addresses than that went round it for good. Turns go round the
+/// connections now, a claim heard during a rotation waiting for the next, and
+/// sixty two and sixty one addresses cost twenty two and a half minutes, the
+/// same twenty dialling back twelve and a half.
 /// Ranking a claim from an address that failed behind the rest also ends it,
 /// and breaks `tests/shared_address_claims.rs`, which holds on purpose that a
 /// neighbour's claim past its pause is judged on its work.
