@@ -550,6 +550,15 @@ const RECOVERY_POLL: Duration = Duration::from_millis(50);
 /// node's connections.
 const REACH_FOR_ARCHIVISTS: usize = 4;
 
+/// Addresses one reach for archivists tries at most, whatever they come to.
+///
+/// A dial that fails can take [`DIAL_TIMEOUT`], so a reach that went on until
+/// it had opened [`REACH_FOR_ARCHIVISTS`] would be as slow as the book is full
+/// of addresses that have gone. Twice that many, so a round still opens what
+/// it is for with half of its addresses gone; the next round of the same
+/// question goes on from where this one stopped.
+const DIALS_PER_REACH: usize = 2 * REACH_FOR_ARCHIVISTS;
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
     #[error("could not open the connection: {0}")]
@@ -1875,6 +1884,8 @@ struct Shared {
     /// the count of peers that goes before it, so that a stop and a round of
     /// upkeep write theirs one after the other: see [`keep_anchors`]. Taken
     /// before the peers and the book, and never the other way round.
+    /// [`keep_anchors`] is the one place that takes it, so that order lives
+    /// there.
     writing_anchors: Mutex<()>,
     /// Blocks this build turned out not to be able to read, and who sent them.
     ///
@@ -2613,8 +2624,11 @@ fn room_made_in(peers: &mut HashMap<PeerId, Peer>, host: IpAddr, salt: u64) -> b
 /// had been let go of for it. And one at a time. The connection chosen stops
 /// holding a slot the moment it is chosen, and leaves the table once its
 /// threads have wound down: a matter of moments on Linux and macOS, and up to
-/// [`READ_TIMEOUT`] on Windows, where shutting its socket does not wake the
-/// read waiting on it: see [`Peer::let_go`]. Until it has, nobody else is let
+/// [`READ_TIMEOUT`] plus [`WRITE_TIMEOUT`] on Windows. Shutting its socket
+/// there wakes neither the read waiting on it, which ends at the loop's next
+/// read, nor a write waiting on a far end that has stopped reading, which
+/// ends at its own timeout, and the entry goes only once the reader has
+/// joined the writer: see [`Peer::let_go`]. Until it has, nobody else is let
 /// go of, so the connections holding a place are at most one more than
 /// [`MAX_PEERS`], and only for that long.
 ///
@@ -3516,12 +3530,16 @@ impl Shared {
         }
     }
 
-    /// The peers this node went out to, that have introduced themselves and
-    /// are not feelers: the ones it vouches for at its next start.
+    /// The peers this node went out to, that have introduced themselves, are
+    /// not feelers and are not on their way out: the ones it vouches for at
+    /// its next start.
+    ///
+    /// A peer marked as leaving, by [`make_room_in`] or [`Self::hang_up`], is
+    /// a connection this node has already let go of.
     fn went_out_to(&self) -> Vec<SocketAddr> {
         self.peers()
             .values()
-            .filter(|peer| peer.dialled && peer.greeted && !peer.feeler)
+            .filter(|peer| peer.dialled && peer.greeted && !peer.feeler && !peer.leaving)
             .filter_map(|peer| peer.dialled_to)
             .collect()
     }
@@ -3549,9 +3567,11 @@ impl Shared {
     /// The connection is let go of rather than the entry taken out of the
     /// table, so what happens next is what happens to any peer that goes
     /// away: the reading loop ends, the writer is freed, and the slot is given
-    /// up once both are finished with it. At once on Linux and macOS; on
-    /// Windows at the loop's next read, [`READ_TIMEOUT`] at the latest, so the
-    /// slot can stay taken that long. See [`Peer::let_go`].
+    /// up once both are finished with it. At once on Linux and macOS. On
+    /// Windows the loop ends at its next read, [`READ_TIMEOUT`] at the latest,
+    /// and a write already waiting on a far end that has stopped reading ends
+    /// only at [`WRITE_TIMEOUT`], so the slot can stay taken for the two
+    /// together. See [`Peer::let_go`].
     fn hang_up(&self, id: PeerId) {
         if let Some(peer) = self.peers().get(&id) {
             peer.let_go();
@@ -4417,6 +4437,8 @@ impl Shared {
             if checking.is_empty() {
                 // Nothing to check, so the answer is already all it will be.
                 asking.answered.insert(from);
+                drop(asking);
+                self.judge_the_answer(from, false);
                 return;
             }
             checking
@@ -4448,15 +4470,29 @@ impl Shared {
             asking.answered.insert(from);
         }
         drop(asking);
-        // Against the address it listens at, which is what its claim to keep
-        // the set was written against, so that a node reaching for archivists
-        // it met tries this one before any that only claimed: see
-        // `AddressBook::archivists`. Once the question is let go of, which is
-        // a leaf.
-        if handed_a_path {
-            let listens = self.peers().get(&from).and_then(|peer| peer.advertised);
-            if let Some(address) = listens {
-                self.book().handed_over_a_path(&address);
+        if kept {
+            self.judge_the_answer(from, handed_a_path);
+        }
+    }
+
+    /// Writes down whether a peer's answer to this question brought a path
+    /// that folded, against the address it listens at, which is what its
+    /// claim to keep the set was written against.
+    ///
+    /// So that a node reaching for archivists it met tries one that folded a
+    /// path before any that only claimed, and one that has folded nothing
+    /// since after any not yet asked: see `AddressBook::archivists`. The
+    /// refusal used to be counted for the question and dropped with it, so a
+    /// single fold stood for the life of the process. Called once the
+    /// question is let go of, which is a leaf.
+    fn judge_the_answer(&self, from: PeerId, folded: bool) {
+        let listens = self.peers().get(&from).and_then(|peer| peer.advertised);
+        if let Some(address) = listens {
+            let mut book = self.book();
+            if folded {
+                book.handed_over_a_path(&address);
+            } else {
+                book.refused_a_path(&address);
             }
         }
     }
@@ -5248,6 +5284,12 @@ impl Node {
     /// and was printed as `reached`, and the wallet counted it as a seed it had
     /// got to. Everything that turns the connection away now says so.
     pub fn connect(&self, address: SocketAddr) -> Result<(), NodeError> {
+        self.connect_within(address, DIAL_TIMEOUT)
+    }
+
+    /// [`Self::connect`], giving the dial no longer than `patience`, for a
+    /// caller whose own patience is shorter than [`DIAL_TIMEOUT`].
+    fn connect_within(&self, address: SocketAddr, patience: Duration) -> Result<(), NodeError> {
         // The spelling the book keeps, so the dial is filed against the entry
         // it made: an IPv4 address named as `::ffff:a.b.c.d` is dialled and
         // written down as the IPv4 address it is.
@@ -5256,8 +5298,8 @@ impl Node {
         // accept loop asks before it takes the stream and the dial round
         // filters its candidates. Asking after would spend a `DIAL_TIMEOUT`
         // on a host that is turned away at the end of it, up to
-        // `REACH_FOR_ARCHIVISTS` times a round, and the round only happens
-        // when the node is already short of peers.
+        // `DIALS_PER_REACH` times a round, and the round only happens when
+        // the node is already short of peers.
         let refused = "this node is refusing that host for now, after it sent \
                        something a peer should not send";
         if self.shared.refuses(address.ip(), unix_now()) {
@@ -5267,7 +5309,7 @@ impl Node {
             });
         }
 
-        let stream = TcpStream::connect_timeout(&address, DIAL_TIMEOUT)?;
+        let stream = TcpStream::connect_timeout(&address, patience)?;
         self.shared.book().insert(address);
         let host = stream.peer_addr().ok().map(|at| at.ip().to_canonical());
         // And again on the host the socket actually reached. A refusal is
@@ -5991,7 +6033,10 @@ impl Node {
     /// reaches for one it has heard of, and if none arrives in time the answer
     /// says that nobody was asked. When every such peer connected has
     /// answered and a place is still not placed, it reaches past them the
-    /// same way, archivists that once handed over a path that folded first.
+    /// same way, archivists whose last answer was a path that folded first
+    /// and those whose last answer folded nothing last.
+    /// Either way it dials past addresses that do not answer, and only within
+    /// `patience`: the dials are part of the wait and not ahead of it.
     ///
     /// Nothing here trusts anybody. A path is folded from the place named up
     /// to a commitment this node worked out for itself, block by block, and
@@ -6032,19 +6077,29 @@ impl Node {
             ..Asking::default()
         };
 
+        // Before the first dial, so that dialling is part of the patience and
+        // not ahead of it: four dials that each waited out `DIAL_TIMEOUT`
+        // held a wallet twelve seconds past a patience of three.
+        let deadline = Instant::now().checked_add(patience);
+        // Addresses this question has dialled, so that a round of reaching
+        // goes on past them rather than back to them.
+        let mut tried = HashSet::new();
+
         // Nobody here keeps the set, so reach for somebody this node has met
         // who said they did. A claim heard on an earlier connection is the
         // only lead there is, and following it costs a dial.
         let mut reached = false;
+        // Whether the last round of reaching opened nothing and left
+        // addresses to try, so the next round has no answer to wait for.
+        let mut reach_again = false;
         if self.archiving_peers() == 0 {
-            self.reach_for_an_archivist();
+            reach_again = self.reach_for_an_archivist(&mut tried, deadline) == Some(0);
             reached = true;
         }
         // How many had answered when the node last reached past them, so that
         // answers it already had do not end the wait for what it reached.
         let mut answered_before = 0;
 
-        let deadline = Instant::now().checked_add(patience);
         loop {
             let worth_asking = self.shared.worth_asking();
             let archivists = worth_asking.len();
@@ -6059,7 +6114,7 @@ impl Node {
                 self.shared
                     .send_to(peer, Message::GetProofs(positions.clone()));
             }
-            let everyone_answered = {
+            let (everyone_answered, nobody_owes_an_answer) = {
                 let mut asking = self.shared.asking();
                 let answered = asking.answered.len();
                 let everyone = answered > answered_before && answered >= asking.asked.len();
@@ -6069,7 +6124,10 @@ impl Node {
                 if asking.satisfied() || (everyone && reached) {
                     return finished(&mut asking, archivists);
                 }
-                everyone.then_some(answered)
+                (
+                    everyone.then_some(answered),
+                    !asking.asked.is_empty() && answered >= asking.asked.len(),
+                )
             };
             // Every peer here that says it keeps the set has answered, and a
             // place is still not placed. A claim is a bit in a handshake, and
@@ -6077,14 +6135,24 @@ impl Node {
             // a node from an honest archivist in its book for as long as they
             // stayed: it asked them, took their word, and never dialled. So
             // it reaches past them as it does with nobody connected, and
-            // waits for what it reached until its patience runs out. With
-            // nobody left to dial, there is nothing to wait on.
-            if let Some(answered) = everyone_answered {
+            // waits for what it reached until its patience runs out.
+            //
+            // A round that opened nothing is not the end of the book: read as
+            // nobody left to dial, four addresses at the head of the list
+            // that had gone away ended every question. With nobody left to
+            // dial and nobody still to answer, there is nothing to wait on.
+            if everyone_answered.is_some() || reach_again {
+                if let Some(answered) = everyone_answered {
+                    answered_before = answered;
+                }
                 reached = true;
-                answered_before = answered;
-                if self.reach_for_an_archivist() == 0 {
-                    let mut asking = self.shared.asking();
-                    return finished(&mut asking, archivists);
+                match self.reach_for_an_archivist(&mut tried, deadline) {
+                    Some(opened) => reach_again = opened == 0,
+                    None if nobody_owes_an_answer => {
+                        let mut asking = self.shared.asking();
+                        return finished(&mut asking, archivists);
+                    }
+                    None => reach_again = false,
                 }
             }
             if deadline.is_none_or(|end| Instant::now() >= end) {
@@ -6095,8 +6163,8 @@ impl Node {
         }
     }
 
-    /// Opens a connection to an address that said it keeps the cold set, and
-    /// says how many it opened.
+    /// Opens connections to addresses that said they keep the cold set, and
+    /// says how many it opened, or `None` when there was nobody left to try.
     ///
     /// Only reached by a node that needs a path and is connected to nobody who
     /// can build one, or only to peers that said they could and did not,
@@ -6105,7 +6173,19 @@ impl Node {
     /// in the order the book gives, so this is an ordinary dial made a few
     /// seconds early rather than a second way of choosing who this node talks
     /// to.
-    fn reach_for_an_archivist(&self) -> usize {
+    ///
+    /// Two numbers that used to be one. How many it opened was read as how
+    /// many were left to try, and the first [`REACH_FOR_ARCHIVISTS`] were
+    /// taken before any was dialled, so four addresses at the head of the
+    /// list that could not be dialled ended the question with an honest
+    /// archivist behind them. It now dials past them, up to
+    /// [`DIALS_PER_REACH`] and never past `deadline`, and `tried` keeps the
+    /// ones this question has dialled so the next round goes on from there.
+    fn reach_for_an_archivist(
+        &self,
+        tried: &mut HashSet<SocketAddr>,
+        deadline: Option<Instant>,
+    ) -> Option<usize> {
         let known: Vec<SocketAddr> = self.shared.book().archivists();
         let connected: Vec<SocketAddr> = self
             .shared
@@ -6113,12 +6193,39 @@ impl Node {
             .values()
             .filter_map(|peer| peer.advertised.or(peer.dialled_to))
             .collect();
-        known
+        let left: Vec<SocketAddr> = known
             .into_iter()
-            .filter(|address| !connected.contains(address))
-            .take(REACH_FOR_ARCHIVISTS)
-            .filter(|address| self.connect(*address).is_ok())
-            .count()
+            .filter(|address| !connected.contains(address) && !tried.contains(address))
+            .take(DIALS_PER_REACH)
+            .collect();
+        if left.is_empty() {
+            return None;
+        }
+        let mut opened = 0usize;
+        for address in left {
+            if opened >= REACH_FOR_ARCHIVISTS {
+                break;
+            }
+            let Some(patience) = deadline
+                .and_then(|end| end.checked_duration_since(Instant::now()))
+                .filter(|patience| !patience.is_zero())
+            else {
+                break;
+            };
+            tried.insert(address);
+            // Asked before the dial, as the dial round asks it, so a node
+            // with no room spends no dial finding out.
+            if !self.shared.has_room_for(Some(address.ip())) {
+                continue;
+            }
+            if self
+                .connect_within(address, patience.min(DIAL_TIMEOUT))
+                .is_ok()
+            {
+                opened = opened.saturating_add(1);
+            }
+        }
+        Some(opened)
     }
 
     /// Transfers waiting for a block.
@@ -8442,6 +8549,9 @@ fn save_book(shared: &Arc<Shared>) {
 /// Writes down the peers this node went out to and is talking to whenever
 /// they are not the ones last written, so that what a node killed outright
 /// leaves on its disk names them, and its next start dials them first.
+/// Topped up to [`TARGET_PEERS`] with the anchors it had, so a kill just
+/// after a moment that held few of them does not leave a start with one:
+/// see `AddressBook::anchor`.
 ///
 /// They were written by [`Node::shutdown`] and by nothing else, and `cairnd`
 /// never runs that: it has no handler for a signal, and
@@ -8476,7 +8586,7 @@ fn keep_anchors(shared: &Arc<Shared>, stopping: bool) {
     let went_out_to = shared.went_out_to();
     let (anchors, changes) = {
         let mut book = shared.book();
-        book.anchor(went_out_to);
+        book.anchor(went_out_to, TARGET_PEERS);
         let changes = book.anchor_changes();
         if shared.anchors_written_at.load(Ordering::Relaxed) == changes {
             return;
@@ -9838,7 +9948,7 @@ where
         if wave.is_empty() {
             return;
         }
-        for (address, dialled) in dial_side_by_side(&wave, dial) {
+        for (address, dialled, in_line) in dial_side_by_side(&wave, dial) {
             match dialled {
                 // Asked again, because the room was judged before the wave
                 // for each address alone, and two in one wave can be one
@@ -9855,9 +9965,7 @@ where
                 }
                 // An address that never answers would otherwise be dialled every
                 // second forever, and handed to every peer that asks.
-                Err(_) => {
-                    shared.book().missed(&address, now);
-                }
+                Err(error) => file_a_failed_dial(shared, &address, &error, in_line, now),
             }
         }
         width = DIALS_AT_ONCE;
@@ -9865,18 +9973,22 @@ where
 }
 
 /// Dials every address in `wave` at once, and answers for each in the order
-/// they were given.
+/// they were given, and whether it was made in line because no thread would
+/// start for it.
 ///
 /// Side by side, so a wave costs its slowest dial rather than the sum of them:
 /// a thread each, all joined before this returns. A machine that will not
 /// start one gets that dial made here instead, after the others, which is how
 /// every dial was made before.
-fn dial_side_by_side<D>(wave: &[SocketAddr], dial: &D) -> Vec<(SocketAddr, io::Result<TcpStream>)>
+fn dial_side_by_side<D>(
+    wave: &[SocketAddr],
+    dial: &D,
+) -> Vec<(SocketAddr, io::Result<TcpStream>, bool)>
 where
     D: Fn(&SocketAddr) -> io::Result<TcpStream> + Sync,
 {
     if let [only] = wave {
-        return vec![(*only, dial(only))];
+        return vec![(*only, dial(only), false)];
     }
     thread::scope(|scope| {
         let started: Vec<_> = wave
@@ -9890,17 +10002,40 @@ where
             .collect();
         started
             .into_iter()
-            .map(|(address, dialling)| {
-                let dialled = match dialling {
-                    Ok(handle) => handle
+            .map(|(address, dialling)| match dialling {
+                Ok(handle) => (
+                    *address,
+                    handle
                         .join()
                         .unwrap_or_else(|_| Err(io::Error::other("the dial did not finish"))),
-                    Err(_) => dial(address),
-                };
-                (*address, dialled)
+                    false,
+                ),
+                Err(_) => (*address, dial(address), true),
             })
             .collect()
     })
+}
+
+/// Holds a dial that came to nothing against the address it went to.
+///
+/// A dial that ran out of time, or that was made in line because this
+/// machine would not start a thread for it, says as much about this machine
+/// as about the far end, and is allowed more before the address goes: see
+/// [`crate::book::MAX_TIMED_OUT`]. A refusal, or a far end nothing reaches,
+/// is a miss.
+fn file_a_failed_dial(
+    shared: &Shared,
+    address: &SocketAddr,
+    error: &io::Error,
+    in_line: bool,
+    now: u64,
+) {
+    let mut book = shared.book();
+    if in_line || error.kind() == io::ErrorKind::TimedOut {
+        book.timed_out(address, now);
+    } else {
+        book.missed(address, now);
+    }
 }
 
 /// Seconds between two feelers: see [`feel`].
@@ -9950,9 +10085,7 @@ fn feel(shared: &Arc<Shared>, connected: &HashSet<SocketAddr>, now: u64) {
                 }
             }
         }
-        Err(_) => {
-            shared.book().missed(&address, now);
-        }
+        Err(error) => file_a_failed_dial(shared, &address, &error, false, now),
     }
 }
 
@@ -13682,6 +13815,35 @@ mod peers_and_loops {
         assert_eq!(reached, 0, "a refused dial was taken for a connection");
     }
 
+    /// **A dial that ran out of time is not a miss: one reported
+    /// [`MAX_MISSES`] times leaves the address in the book, where a refused
+    /// one still takes it out.**
+    ///
+    /// Every failed dial was a miss, so a machine too busy to finish three
+    /// dials in time forgot an honest address it may have held for a month.
+    #[test]
+    fn a_dial_that_ran_out_of_time_is_not_a_miss() {
+        let kept_after = |kind: io::ErrorKind| {
+            let (node, _socket, _far, vacant) = one_short_knowing_vacant(1);
+            let mut now = 1_000;
+            for _ in 0..MAX_MISSES {
+                dial_from_book_with(&node.shared, now, &|_: &SocketAddr| Err(kind.into()));
+                now += 10_000;
+            }
+            let kept = node.shared.book().contains(&vacant[0]);
+            stop_all(&node);
+            kept
+        };
+        assert!(
+            kept_after(io::ErrorKind::TimedOut),
+            "an address whose dials ran out of time {MAX_MISSES} times was taken out of the book"
+        );
+        assert!(
+            !kept_after(io::ErrorKind::ConnectionRefused),
+            "an address that refused {MAX_MISSES} dials was kept"
+        );
+    }
+
     /// A round is not rationed by addresses that take seconds to refuse.
     ///
     /// Windows is the platform where a refusal takes that long: Winsock sends
@@ -15125,25 +15287,172 @@ mod peers_and_loops {
         assert_eq!(recovered.answered, 1, "{recovered:?}");
     }
 
-    /// A peer whose path folded is written down as having handed one over,
-    /// against the address it listens at, and one whose paths did not fold
-    /// is not.
+    /// Writes `address` into the book as an archivist last heard from at
+    /// `heard`.
+    fn an_archivist_in_the_book(node: &Node, address: SocketAddr, heard: u64) {
+        let mut book = node.shared.book();
+        book.insert(address);
+        book.answered(&address, heard);
+        book.keeps_the_cold_set(&address, true);
+    }
+
+    /// `count` archivists in the book, heard from at `heard`, that no dial
+    /// reaches: hosts this node is refusing, so each fails at once on every
+    /// platform rather than in the two seconds Windows takes to refuse.
+    fn archivists_out_of_reach(node: &Node, count: u8, heard: u64) {
+        for last in 1..=count {
+            let address = SocketAddr::from((Ipv4Addr::new(203, 0, 113, last), 9000));
+            node.shared.refuse(address.ip(), unix_now());
+            an_archivist_in_the_book(node, address, heard);
+        }
+    }
+
+    /// **One round of reaching opens what it is for with half of its
+    /// addresses out of reach.**
     ///
-    /// That mark is what a node reaching for archivists it met goes by
-    /// first, past peers that are newer in its book and only claimed.
+    /// What [`DIALS_PER_REACH`] says it is for. Four archivists nobody can
+    /// reach, newer in the book than four that take the connection: a round
+    /// that gave up before the eighth dial opened fewer than
+    /// [`REACH_FOR_ARCHIVISTS`].
+    #[test]
+    fn a_round_of_reaching_opens_what_it_is_for_with_half_its_addresses_gone() {
+        let node = quiet();
+        archivists_out_of_reach(&node, 4, 200);
+        let doors: Vec<TcpListener> = (0..4).map(|_| a_door()).collect();
+        for door in &doors {
+            an_archivist_in_the_book(&node, door.local_addr().unwrap(), 100);
+        }
+        node.shared.running.store(true, Ordering::SeqCst);
+
+        let mut tried = HashSet::new();
+        let opened = node.reach_for_an_archivist(
+            &mut tried,
+            Instant::now().checked_add(Duration::from_secs(60)),
+        );
+        let reached = dialled(&node);
+        stop_all(&node);
+        assert_eq!(
+            (opened, reached),
+            (Some(REACH_FOR_ARCHIVISTS), REACH_FOR_ARCHIVISTS),
+            "a round with half its addresses out of reach did not open what it is for"
+        );
+    }
+
+    /// **A node connected to nobody reaches again past a round that opened
+    /// nothing.**
+    ///
+    /// The first round of a node with nobody to ask is the one it makes
+    /// before looking at the question, and what that round came to was not
+    /// read: a round of addresses out of reach left the archivist behind them
+    /// undialled for the rest of the question.
+    #[test]
+    fn a_node_connected_to_nobody_reaches_again_past_a_round_that_opened_nothing() {
+        let node = quiet();
+        let rounds = u8::try_from(DIALS_PER_REACH).unwrap();
+        archivists_out_of_reach(&node, rounds, 200);
+        let door = a_door();
+        an_archivist_in_the_book(&node, door.local_addr().unwrap(), 100);
+        node.shared.running.store(true, Ordering::SeqCst);
+
+        let looks = AtomicUsize::new(0);
+        let _ = node.recover_proofs_with(&[(7, Hash32::ZERO)], Duration::from_secs(60), || {
+            // Ended once the archivist is dialled, or after a few looks
+            // should it never be.
+            if dialled(&node) > 0 || looks.fetch_add(1, Ordering::SeqCst) >= 3 {
+                node.shared.asking().found.insert(
+                    7,
+                    ForestProof {
+                        siblings: Vec::new(),
+                    },
+                );
+            }
+        });
+        let reached = dialled(&node);
+        stop_all(&node);
+        assert_eq!(
+            reached, 1,
+            "the archivist behind a round of addresses out of reach was not dialled"
+        );
+    }
+
+    /// **A node connected to nobody, whose every address has failed, waits
+    /// out its patience for an archivist to arrive.**
+    ///
+    /// Nobody was asked, so nobody's answer ended it, and upkeep may yet
+    /// bring one: an answer that arrives at the first look is the one it was
+    /// waiting for. Ending the question once nobody was left to dial ended it
+    /// here before anybody could arrive.
+    #[test]
+    fn a_node_connected_to_nobody_waits_once_every_address_has_failed() {
+        let node = quiet();
+        archivists_out_of_reach(&node, 1, 200);
+        node.shared.running.store(true, Ordering::SeqCst);
+
+        let recovered =
+            node.recover_proofs_with(&[(7, Hash32::ZERO)], Duration::from_secs(60), || {
+                node.shared.asking().found.insert(
+                    7,
+                    ForestProof {
+                        siblings: Vec::new(),
+                    },
+                );
+            });
+        stop_all(&node);
+        assert!(
+            recovered.proofs.contains_key(&7),
+            "a node connected to nobody gave up once its addresses had failed: {recovered:?}"
+        );
+    }
+
+    /// A question dials nobody once its patience is spent.
+    ///
+    /// The reach came before the patience was counted and dialled without
+    /// looking at it, so four addresses that each waited out `DIAL_TIMEOUT`
+    /// held a wallet twelve seconds past a patience of three. Here no
+    /// patience is left at all, and an archivist in the book that would take
+    /// the connection at once is not dialled.
+    #[test]
+    fn a_question_dials_nobody_once_its_patience_is_spent() {
+        let node = quiet();
+        let door = a_door();
+        let archivist = door.local_addr().unwrap();
+        node.shared.book().insert(archivist);
+        node.shared.book().keeps_the_cold_set(&archivist, true);
+        node.shared.running.store(true, Ordering::SeqCst);
+
+        let recovered = node.recover_proofs_with(&[(7, Hash32::ZERO)], Duration::ZERO, || {});
+        let reached = dialled(&node);
+        stop_all(&node);
+        assert_eq!(
+            reached, 0,
+            "a question with no patience left dialled an archivist"
+        );
+        assert_eq!(recovered.asked, 0, "{recovered:?}");
+    }
+
+    /// A peer whose path folded is written down as having handed one over,
+    /// against the address it listens at, and one whose paths did not fold,
+    /// or that placed nothing, as having refused.
+    ///
+    /// Those marks are what a node reaching for archivists it met goes by: a
+    /// peer whose last answer folded first, past peers that are newer in its
+    /// book and only claimed, and one whose last answer folded nothing behind
+    /// an archivist not yet asked. The refusal was written nowhere, so a peer
+    /// that folded once was reached for first for the life of the process.
     #[test]
     fn a_peer_whose_path_folded_is_reached_for_before_peers_that_only_claimed() {
         let node = quiet();
         let (socket, _far) = a_socket();
         let honest: SocketAddr = "203.0.113.1:9000".parse().unwrap();
         let claimer: SocketAddr = "198.51.100.2:9000".parse().unwrap();
-        node.shared
-            .peers()
-            .insert(1, a_claimer(&socket, Some(honest)));
-        node.shared
-            .peers()
-            .insert(2, a_claimer(&socket, Some(claimer)));
-        for (address, heard) in [(honest, 100), (claimer, 200)] {
+        let empty: SocketAddr = "192.0.2.3:9000".parse().unwrap();
+        let unasked: SocketAddr = "203.0.113.4:9000".parse().unwrap();
+        for (id, address) in [(1, honest), (2, claimer), (3, empty)] {
+            node.shared
+                .peers()
+                .insert(id, a_claimer(&socket, Some(address)));
+        }
+        for (address, heard) in [(honest, 100), (claimer, 200), (empty, 300), (unasked, 400)] {
             let mut book = node.shared.book();
             book.insert(address);
             book.answered(&address, heard);
@@ -15151,7 +15460,7 @@ mod peers_and_loops {
         }
         *node.shared.asking() = Asking {
             wanted: BTreeMap::from([(7, Hash32::ZERO), (9, Hash32::ZERO)]),
-            asked: HashSet::from([1, 2]),
+            asked: HashSet::from([1, 2, 3]),
             ..Asking::default()
         };
 
@@ -15162,16 +15471,18 @@ mod peers_and_loops {
                     .map(|(position, _, proof)| (position, proof, false))
                     .collect()
             });
+        node.shared.take_placed(3, &nothing_placed());
         assert_eq!(
             node.shared.book().archivists(),
-            vec![claimer, honest],
-            "a peer none of whose paths folded was written down as handing one over"
+            vec![unasked, honest, empty, claimer],
+            "a peer none of whose paths folded, or that placed nothing, was not written down \
+             as refusing"
         );
         node.shared
             .take_placed_with(1, &an_answer_about_seven_and_nine(), only_seven_folds);
         assert_eq!(
             node.shared.book().archivists(),
-            vec![honest, claimer],
+            vec![honest, unasked, empty, claimer],
             "a peer whose path folded was not written down as handing one over"
         );
     }
@@ -15696,19 +16007,19 @@ mod peers_and_loops {
         );
     }
 
-    /// Only a connection this node dialled, that has introduced itself and is
-    /// not a feeler, is written down as an anchor.
+    /// Only a connection this node dialled, that has introduced itself, is
+    /// not a feeler and is not on its way out, is written down as an anchor.
     ///
     /// Anchors are what the next start dials first, so a dial that never said
     /// who it was, or a feeler about to be let go, put there is a stranger
     /// this node vouches for. Nothing asked which connections become anchors,
-    /// so either passed.
+    /// so either passed. A connection already let go of was counted too.
     #[test]
     fn only_a_greeted_dial_that_is_no_feeler_becomes_an_anchor() {
         let node = quiet();
         let (socket, _far) = a_socket();
-        let vacant = vacant_addresses(3);
-        let (kept, silent, felt) = (vacant[0], vacant[1], vacant[2]);
+        let vacant = vacant_addresses(4);
+        let (kept, silent, felt, leaving) = (vacant[0], vacant[1], vacant[2], vacant[3]);
         {
             let mut peers = node.shared.peers();
             peers.insert(
@@ -15735,10 +16046,19 @@ mod peers_and_loops {
                     ..stand_in(&socket, true)
                 },
             );
+            peers.insert(
+                4,
+                Peer {
+                    dialled_to: Some(leaving),
+                    greeted: true,
+                    leaving: true,
+                    ..stand_in(&socket, true)
+                },
+            );
         }
         {
             let mut book = node.shared.book();
-            for address in [kept, silent, felt] {
+            for address in [kept, silent, felt, leaving] {
                 book.insert(address);
             }
         }
@@ -15758,6 +16078,11 @@ mod peers_and_loops {
             book.heard_from(&felt),
             0,
             "a feeler was written down as an anchor"
+        );
+        assert_eq!(
+            book.heard_from(&leaving),
+            0,
+            "a connection already let go of was written down as an anchor"
         );
     }
 
@@ -15846,6 +16171,39 @@ mod peers_and_loops {
         assert_eq!(
             after_nobody, two,
             "a node holding nobody wrote over the anchors it had"
+        );
+    }
+
+    /// **A node that held three peers and is left holding one still names
+    /// all three in its anchors.**
+    ///
+    /// The anchors were whoever was held at the instant of one round, so a
+    /// node whose connections dropped and that had redialled one peer wrote
+    /// down that one, and a kill in that second left the next start one
+    /// anchor and the book's order for the rest.
+    #[test]
+    fn a_node_left_holding_one_of_three_peers_still_names_all_three() {
+        let (node, directory) = anchoring("left-holding-one");
+        let (socket, _far) = a_socket();
+        let held = vacant_addresses(3);
+        for (id, address) in (1..).zip(&held) {
+            held_at(&node, &socket, id, *address);
+        }
+        keep_anchors(&node.shared, false);
+        let three = anchors_on_disk(&directory);
+
+        node.shared.peers().retain(|id, _| *id == 3);
+        keep_anchors(&node.shared, false);
+        let after = anchors_on_disk(&directory);
+
+        drop(node);
+        let _ = std::fs::remove_dir_all(&directory);
+        let all: BTreeSet<SocketAddr> = held.iter().copied().collect();
+        assert_eq!(three, Some(all.clone()), "fixture: the three were written");
+        assert_eq!(
+            after,
+            Some(all),
+            "a node left holding one of its three peers wrote down only that one"
         );
     }
 
