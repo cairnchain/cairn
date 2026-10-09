@@ -1801,9 +1801,10 @@ fn held_to_its_word(
     }
 }
 
-/// Takes a block at `height`, behind which this node can stand behind `work`,
-/// as what `peer` holds, when it stands above the height the peer claimed.
-/// Says so, for the node to tell its chooser: see [`Reaction::outgrew`].
+/// Takes a block `peer` sent at `height`, `work` being as much of the work
+/// behind it as this node can vouch for, as what the peer holds, when it
+/// stands above the height the peer claimed. Says so, for the node to tell its
+/// chooser: see [`Reaction::outgrew`].
 ///
 /// Nothing, when the peer claimed a chain at least that long: its word stands
 /// and the choice will weigh it. Above it, the peer has said two things about

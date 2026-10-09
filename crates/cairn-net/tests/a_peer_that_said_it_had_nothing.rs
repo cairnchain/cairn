@@ -310,6 +310,79 @@ fn visitor_blocks() -> usize {
     usize::try_from(UNDO).unwrap() + 2
 }
 
+/// **And a block past what the node undoes is not taken from a peer the choice
+/// has not settled on even while no claim holds anybody off.**
+///
+/// The chooser holds every peer but the one it asks off while a claim long
+/// enough to be final stands, and that is a peer's word, so it lapses when the
+/// peer leaves. One visitor pushes as far as the node undoes and hangs up,
+/// which leaves nothing standing; a second one, saying it has nought blocks
+/// too, then pushes the next block. What stops it is the hold in the sync
+/// layer, which does not depend on anybody's claim.
+#[test]
+fn a_second_visitor_cannot_finish_what_the_first_one_left() {
+    let (honest_chain, visitor_chain) = the_two_chains();
+    let seed = Node::bind(params(), loopback()).unwrap();
+    for block in &honest_chain {
+        seed.submit_block(block.clone()).unwrap();
+    }
+    let honest_tip = seed.with_chain(ChainStore::tip).unwrap();
+    let newcomer = Node::bind(params(), loopback()).unwrap();
+    let work = seed.total_work().saturating_mul(1_000);
+
+    let first = visit(
+        newcomer.address(),
+        work,
+        &visitor_chain,
+        visitor_blocks() - 1,
+        &Arc::new(AtomicBool::new(false)),
+    );
+    assert!(
+        wait_until(PATIENCE, || newcomer
+            .height()
+            .is_some_and(|height| height >= UNDO)),
+        "fixture: the newcomer read the first visitor's chain as far as it undoes"
+    );
+    let _ = first.shutdown(Shutdown::Both);
+    thread::sleep(ROUND_AND_A_HALF);
+
+    let network = params().network;
+    let mut second = TcpStream::connect(newcomer.address()).unwrap();
+    let hello = Message::Hello(Handshake {
+        version: PROTOCOL_VERSION,
+        network,
+        genesis: Hash32::ZERO,
+        height: 0,
+        total_work: work,
+        listen: 0,
+        nonce: 0x0516_0001,
+        keeps: Keeps {
+            headers: true,
+            cold_set: false,
+        },
+    });
+    write_message(&mut second, network, &hello).unwrap();
+    let past = visitor_chain.last().unwrap().clone();
+    write_message(&mut second, network, &Message::Block(Box::new(past))).unwrap();
+    thread::sleep(Duration::from_millis(500));
+    let after_the_push = newcomer.height();
+
+    newcomer.connect(seed.address()).unwrap();
+    let took_the_honest_chain = wait_until(PATIENCE, || {
+        newcomer.with_chain(ChainStore::tip) == Some(honest_tip)
+    });
+    let height = newcomer.height();
+    let _ = second.shutdown(Shutdown::Both);
+    newcomer.shutdown();
+    seed.shutdown();
+    assert!(
+        took_the_honest_chain,
+        "a second visitor pushed the block past what the newcomer undoes onto the branch a \
+         first one left: the newcomer was at height {after_the_push:?} after it, and \
+         {PATIENCE:?} after its seed answered at height {height:?}, not on the honest chain"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The same visitor on the message layer, with nothing behind it.
 // ---------------------------------------------------------------------------
