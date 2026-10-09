@@ -166,6 +166,34 @@ fn filler(bytes: usize) -> Transfer {
     )
 }
 
+/// A block on `parent` carrying what it demands, encoding to exactly `bytes`:
+/// filler notes to within a note of it, and the coinbase's extra bytes for the
+/// rest.
+fn sized(params: &ConsensusParams, parent: &Block, timestamp: u64, bytes: usize) -> Block {
+    let mut block = paid(params, parent, timestamp, 0);
+    block.coinbase = CoinbaseTransaction::with_extra(block.header.height, Vec::new(), Vec::new());
+    let value = Amount::from_pebbles(1).unwrap();
+    let owner = wallet(9).public_key();
+    let per = Note::new(value, owner).encode().len();
+    block.transfers = vec![Transfer::new(
+        vec![Input::hot(NoteId::new(Hash32::from_bytes([7; 32]), 0))],
+        Vec::new(),
+    )];
+    let notes = (bytes - block.encode().len()) / per;
+    block.transfers[0].outputs = vec![Note::new(value, owner); notes];
+    let short = bytes - block.encode().len();
+    block.coinbase =
+        CoinbaseTransaction::with_extra(block.header.height, Vec::new(), vec![0; short]);
+    assert_eq!(
+        block.encode().len(),
+        bytes,
+        "the fixture is not the size it says"
+    );
+    block.header.transactions_root = block.transactions_root();
+    block.header = mine_header(block.header, ATTEMPTS).unwrap();
+    block
+}
+
 /// What the store holds off the branch it follows, in blocks and in bytes.
 ///
 /// `branch` is every block of the followed branch, which on a chain this
@@ -296,6 +324,27 @@ fn a_block_beside_the_branch_is_held_only_if_it_carries_what_its_parent_demands(
         );
         assert!(store.contains(&held.id()));
     }
+
+    // And at the limit to the byte, which is a block the rules allow, while a
+    // byte past it is not.
+    let limit = params.max_block_bytes;
+    let at_the_limit = sized(&params, &second, OPENS + 131, limit);
+    assert_eq!(
+        store.add_block(at_the_limit.clone(), CLOCK),
+        Ok(Accepted::SideBranch),
+        "a block of exactly the size the rules allow was not held"
+    );
+    assert!(store.contains(&at_the_limit.id()));
+    let past_it = sized(&params, &second, OPENS + 132, limit + 1);
+    assert!(
+        matches!(
+            store.add_block(past_it.clone(), CLOCK),
+            Err(ChainError::InvalidBlock { source: BlockError::BlockTooLarge { bytes, limit: refused }, .. })
+                if bytes == limit + 1 && refused == limit
+        ),
+        "a block one byte past the size the rules allow was not refused for it"
+    );
+    assert!(!store.contains(&past_it.id()));
 
     let wrong: [(&str, Edit, Verdict, bool); 9] = [
         (

@@ -89,15 +89,12 @@ impl SideBodyFiles {
     pub fn get(&self, id: &Hash32) -> Option<Block> {
         let file = std::fs::File::open(self.file(id)).ok()?;
         // A length on the disk is not necessarily a length this process
-        // wrote, so nothing is reserved for more than a record may hold.
+        // wrote, so nothing is read past what a record may hold. A longer
+        // file is cut there and does not decode, unless what comes before the
+        // cut is a whole block, which the chain then checks like any other.
         let limit = u64::try_from(MAX_RECORD_BYTES).unwrap_or(u64::MAX);
         let mut bytes = Vec::new();
-        file.take(limit.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.len() > MAX_RECORD_BYTES {
-            return None;
-        }
+        file.take(limit).read_to_end(&mut bytes).ok()?;
         Block::decode(&bytes).ok()
     }
 
@@ -181,6 +178,10 @@ mod tests {
         assert_eq!(files.get(&one.id()), Some(one.clone()));
         assert_eq!(files.get(&two.id()), Some(two.clone()));
         assert_eq!(files.len(), 2);
+        assert!(
+            !files.is_empty(),
+            "two bodies are written down and it says none are"
+        );
 
         files.remove(&one.id());
         assert_eq!(files.get(&one.id()), None, "a body let go of is gone");

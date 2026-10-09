@@ -211,10 +211,6 @@ impl SideBodies for Disk {
     fn remove(&mut self, id: &Hash32) {
         self.0.lock().unwrap().remove(id);
     }
-
-    fn clear(&mut self) {
-        self.0.lock().unwrap().clear();
-    }
 }
 
 fn wallet(seed: u8) -> SecretKey {

@@ -807,7 +807,7 @@ struct StoredBlock {
 /// A floor is also why one mutation of the line below lives. Turning `+` into
 /// `-` or `*`, or `/` into `*`, each changes the figure by enough that the
 /// count of what a node holds no longer matches what it was fed, and the
-/// suite says so. Turning `/` into `%` leaves 544 where there was 612, and no
+/// suite says so. Turning `/` into `%` leaves 560 where there was 630, and no
 /// honest property distinguishes them: both are floors on the same real cost,
 /// and pinning this one to the byte would make the test a restatement of the
 /// line it guards.
@@ -815,9 +815,10 @@ struct StoredBlock {
 /// That said "at most seven bytes in about a hundred and twenty", which is a
 /// true sentence about a remainder answering a question nobody asked. What
 /// moves is `entry / 8` against `entry % 8`, and on a 64-bit target the entry
-/// is 544 bytes, so the eighth is 68 and the remainder is nought. The figure
-/// it was weighed against was wrong too: this constant is 612, not a hundred
-/// and twenty. The conclusion survives its arithmetic, which is luck rather
+/// is 560 bytes, so the eighth is 70 and the remainder is nought. The figure
+/// it was weighed against was wrong too: this constant is 630, not a hundred
+/// and twenty. (The entry was 544 and this 612 until an entry came to say
+/// whether its body is spilled to disk.) The conclusion survives its arithmetic, which is luck rather
 /// than reasoning, and the reasoning is what a reader would have been
 /// checking. It was written from the types so it could not drift; the sentence
 /// beside it was not, and did.
@@ -1165,8 +1166,6 @@ pub trait SideBodies: std::fmt::Debug + Send + Sync {
     fn get(&self, id: &Hash32) -> Option<Block>;
     /// Lets go of whatever is kept under `id`.
     fn remove(&mut self, id: &Hash32);
-    /// Lets go of everything.
-    fn clear(&mut self);
 }
 
 /// Every block a node knows, the branch it currently follows, and the ledger
@@ -1350,16 +1349,17 @@ impl ChainStore {
     }
 
     /// Says where bodies held off the branch can go once memory has no more
-    /// room for them, and starts it empty: what a cache held before this
-    /// chain existed belongs to no entry here.
+    /// room for them.
     ///
-    /// Set once, before any block is held. Without it [`MAX_SIDE_BYTES`] is
+    /// Set once, before any block is held, and handed over empty: what a
+    /// cache held before this chain existed belongs to no entry here, which
+    /// is why the node empties the directory as it opens it. Without it
+    /// [`MAX_SIDE_BYTES`] is
     /// the whole of what this chain holds beside its branch, which caps the
     /// deepest switch it can assemble at that many bytes of rival blocks; with
     /// it the cap is [`Self::side_bytes_ceiling`], which is sized to hold the
     /// deepest switch the rules allow.
-    pub fn spills_side_bodies_to(&mut self, mut spill: Box<dyn SideBodies>) {
-        spill.clear();
+    pub fn spills_side_bodies_to(&mut self, spill: Box<dyn SideBodies>) {
         self.spill = Some(spill);
     }
 
@@ -2483,9 +2483,12 @@ impl ChainStore {
         // starts closed and opens as this node applies blocks of its own.
         self.undo_from = self.branch.len();
         self.applied.clear();
-        self.blocks.clear();
-        if let Some(spill) = self.spill.as_mut() {
-            spill.clear();
+        // Through `unspill`, as every entry that leaves the table goes, so a
+        // body held beside a chain this node is giving up leaves the disk with
+        // its entry. Once in a node's life, and over a table that holds at
+        // most the first block its network pins and what was offered beside it.
+        for (id, gone) in std::mem::take(&mut self.blocks) {
+            self.unspill(&id, &gone);
         }
         self.held_bytes = 0;
         // Except the block it was handed at, which is held with no body for
@@ -3337,11 +3340,14 @@ impl ChainStore {
         let Some(bodies) = self.bodies.clone() else {
             return;
         };
+        // A block leaving the branch is never spilled: applying a block takes
+        // its body back into memory, so only one with no body here at all is
+        // read back.
         let wanted: Vec<(Hash32, u64)> = leaving
             .iter()
             .filter_map(|id| {
                 let held = self.blocks.get(id)?;
-                (held.body.is_none() && !held.spilled).then_some((*id, held.header.height))
+                held.body.is_none().then_some((*id, held.header.height))
             })
             .collect();
         let mut in_memory = self.side_bytes_in_memory();
@@ -3358,9 +3364,6 @@ impl ChainStore {
             let Some(held) = self.blocks.get_mut(&id) else {
                 continue;
             };
-            if held.body.is_some() || held.spilled {
-                continue;
-            }
             if in_memory.saturating_add(held.bytes) > MAX_SIDE_BYTES {
                 if let Some(spill) = self.spill.as_mut() {
                     if spill.put(&id, &block) {
@@ -4045,34 +4048,7 @@ impl ChainStore {
                 .height()
                 .map(|tip| tip.saturating_sub(u64::try_from(MAX_REORG_DEPTH).unwrap_or(u64::MAX)))
             {
-                let branch = &self.branch;
-                let spill = &mut self.spill;
-                self.blocks.retain(|id, stored| {
-                    let kept = branch.height_of(id).is_some() || stored.header.height >= cutoff;
-                    // The disk's copy goes with the entry, for the reason
-                    // `unspill` gives.
-                    if !kept && stored.spilled {
-                        if let Some(spill) = spill.as_mut() {
-                            spill.remove(id);
-                        }
-                    }
-                    kept
-                });
-                // `self.invalid` was swept here too, keeping the identifiers
-                // the branch does not name. It could not remove anything: an
-                // identifier reaches that set from `follow`, when applying
-                // a candidate branch failed and the branch was rolled back, so
-                // it was never on `self.branch`; and `add_block` refuses
-                // anything already in it, so it never gets on afterwards. The
-                // predicate was true of every entry, on every call.
-                //
-                // Removed rather than corrected because what it looked like
-                // was a second bound on a set an anonymous peer fills one
-                // entry at a time, and the real bound is `MAX_INVALID`, which
-                // empties the set wholesale. A line that appears to bound
-                // something and does not is worse than no line, because the
-                // next reader counts it.
-                self.recount();
+                self.forget_below(cutoff);
             }
         }
 
@@ -4098,6 +4074,40 @@ impl ChainStore {
         // halves of that walk read the identifier off the map instead of
         // hashing a header for it.
         self.forget_lightest_side_blocks();
+    }
+
+    /// Drops every block off the followed branch below `cutoff`, and the
+    /// disk's copy of any that had gone there, for
+    /// [`Self::forget_unreachable_branches`].
+    fn forget_below(&mut self, cutoff: u64) {
+        let branch = &self.branch;
+        let spill = &mut self.spill;
+        self.blocks.retain(|id, stored| {
+            let kept = branch.height_of(id).is_some() || stored.header.height >= cutoff;
+            // The disk's copy goes with the entry, for the reason
+            // `unspill` gives.
+            if !kept && stored.spilled {
+                if let Some(spill) = spill.as_mut() {
+                    spill.remove(id);
+                }
+            }
+            kept
+        });
+        // `self.invalid` was swept here too, keeping the identifiers
+        // the branch does not name. It could not remove anything: an
+        // identifier reaches that set from `follow`, when applying
+        // a candidate branch failed and the branch was rolled back, so
+        // it was never on `self.branch`; and `add_block` refuses
+        // anything already in it, so it never gets on afterwards. The
+        // predicate was true of every entry, on every call.
+        //
+        // Removed rather than corrected because what it looked like
+        // was a second bound on a set an anonymous peer fills one
+        // entry at a time, and the real bound is `MAX_INVALID`, which
+        // empties the set wholesale. A line that appears to bound
+        // something and does not is worse than no line, because the
+        // next reader counts it.
+        self.recount();
     }
 
     fn apply(&mut self, id: Hash32, now: u64) -> Result<(), ChainError> {
@@ -5085,6 +5095,253 @@ mod tests {
         assert!(
             reaching.iter().all(|id| store.contains(id)),
             "a block that reaches the branch went while one cut off from it was held"
+        );
+    }
+
+    /// Somewhere to spill, standing in memory for a node's disk, shared with
+    /// the test so it can look at what is there.
+    #[derive(Clone, Debug, Default)]
+    struct Disk(Arc<std::sync::Mutex<HashMap<Hash32, Block>>>);
+
+    impl Disk {
+        fn ids(&self) -> BTreeSet<Hash32> {
+            self.0.lock().unwrap().keys().copied().collect()
+        }
+    }
+
+    impl SideBodies for Disk {
+        fn put(&mut self, id: &Hash32, block: &Block) -> bool {
+            self.0.lock().unwrap().insert(*id, block.clone());
+            true
+        }
+
+        fn get(&self, id: &Hash32) -> Option<Block> {
+            self.0.lock().unwrap().get(id).cloned()
+        }
+
+        fn remove(&mut self, id: &Hash32) {
+            self.0.lock().unwrap().remove(id);
+        }
+    }
+
+    /// A store that spills to `disk`, standing on an anchor of its own.
+    fn spilling(disk: &Disk) -> (ChainStore, Hash32) {
+        let mut store = ChainStore::new(params());
+        store.spills_side_bodies_to(Box::new(disk.clone()));
+        let anchor = shelve(&mut store, 0, 0, 0);
+        store.branch.push(anchor);
+        (store, anchor)
+    }
+
+    /// The entries held off the branch whose bodies are spilled.
+    fn spilled(store: &ChainStore) -> BTreeSet<Hash32> {
+        store
+            .blocks
+            .iter()
+            .filter(|(_, stored)| stored.spilled)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Moves the body held for `id` to `disk` by hand, as the sweep would.
+    fn spill_by_hand(store: &mut ChainStore, disk: &Disk, id: Hash32, kept: Block) {
+        let stored = store.blocks.get_mut(&id).unwrap();
+        store.held_bytes -= stored.bytes;
+        stored.body = None;
+        stored.spilled = true;
+        disk.0.lock().unwrap().insert(id, kept);
+    }
+
+    /// A body read back from beside the branch is the one its header names,
+    /// or nothing: the identifier is taken over the header alone, so a copy
+    /// with another body under it passes that check, and the root is what
+    /// tells it apart.
+    #[test]
+    fn a_body_spilled_beside_the_branch_is_read_back_only_if_it_is_the_one_its_header_names() {
+        let disk = Disk::default();
+        let (mut store, anchor) = spilling(&disk);
+        let mut real = block_at(1, anchor, 1);
+        real.header.transactions_root = real.transactions_root();
+        let id = real.id();
+        let at = shelve_on(&mut store, anchor, 1, 1, 1_000, 2);
+        store.blocks.get_mut(&at).unwrap().header = real.header;
+        let stored = store.blocks.remove(&at).unwrap();
+        store.blocks.insert(id, stored);
+
+        let mut twin = real.clone();
+        twin.coinbase = CoinbaseTransaction::with_extra(1, Vec::new(), vec![0xee]);
+        assert_eq!(
+            twin.id(),
+            id,
+            "a twin shares the identifier, which is the point"
+        );
+        spill_by_hand(&mut store, &disk, id, twin);
+        assert_eq!(
+            store.body_of(&id),
+            None,
+            "a twin's body was read back as the block"
+        );
+
+        let mut other = block_at(1, anchor, 2);
+        other.header.transactions_root = other.transactions_root();
+        disk.0.lock().unwrap().insert(id, other);
+        assert_eq!(
+            store.body_of(&id),
+            None,
+            "another block was read back as this one"
+        );
+
+        disk.0.lock().unwrap().insert(id, real.clone());
+        assert_eq!(store.body_of(&id), Some(real));
+    }
+
+    /// A body spilled beside the branch leaves the disk with its entry,
+    /// whichever way the entry goes: the sweep past the side store's budget
+    /// lets the lightest go, and their files have to go with them, or the
+    /// disk fills with bodies nothing will read or remove.
+    #[test]
+    fn a_spilled_body_leaves_the_disk_with_its_entry() {
+        const CHUNK: usize = 4 * 1024 * 1024;
+        let disk = Disk::default();
+        let (mut store, anchor) = spilling(&disk);
+        for n in 0..50u64 {
+            shelve_on(&mut store, anchor, 1, n + 1, CHUNK, u128::from(n) + 1);
+        }
+        assert!(store.side_bytes() > ChainStore::side_bytes_ceiling(&params()));
+
+        store.forget_lightest_side_blocks();
+
+        assert!(store.side_bytes_in_memory() <= MAX_SIDE_BYTES - MAX_SIDE_BYTES / 8);
+        assert!(store.side_bytes() <= ChainStore::side_bytes_ceiling(&params()));
+        assert!(store.side_blocks() < 50, "nothing was let go of");
+        assert!(!spilled(&store).is_empty(), "nothing was spilled");
+        assert_eq!(
+            disk.ids(),
+            spilled(&store),
+            "what is on the disk is not what the store says is spilled"
+        );
+    }
+
+    /// The sweep by depth takes the disk's copy of what it drops, and leaves
+    /// the copy of what it keeps.
+    #[test]
+    fn the_sweep_by_depth_takes_the_disk_copy_of_what_it_drops_and_no_more() {
+        let disk = Disk::default();
+        let (mut store, anchor) = spilling(&disk);
+        let deep = shelve_on(&mut store, anchor, 1, 1, 1_000, 2);
+        let recent = shelve_on(&mut store, anchor, 9, 2, 1_000, 10);
+        for id in [deep, recent] {
+            let body = store.blocks[&id].body.clone().unwrap();
+            spill_by_hand(&mut store, &disk, id, body);
+        }
+
+        store.forget_below(5);
+
+        assert!(!store.contains(&deep) && store.contains(&recent));
+        assert!(store.contains(&anchor), "the branch was swept");
+        assert_eq!(
+            disk.ids(),
+            BTreeSet::from([recent]),
+            "the disk holds the copy of a block dropped, or lost the copy of one kept"
+        );
+    }
+
+    /// Memory beside the branch is spilled past its bound and not at it, and
+    /// asks nothing of what the sweep drops while it is within it.
+    ///
+    /// The store here is past its count and nothing else: the eight large
+    /// blocks are as heavy as anything held and come to exactly
+    /// `MAX_SIDE_BYTES`, then to a little less, and the rest weigh nothing in
+    /// bytes. What goes is the count's excess, lightest first, and nothing
+    /// is spilled.
+    #[test]
+    fn memory_beside_the_branch_is_spilled_past_its_bound_and_not_at_it() {
+        const CHUNK: usize = 4 * 1024 * 1024;
+        for last in [CHUNK, CHUNK / 2] {
+            let disk = Disk::default();
+            let (mut store, anchor) = spilling(&disk);
+            let large: Vec<Hash32> = (0..8u64)
+                .map(|n| {
+                    let bytes = if n == 7 { last } else { CHUNK };
+                    shelve_on(&mut store, anchor, 1, 1_000_000 + n, bytes, 100)
+                })
+                .collect();
+            for n in 0..(MAX_SIDE_BLOCKS as u64 - 7) {
+                shelve_on(&mut store, anchor, 1, n, 0, 1);
+            }
+            assert!(store.side_bytes_in_memory() <= MAX_SIDE_BYTES);
+
+            store.forget_lightest_side_blocks();
+
+            assert_eq!(
+                store.side_blocks(),
+                MAX_SIDE_BLOCKS - MAX_SIDE_BLOCKS / 8,
+                "with the large blocks coming to {} bytes",
+                CHUNK * 7 + last
+            );
+            assert!(
+                large.iter().all(|id| store.block(id).is_some()),
+                "with the large blocks coming to {} bytes, one of them was let go of or \
+                 spilled for memory, which was within its bound",
+                CHUNK * 7 + last
+            );
+            assert!(disk.ids().is_empty());
+        }
+    }
+
+    /// A branch a switch leaves is taken back into memory up to the bound,
+    /// to the byte, and spilled past it.
+    #[test]
+    fn a_branch_a_switch_leaves_is_spilled_once_memory_beside_the_branch_is_full() {
+        const LEAVING: usize = 1_000_000;
+        let disk = Disk::default();
+        let (mut store, anchor) = spilling(&disk);
+        shelve_on(&mut store, anchor, 1, 1, MAX_SIDE_BYTES - LEAVING, 2);
+        let first = shelve_on(&mut store, anchor, 5, 5, LEAVING, 6);
+        let second = shelve_on(&mut store, first, 6, 6, LEAVING, 7);
+        let mut shelf = HashMap::new();
+        for id in [first, second] {
+            let stored = store.blocks.get_mut(&id).unwrap();
+            shelf.insert(stored.header.height, stored.body.take().unwrap());
+        }
+        store.recount();
+        store.reads_bodies_from(Arc::new(Shelf(shelf)));
+
+        store.take_back_the_bodies_leaving(&[first, second]);
+
+        assert!(
+            store.block(&first).is_some(),
+            "the first block filled memory to its bound exactly and went to disk"
+        );
+        assert!(
+            store.block(&second).is_none() && store.held_header(&second).is_some(),
+            "the second block took memory past its bound and was not spilled"
+        );
+        assert_eq!(disk.ids(), BTreeSet::from([second]));
+        assert_eq!(store.side_bytes_in_memory(), MAX_SIDE_BYTES);
+    }
+
+    /// The side store's budget is the deepest switch's rival at the largest
+    /// block, and the room memory had beside it, with an eighth on top so a
+    /// sweep leaves both, and no more.
+    ///
+    /// Written out rather than read off the function, so a function read
+    /// wrongly is not also the answer expected of it: a thousand and twenty
+    /// five blocks of 131 072 bytes and what each costs to hold, and
+    /// 33 554 432 beside them. Held as a property and not to the byte, since
+    /// what an entry costs follows the layout of a type.
+    #[test]
+    fn the_side_store_budget_holds_the_deepest_switch_and_the_room_beside_it_and_no_more() {
+        let wanted = 1_025 * (131_072 + HELD_OVERHEAD) + 33_554_432;
+        let ceiling = ChainStore::side_bytes_ceiling(&params());
+        let swept = |bound: usize| bound - bound / 8;
+        assert!(
+            swept(ceiling) >= wanted,
+            "a sweep leaves less than the rival and its room"
+        );
+        assert!(
+            swept(ceiling - 8) < wanted,
+            "the budget is larger than holding the rival and its room after a sweep needs"
         );
     }
 

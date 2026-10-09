@@ -90,10 +90,6 @@ impl SideBodies for Disk {
     fn remove(&mut self, id: &Hash32) {
         self.0.lock().unwrap().remove(id);
     }
-
-    fn clear(&mut self) {
-        self.0.lock().unwrap().clear();
-    }
 }
 
 /// An honest block on `state`, dated `timestamp`, and the ledger after it.

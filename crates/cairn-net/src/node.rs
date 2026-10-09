@@ -7121,10 +7121,6 @@ impl SideBodies for SpillToDisk {
     fn remove(&mut self, id: &Hash32) {
         self.0.remove(id);
     }
-
-    fn clear(&mut self) {
-        self.0.clear();
-    }
 }
 
 /// Where headers being filled in are kept until they check out.
@@ -13168,12 +13164,34 @@ mod peers_and_loops {
             "blocks let go of for want of room went uncounted"
         );
 
-        let mut met = LetGo::default();
-        count_let_go(&mut met, 1_000);
-        count_let_go(&mut met, 1_000 + UNREACHABLE_MEMORY + 1);
+        // Within the hour, to the second, the count goes on; a second past
+        // it, or behind the last one on a clock stepped back, it starts again.
+        let counted = |seconds: &[u64]| {
+            let mut met = LetGo::default();
+            for at in seconds {
+                count_let_go(&mut met, *at);
+            }
+            met.blocks
+        };
         assert_eq!(
-            met.blocks, 1,
-            "a count whose last block was an hour old was carried on"
+            counted(&[1_000, 1_001]),
+            2,
+            "two a second apart were not counted together"
+        );
+        assert_eq!(
+            counted(&[1_000, 1_000 + UNREACHABLE_MEMORY]),
+            2,
+            "a block an hour to the second after the last started the count again"
+        );
+        assert_eq!(
+            counted(&[1_000, 1_000 + UNREACHABLE_MEMORY + 1]),
+            1,
+            "a count whose last block was more than an hour old was carried on"
+        );
+        assert_eq!(
+            counted(&[1_000, 999]),
+            1,
+            "a clock stepped back behind the last block carried the count on"
         );
     }
 

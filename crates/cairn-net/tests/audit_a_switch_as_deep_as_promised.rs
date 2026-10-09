@@ -292,6 +292,11 @@ fn a_heavier_branch_past_what_memory_holds_is_put_together_and_followed() {
         0,
         "the rival is followed now, and something of it is still spilled beside the branch"
     );
+    assert_eq!(
+        files_in(&directory.join(SIDE_BODIES)),
+        0,
+        "the rival's bodies went back into memory and their files stayed on the disk"
+    );
     node.shutdown();
     drop(node);
     let _ = std::fs::remove_dir_all(&directory);
