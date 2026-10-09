@@ -666,18 +666,46 @@ fn reachable(address: std::net::SocketAddr) -> std::net::SocketAddr {
 /// block nought while every peer was ahead passed.
 #[test]
 fn a_wallet_waits_while_a_peer_says_its_chain_has_more_work() {
+    let (wallet, funded) = funded("claims-more", 2, params());
+    // Introduces itself with far more work than there is, and sends nothing.
+    let socket = claiming(&wallet, funded.params.network, 1_000, u128::from(u64::MAX));
+
+    let waited = wallet.catch_up(Duration::from_secs(4));
+    drop(socket);
+    wallet.shutdown();
+    drop(wallet);
+    let _ = std::fs::remove_dir_all(&funded.directory);
+
+    assert_eq!(
+        waited,
+        Waited::Behind {
+            ours: Some(1),
+            theirs: 1_000,
+            out_of_reach: 0,
+        },
+        "the wallet stopped waiting while a peer said its chain had more work, or did not \
+         say so when it did stop"
+    );
+}
+
+/// A peer that introduces itself to `wallet` saying its chain is at `height`
+/// with `total_work` behind it, and then sends nothing.
+fn claiming(
+    wallet: &Wallet,
+    network: cairn_ledger::note::NetworkId,
+    height: u64,
+    total_work: u128,
+) -> std::net::TcpStream {
     use cairn_net::message::{Handshake, Message, PROTOCOL_VERSION};
     use cairn_net::wire::write_message;
 
-    let (wallet, funded) = funded("claims-more", 2, params());
-    // Introduces itself with far more work than there is, and sends nothing.
     let socket = std::net::TcpStream::connect(reachable(wallet.node().address())).unwrap();
     let claim = Message::Hello(Handshake {
         version: PROTOCOL_VERSION,
-        network: funded.params.network,
+        network,
         genesis: Hash32::ZERO,
-        height: 1_000,
-        total_work: u128::from(u64::MAX),
+        height,
+        total_work,
         listen: 0,
         nonce: 77,
         keeps: cairn_net::Keeps {
@@ -685,7 +713,7 @@ fn a_wallet_waits_while_a_peer_says_its_chain_has_more_work() {
             cold_set: false,
         },
     });
-    write_message(&mut &socket, funded.params.network, &claim).unwrap();
+    write_message(&mut &socket, network, &claim).unwrap();
     // Read what the node sends and answer nothing, so a full buffer never
     // ends the connection this is about.
     let mut reading = socket.try_clone().unwrap();
@@ -701,22 +729,68 @@ fn a_wallet_waits_while_a_peer_says_its_chain_has_more_work() {
         until(Duration::from_secs(20), || wallet.progress().peers > 0),
         "fixture: the peer introduced itself"
     );
+    socket
+}
 
-    let waited = wallet.catch_up(Duration::from_secs(4));
-    drop(socket);
-    wallet.shutdown();
-    drop(wallet);
-    let _ = std::fs::remove_dir_all(&funded.directory);
+/// A wallet weighs a peer's claim as its node would, so a peer at this
+/// wallet's own height with less than half a block's extra work leaves the
+/// wait settled, and one with more leaves it behind.
+///
+/// AUDIT, repaired (8 October, 04-F8). Two tips of one height are a tie
+/// within half a block, and a node keeping the lighter will not take the
+/// other, so a wallet that read the work alone waited out its patience for a
+/// chain that was never coming and then said it was behind. The wallet asks
+/// its node now, and nothing here failed if it went back to the work alone:
+/// the only claim the wallet's tests made was far outside the band.
+#[test]
+fn a_claim_at_this_wallets_height_inside_the_tie_band_leaves_the_wait_settled() {
+    for (surplus_over_band, expected) in [(false, "settled"), (true, "behind")] {
+        let name = format!("tie-band-{expected}");
+        // A first block hard enough that half of one is a band to sit in.
+        let rules = ConsensusParams {
+            genesis_difficulty: 1 << 12,
+            ..params()
+        };
+        let (wallet, funded) = funded(&name, 2, rules);
+        let height = wallet.progress().height.unwrap();
+        let (work, band) = wallet.node().with_chain(|chain| {
+            let tip = chain.state().recent_headers().last().unwrap().difficulty;
+            (chain.total_work(), cairn_ledger::pow::work_of(tip) / 2)
+        });
+        assert!(band > 1, "fixture: the tip's half block is no band at all");
+        let claimed = if surplus_over_band {
+            work + band + 1
+        } else {
+            work + band / 2
+        };
+        let socket = claiming(&wallet, funded.params.network, height, claimed);
 
-    assert_eq!(
-        waited,
-        Waited::Behind {
-            ours: Some(1),
-            theirs: 1_000
-        },
-        "the wallet stopped waiting while a peer said its chain had more work, or did not \
-         say so when it did stop"
-    );
+        let waited = wallet.catch_up(Duration::from_secs(4));
+        drop(socket);
+        wallet.shutdown();
+        drop(wallet);
+        let _ = std::fs::remove_dir_all(&funded.directory);
+
+        if surplus_over_band {
+            assert_eq!(
+                waited,
+                Waited::Behind {
+                    ours: Some(height),
+                    theirs: height,
+                    out_of_reach: 0,
+                },
+                "a peer at this wallet's height more than half a block heavier did not leave \
+                 the wait behind"
+            );
+        } else {
+            assert_eq!(
+                waited,
+                Waited::Settled,
+                "a peer at this wallet's height within half a block of its work, a tie its \
+                 node keeps, left the wallet waiting for a chain it will never take"
+            );
+        }
+    }
 }
 
 /// A payment named as not carried that a block carries after all, from a

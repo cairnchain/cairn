@@ -354,6 +354,9 @@ struct Draft {
     /// What a note of it falling out of the hot set before a block carries
     /// it can add to the floor.
     margin: Amount,
+    /// How many places notes of it falling can add, which `margin` prices.
+    /// Each adds `NOTE_WEIGHT` to what the pool weighs it at as well.
+    may_fall: usize,
 }
 
 /// What this key holds.
@@ -961,15 +964,35 @@ fn on_a_branch_left_behind(blocks: u64) -> String {
     format!(
         "{blocks} blocks arrived, from at least two machines within the last hour, from a \
          chain this wallet cannot switch to: it parts from the chain this wallet follows \
-         further back than its node will undo. If they keep coming while the rest of the \
+         further back than its node can reach, which is below the ledger its node was \
+         handed or deeper than it will undo. If they keep coming while the rest of the \
          network is not heard from, this wallet is on a branch the network has left, and \
          the balance beside this may count payments only that branch carried, which no \
          node on the network's chain holds. Two machines can still be one party, so this \
          is a reason to check before relying on money received lately rather than a \
-         verdict. The way onto the network's chain is to close this wallet, delete \
-         everything in its data directory except history.dat, which is its own account of \
-         this key, and start it again. The key file is a separate file and is not touched \
-         by that."
+         verdict. The way onto the network's chain is to {}",
+        starting_again(""),
+    )
+}
+
+/// How a wallet that cannot reach the network's chain from where it stands
+/// starts again from nothing, `from` saying where from: what to delete, and
+/// the two files it must keep.
+///
+/// Every line that tells a person to empty the data directory says it with
+/// this, because the second of them was written from the first and kept what
+/// the first left out. Both named history.dat as the one file to keep, and
+/// pending.dat sits beside it: the only record of the payments this wallet
+/// handed over that no block has carried. Without it the balance counts their
+/// notes as spendable again, and a payment sent a second time can reach for
+/// other notes, so a block carrying both pays its recipient twice.
+fn starting_again(from: &str) -> String {
+    format!(
+        "close this wallet, delete everything in its data directory except history.dat, \
+         which is its own account of this key and the only record of where its fallen notes \
+         sit, and pending.dat if it is there, which is its record of the payments it has \
+         handed over that no block has carried yet, and start it again{from}. The key file \
+         is a separate file and is not touched by that."
     )
 }
 
@@ -1111,11 +1134,15 @@ impl Progress {
     /// wallet has stopped following the chain and will not start again. Then
     /// the one that means the number is not this wallet's own reading at all,
     /// and then the two that mean it is this wallet's reading of a chain the
-    /// network has left, a slow clock first because it is mended now and a
-    /// branch out of reach second. Then the ones that mean the chain the number is
-    /// counted from is sound and something else is at risk, the disk first
-    /// because it can leave what is held back as stranded behind the chain,
-    /// and last the three about this wallet's own account. Those can mean
+    /// network has left: a branch out of reach first, because it is the one
+    /// about the money, and a slow clock second, because a stranger can raise
+    /// the clock's line for the work of one block and above the branch's it
+    /// would hide it. Then a network not yet open by this machine's clock,
+    /// below the clock because blocks refused for their dates say the network
+    /// has opened. Then the ones that mean the chain the number is counted
+    /// from is sound and something else is at risk, the disk first because it
+    /// can leave what is held back as stranded behind the chain, and last the
+    /// three about this wallet's own account. Those can mean
     /// money missing from the number, which by that ranking would put them
     /// higher. They stay last because each can sit there a long time, the
     /// lost account's for the whole run and one set aside before for as long
@@ -1142,12 +1169,12 @@ impl Progress {
                 "This wallet was handed the ledger at block {}, and had to check its own way to \
                  block {} before it could stand behind it. The blocks in between never arrived, \
                  and it holds nothing below block {}, so there is no other way to reach them. \
-                 The balance shown is not one this wallet has checked. Close this wallet, delete \
-                 everything in its data directory except history.dat, which is its own account \
-                 of this key and the only record of where its fallen notes sit, and start it \
-                 again from a peer you trust. The key file is a separate file and is not \
-                 touched by that.",
-                stranded.anchor, stranded.settles_at, stranded.anchor
+                 The balance shown is not one this wallet has checked. The way to one it has \
+                 checked is to {}",
+                stranded.anchor,
+                stranded.settles_at,
+                stranded.anchor,
+                starting_again(" from a peer you trust"),
             ));
         }
         if let Some(probation) = self.probation {
@@ -1162,20 +1189,23 @@ impl Progress {
                 probation.owed()
             ));
         }
-        // Above the lines that say the balance is right, because under a slow
-        // clock it is not: it is this wallet's own reading of a chain the
-        // network has left. `cairnd` prints every line it has and puts this
-        // one below the disk; here only one is shown, and the disk's line
-        // would tell the person the balance is right for the chain as it
-        // stands.
-        if let Some(behind) = &self.clock_behind {
-            return Some(clock_is_slow(behind));
-        }
-        // Beside the clock and for the same reason: the balance is this
-        // wallet's own reading of a chain the network may have left, and every
-        // line below this one would let it stand as the money.
+        // Above the lines that say the balance is right, because it may not
+        // be: it is this wallet's own reading of a chain the network may have
+        // left, and every line below this one would let it stand as the
+        // money. Above the clock too, though the clock is mended now: one
+        // block dated far ahead, sent eight times from two addresses, raises
+        // the clock's line, so ranked first it was a line a stranger could
+        // buy to hide this one.
         if self.out_of_reach > 0 {
             return Some(on_a_branch_left_behind(self.out_of_reach));
+        }
+        // Beside the branch and for the same reason: under a slow clock the
+        // balance is this wallet's own reading of a chain the network has
+        // left. `cairnd` prints every line it has and puts this one below the
+        // disk; here only one is shown, and the disk's line would tell the
+        // person the balance is right for the chain as it stands.
+        if let Some(behind) = &self.clock_behind {
+            return Some(clock_is_slow(behind));
         }
         // Below the clock: blocks refused from peers say the network has
         // opened and this machine is behind it, which is the line to act on.
@@ -1843,6 +1873,7 @@ impl Wallet {
             floor: cairn_chain::fee_floor(bytes, places, &self.params),
             burn: self.params.burn_for(places).unwrap_or(Amount::MAX_MONEY),
             margin: margin_of(freed, transfer.outputs.len(), &self.params),
+            may_fall: may_fall(freed, transfer.outputs.len()),
             weight,
             bytes,
             spending,
@@ -2025,6 +2056,7 @@ impl Wallet {
             peers: self.node.peers_introduced(),
             joining: self.node.joining(),
             claim: self.node.claim_ahead(),
+            out_of_reach: self.node.out_of_reach(),
         }
     }
 
@@ -3625,7 +3657,16 @@ pub enum Waited {
     /// chain had. `ours` is where this wallet's chain stands and `theirs` is
     /// the height that peer gave. A number in a handshake, so a reason to
     /// say so rather than a verdict.
-    Behind { ours: Option<u64>, theirs: u64 },
+    ///
+    /// `out_of_reach` is `Node::out_of_reach` as the wait ended. A claim
+    /// weighs by work alone, so a node offered a chain it cannot switch to
+    /// still hears it as one ahead, and the line for this said a longer wait
+    /// reads the rest, where no wait does.
+    Behind {
+        ours: Option<u64>,
+        theirs: u64,
+        out_of_reach: u64,
+    },
     /// The wait ran out with nobody to ask.
     Alone,
 }
@@ -3639,6 +3680,9 @@ struct Look {
     /// The heaviest claim a peer made that this wallet's node would follow,
     /// if any: see `Node::claim_ahead`.
     claim: Option<(u64, u128)>,
+    /// Blocks offered from a chain this wallet's node cannot switch to:
+    /// `Node::out_of_reach`.
+    out_of_reach: u64,
 }
 
 impl Look {
@@ -3684,6 +3728,7 @@ fn ran_out(look: &Look, still: Duration, moved: bool) -> Waited {
         Some(theirs) => Waited::Behind {
             ours: look.height,
             theirs,
+            out_of_reach: look.out_of_reach,
         },
         None => Waited::Settled,
     }
@@ -3860,8 +3905,14 @@ fn take_until(sorted: &[Held], needed: Amount, most: usize) -> Option<(Vec<Held>
 /// block may carry, not only one a pool lets go of.
 fn margin_of(freed: usize, outputs: usize, rules: &ConsensusParams) -> Amount {
     rules
-        .burn_for(freed.min(outputs))
+        .burn_for(may_fall(freed, outputs))
         .unwrap_or(Amount::MAX_MONEY)
+}
+
+/// How many places notes of a spend falling out of the hot set can add: one
+/// for each hot note it frees, and never more than its outputs take.
+fn may_fall(freed: usize, outputs: usize) -> usize {
+    freed.min(outputs)
 }
 
 /// The `cheapest` rate a pool of `count` transfers taking `bytes` holds, when
@@ -3886,14 +3937,28 @@ fn crowded(count: usize, bytes: usize, cost: usize, cheapest: Option<u128>) -> O
 /// about three pebbles a unit against ten for filler that takes no place, and
 /// blocks kept full of that filler never carried it. A pool only has to hold
 /// more than a block for that, not be full, and nothing about this wallet's
-/// own pool says when it does. A payment and its change with a hot note among
-/// its notes carries a place's price in margin, more than the one place it
-/// can take weighs at the floor rate, so its quote does not move.
+/// own pool says when it does.
+///
+/// Both rates are asked at what the spend weighs and burns once every note
+/// of it that can fall has fallen, since that is what a pool ranks it at from
+/// then on. A note that falls adds a place, and the place adds its burn,
+/// which the margin pays, and `NOTE_WEIGHT` to the weight, which nothing paid
+/// while the rate was asked at the weight it had hot: a payment and its
+/// change quoted that way, whose note fell before a block carried it, ranked
+/// at about a fifth of the floor rate, below the filler the floor rate is
+/// there to outrank.
 fn asking(draft: &Draft, crowded: Option<u128>) -> Amount {
     let quoted = draft.floor.checked_add(draft.margin).unwrap_or(draft.floor);
     let rate = crowded.unwrap_or(0).max(cairn_chain::FLOOR_RATE);
-    let outrank = cairn_chain::fee_to_outrank(rate, draft.weight);
-    quoted.max(draft.burn.checked_add(outrank).unwrap_or(Amount::MAX_MONEY))
+    let weight = draft
+        .weight
+        .saturating_add(draft.may_fall.saturating_mul(cairn_chain::NOTE_WEIGHT));
+    let burn = draft
+        .burn
+        .checked_add(draft.margin)
+        .unwrap_or(Amount::MAX_MONEY);
+    let outrank = cairn_chain::fee_to_outrank(rate, weight);
+    quoted.max(burn.checked_add(outrank).unwrap_or(Amount::MAX_MONEY))
 }
 
 /// The most a spend pays to be carried before the wallet stops and asks.
@@ -4663,20 +4728,35 @@ mod tests {
             burn,
             weight: 150 + cairn_chain::NOTE_WEIGHT,
             margin: place,
+            may_fall: 1,
         };
+        assert!(
+            asking(&draft, None) >= draft.floor.checked_add(place).unwrap(),
+            "the quote is less than the floor and its margin"
+        );
+        // What a pool ranks it at once its note has fallen: a place more, at
+        // the place's burn and its weight.
+        let fallen_burn = burn.checked_add(place).unwrap();
+        let fallen_weight = draft.weight + cairn_chain::NOTE_WEIGHT;
         assert_eq!(
             asking(&draft, None),
-            draft.floor.checked_add(place).unwrap(),
-            "the quote is not the floor and its margin"
+            fallen_burn
+                .checked_add(cairn_chain::fee_to_outrank(
+                    cairn_chain::FLOOR_RATE,
+                    fallen_weight
+                ))
+                .unwrap(),
+            "the quote does not outrank filler at the floor once its note has fallen"
         );
         // A full pool whose cheapest pays far more per unit than this would.
         let dear = u128::from(u64::MAX >> 20);
         assert_eq!(
             asking(&draft, Some(dear)),
-            burn.checked_add(cairn_chain::fee_to_outrank(dear, draft.weight))
+            fallen_burn
+                .checked_add(cairn_chain::fee_to_outrank(dear, fallen_weight))
                 .unwrap(),
             "a quote into a full pool does not outrank the cheapest it holds, \
-             once the burn no miner keeps is paid"
+             once the burn no miner keeps is paid and its note has fallen"
         );
         assert_eq!(
             asking(&draft, Some(0)),
@@ -4714,7 +4794,8 @@ mod tests {
 
     /// The quote for a blank fee leaves a miner more for each unit of weight
     /// than filler taking no place at the floor does, for a payment from
-    /// fallen notes, and a payment from a hot note is quoted what it was.
+    /// fallen notes, and for a payment from a hot note once that note has
+    /// fallen too.
     ///
     /// The two shapes are lab D's (R15 and R21, in
     /// `tests/spam_at_the_floor_and_stale_proofs.rs`): one note with change,
@@ -4723,6 +4804,12 @@ mod tests {
     /// pebbles, which leaves its miner 4 670 for a weight of 1 491, and blocks
     /// kept full at the floor never carried it. Past the floor rate its miner
     /// keeps 14 911, ten pebbles a unit and one over.
+    ///
+    /// AUDIT, repaired (8 October, 04-F2): the hot one was quoted 14 230, its
+    /// floor and a place's price. Its note falling adds the place's burn, which
+    /// that price pays, and 512 to its weight, which nothing paid: it then left
+    /// its miner 2 230 for a weight of 1 247, about a fifth of what filler at
+    /// the floor leaves. Asked at that weight it is quoted 24 471.
     #[test]
     fn a_blank_fee_from_fallen_notes_outranks_filler_at_the_floor() {
         let place = cairn_ledger::validation::PLACE_PRICE;
@@ -4735,6 +4822,7 @@ mod tests {
             burn: rules.burn_for(places).unwrap(),
             weight: bytes + places * cairn_chain::NOTE_WEIGHT,
             margin: margin_of(freed, 2, &rules),
+            may_fall: super::may_fall(freed, 2),
         };
 
         let fallen = shaped(467, 2, 0);
@@ -4756,11 +4844,19 @@ mod tests {
 
         let hot = shaped(223, 1, 1);
         assert_eq!(hot.floor.as_pebbles(), 8_230, "fixture: lab D's floor");
-        assert_eq!(
-            asking(&hot, None).as_pebbles(),
-            14_230,
-            "a payment from a hot note is quoted something other than its floor and \
-             a place's price"
+        let quote = asking(&hot, None);
+        assert_eq!(quote.as_pebbles(), 24_471);
+        assert!(
+            quote >= hot.floor.checked_add(hot.margin).unwrap(),
+            "a payment from a hot note is quoted less than its floor and a place's price"
+        );
+        let fell = shaped(223, 2, 0);
+        let kept = quote.checked_sub(fell.burn).unwrap().as_pebbles();
+        assert!(
+            kept > fell.weight as u64 * cairn_chain::MIN_FEE_PER_WEIGHT,
+            "a quote of {quote} for a payment from a hot note leaves its miner {kept} for a \
+             weight of {} once the note has fallen, no more a unit than filler at the floor",
+            fell.weight
         );
     }
 
@@ -5071,6 +5167,7 @@ mod tests {
             peers: 1,
             joining: Joined::No,
             claim: None,
+            out_of_reach: 0,
         };
         assert!(
             settled(&calm, long),
@@ -5120,9 +5217,24 @@ mod tests {
             ran_out(&ahead, long, false),
             Waited::Behind {
                 ours: Some(0),
-                theirs: 90
+                theirs: 90,
+                out_of_reach: 0,
             },
             "held still below what a peer says is behind, and says so"
+        );
+        let and_out_of_reach = super::Look {
+            out_of_reach: 14,
+            ..ahead
+        };
+        assert_eq!(
+            ran_out(&and_out_of_reach, long, false),
+            Waited::Behind {
+                ours: Some(0),
+                theirs: 90,
+                out_of_reach: 14,
+            },
+            "the blocks from a chain out of reach are not carried to the line that says \
+             what a longer wait would do"
         );
         assert_eq!(
             ran_out(&ahead, short, false),
@@ -6009,9 +6121,18 @@ mod tests {
             said.contains("delete everything in its data directory except history.dat"),
             "the way onto the network's chain is not said: {said}"
         );
+        // AUDIT, repaired (8 October, 04-F7): it gave the undo limit as the
+        // one reason, and a wallet whose node joined by handover cannot reach
+        // below the ledger it was handed whatever that limit says.
+        assert!(
+            said.contains("below the ledger its node was handed or deeper than it will undo"),
+            "the line does not name both reasons a branch is out of reach: {said}"
+        );
 
-        // Below a slow clock, which is mended now, and above a full disk,
-        // whose line would let the balance stand as the money.
+        // AUDIT, repaired (8 October, 03-F2): above a slow clock. The clock's
+        // line was first, and a stranger raises it with one block dated far
+        // ahead and sent eight times from two addresses, so it was a line
+        // anybody could buy to hide this one, which is about the money.
         let and_slow = Progress {
             clock_behind: Some(Behind {
                 seconds: 9_000,
@@ -6023,9 +6144,12 @@ mod tests {
         };
         let said = and_slow.warning().expect("a person is told");
         assert!(
-            said.contains("slow"),
-            "a slow clock was not said first: {said}"
+            said.contains("cannot switch to") && !said.contains("slow"),
+            "a slow clock hid a wallet on a branch the network left: {said}"
         );
+
+        // And above a full disk, whose line would let the balance stand as
+        // the money.
         let and_a_full_disk = Progress {
             unwritten: Some(Unwritten {
                 what: Writing::Blocks,
@@ -6041,6 +6165,157 @@ mod tests {
         assert!(
             said.contains("cannot switch to"),
             "a full disk hid a wallet on a branch the network left: {said}"
+        );
+    }
+
+    /// Every line that tells a person to delete what is in this wallet's data
+    /// directory names both files in it that nothing else can put back.
+    ///
+    /// AUDIT, repaired (8 October, 04-F1): the line for a branch out of reach
+    /// and the line for a stranded wallet both named history.dat as the one
+    /// file to keep. pending.dat sits beside it and is the only record of the
+    /// payments handed over that no block has carried: a person who did as
+    /// told saw those notes counted as spendable again, and a payment sent a
+    /// second time could reach for other notes and pay its recipient twice.
+    /// Asked of every line `warning` can give, so a line that says it later
+    /// is held as well.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn every_line_that_says_to_delete_files_names_both_files_to_keep() {
+        use crate::history::Discarded;
+
+        let full_disk = Unwritten {
+            what: Writing::Blocks,
+            because: "no space left on device".to_owned(),
+            reached: 1_200,
+            written_through: Some(900),
+            blocks: 300,
+            within_reach: true,
+        };
+        let mut every = vec![
+            Progress {
+                outdated: Some(Outdated {
+                    height: 900,
+                    required: 3,
+                    known: 2,
+                }),
+                ..healthy()
+            },
+            Progress {
+                stranded: Some(cairn_net::node::Stranded {
+                    anchor: 1_000,
+                    settles_at: 2_024,
+                    waited: 3_600,
+                    out_of_reach: 0,
+                }),
+                ..healthy()
+            },
+            Progress {
+                probation: Some(Probation {
+                    anchor: 900,
+                    settles_at: 1_000,
+                    reached: 940,
+                }),
+                ..healthy()
+            },
+            Progress {
+                out_of_reach: 14,
+                ..healthy()
+            },
+            Progress {
+                clock_behind: Some(Behind {
+                    seconds: 9_000,
+                    drift: 7_200,
+                    blocks: 8,
+                    peers: 2,
+                }),
+                ..healthy()
+            },
+            Progress {
+                opening: Some(Opening {
+                    at: 1_791_309_600,
+                    in_seconds: 3 * 86_400,
+                    drift: 600,
+                }),
+                height: None,
+                ..healthy()
+            },
+            Progress {
+                unwritten: Some(full_disk),
+                ..healthy()
+            },
+            Progress {
+                unread: Some(Unread {
+                    what: Reading::Blocks,
+                    height: 4_312,
+                    because: "the index gives it 184".to_owned(),
+                    refusals: 3,
+                }),
+                ..healthy()
+            },
+            Progress {
+                unjudged: Some(cairn_net::node::Unjudged {
+                    version: 3,
+                    known: 2,
+                    blocks: 8,
+                    peers: 2,
+                    over: 600,
+                }),
+                ..healthy()
+            },
+            Progress {
+                unweighable: Some(Unweighable {
+                    because: "a run of 9000 headers is longer than this build takes".to_owned(),
+                    showings: 12,
+                    peers: 3,
+                    over: 240,
+                }),
+                ..healthy()
+            },
+            Progress {
+                keeping_its_account: false,
+                ..healthy()
+            },
+            Progress {
+                set_aside_before: vec![std::path::PathBuf::from("data/history.dat.unread-1")],
+                ..healthy()
+            },
+        ];
+        // A lost account is told in a sentence of its own for each reason.
+        every.extend(
+            [
+                Discarded::BeforeTheStamp,
+                Discarded::DidNotVerify,
+                Discarded::FromANewerVersion,
+                Discarded::WouldNotOpen,
+                Discarded::BeforeTheAddress,
+            ]
+            .map(|why| Progress {
+                lost_its_account: Some(super::SetAside {
+                    why,
+                    kept_as: std::path::PathBuf::from("data/history.dat.unread-1"),
+                }),
+                ..healthy()
+            }),
+        );
+        let mut told_to_delete = 0;
+        for progress in every {
+            let said = progress.warning().expect("each of these is a line");
+            if !said.contains("delete ") {
+                continue;
+            }
+            told_to_delete += 1;
+            assert!(
+                said.contains("except history.dat") && said.contains("pending.dat"),
+                "a person told to delete what is in the data directory is not told to keep \
+                 both history.dat, this wallet's account, and pending.dat, its record of the \
+                 payments no block has carried: {said}"
+            );
+        }
+        assert_eq!(
+            told_to_delete, 2,
+            "fixture: the lines that tell a person to delete files are the stranded one and \
+             the one for a branch out of reach"
         );
     }
 
