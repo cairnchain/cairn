@@ -2189,6 +2189,36 @@ mod tests {
         );
     }
 
+    /// A claim passed over for its machine's pause is owed its turn in the
+    /// next rotation whatever the pause says, and is read rather than handed a
+    /// ledger.
+    ///
+    /// A stranger and an honest neighbour behind one gateway: the stranger's
+    /// claim fails, which pauses the gateway, and it dials straight back from
+    /// it claiming more. Without the turn owed, the neighbour was passed over
+    /// in every rotation while the stranger kept failing, and the last resort,
+    /// which reads the heaviest claim, read the stranger's fresh connection
+    /// each time.
+    #[test]
+    fn a_claim_passed_over_for_a_pause_is_read_in_the_next_rotation() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(7)), 2_000, LONG, true, 100);
+        chooser.noted(2, Some(host(7)), 500, LONG, true, 100);
+        assert_eq!(
+            chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join),
+            "fixture: the stranger claims more and is asked first"
+        );
+        let back = 100 + SETTLING + FIRST_ANSWER_PATIENCE;
+        chooser.noted(3, Some(host(7)), 3_000, LONG, true, back);
+        assert_eq!(
+            chooser.step(back, true, 0, JoinProgress::NothingYet, &[2, 3]),
+            Step::Ask(2, Approach::Read),
+            "the neighbour was passed over again for a pause its gateway's stranger keeps \
+             earning"
+        );
+    }
+
     /// A new rotation begins only for a claim waiting in it.
     ///
     /// With nobody waiting, beginning one would only hand a claim passed over
