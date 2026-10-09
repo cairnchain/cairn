@@ -40,7 +40,10 @@ pub const ANCHOR_FILE: &str = "anchors.txt";
 /// answers for the name, and a seed is never removed, so a reply of thousands
 /// used to fill this book past its ceiling with entries nothing could
 /// displace. What keeps seeds from being a way around the ceiling is
-/// `seeds::MOST_PER_NAME`, where a name's answer is taken in.
+/// `seeds::MOST_PER_NAME`, where a name's answer is taken in. The anchors read
+/// back at a start are outside it too, and they come from this node's own
+/// file of the peers it went out to and held: see
+/// `AddressBook::recall_anchors`.
 pub const MAX_ADDRESSES: usize = 4_096;
 
 /// Addresses kept from any one neighbourhood of the internet.
@@ -84,6 +87,18 @@ pub(crate) const MAX_MISSES: u8 = 3;
 /// dropped in the end.
 pub(crate) const MAX_TURNED_AWAY: u8 = 32;
 
+/// Dials in a row that ran out of time, or were made in line because this
+/// machine would not start a thread for them, before an address is dropped.
+///
+/// Counted apart from misses, because either is a fact about this machine as
+/// much as about the far end. A machine that is swapping, or whose disk has
+/// stalled, answers nothing within a dial's time and starts no thread, and
+/// booked as misses, three such rounds took out of the book honest addresses
+/// it had held for a month and kept the ones that answer fastest. Waited out
+/// as a miss is, so an address that hangs is not dialled every second, and
+/// still counted, so one that hangs for good is dropped in the end.
+pub(crate) const MAX_TIMED_OUT: u8 = 10;
+
 /// How long an address is left alone after one failed dial.
 ///
 /// It doubles twice over per further miss, so an address that has just missed
@@ -125,6 +140,9 @@ struct Known {
     misses: u8,
     /// Dials in a row taken and shut before a word, cleared the same way.
     turned_away: u8,
+    /// Dials in a row that ran out of time or were made in line, cleared the
+    /// same way.
+    timed_out: u8,
     /// When it last spoke, or when it was first written down.
     heard: u64,
     /// The moment before which this address is not dialled again.
@@ -148,14 +166,32 @@ struct Known {
     /// Heard again on the first handshake of every connection, which costs
     /// nothing, and it is only ever used to decide who to ask first.
     archives: bool,
-    /// Whether this address once handed this node a path that folded, since
-    /// it started.
+    /// What this address's last answer about where a fallen note sits came
+    /// to, since this node started.
     ///
     /// Not written down, for the reason `archives` is not. What it is for is
     /// telling an archivist from a peer that only says it is one: the claim is
     /// a bit in a handshake and costs nothing, and a path that folds to this
     /// node's own commitment costs keeping the whole cold set.
-    handed_a_path: bool,
+    paths: Paths,
+}
+
+/// What an address's last answer about where a fallen note sits came to, in
+/// the order a node reaching for archivists tries them.
+///
+/// The last answer and not the first. A fold used to be a mark for the life
+/// of the process, so a peer that folded one path and refused every one
+/// after it was reached for ahead of an archivist never asked, and four such
+/// were the whole of a round.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Paths {
+    /// A path that folded.
+    Folded,
+    /// No answer yet.
+    #[default]
+    Unasked,
+    /// Nothing that folded.
+    Refused,
 }
 
 impl Known {
@@ -535,10 +571,10 @@ impl AddressBook {
     /// `crowding` is the address that could not get in, when what is full is
     /// its neighbourhood rather than the whole book.
     ///
-    /// Only ever an address never heard from, and never a seed. Anything else
-    /// and a stranger naming addresses would be choosing which of the peers
-    /// that answer this node keeps, which is the attack the ceilings are
-    /// there against, arriving by the door marked exit.
+    /// Only ever an address never heard from, and never a seed or an anchor.
+    /// Anything else and a stranger naming addresses would be choosing which
+    /// of the peers that answer this node keeps, which is the attack the
+    /// ceilings are there against, arriving by the door marked exit.
     fn make_room(&mut self, crowding: Option<&SocketAddr>) -> bool {
         let giving_way = match crowding {
             // One neighbourhood, which is where the ceiling usually bites.
@@ -551,7 +587,9 @@ impl AddressBook {
                 let (low, high) = neighbourhood_of(address);
                 self.known
                     .range(low..=high)
-                    .filter(|(_, known)| known.heard == 0 && !known.seed)
+                    .filter(|(address, known)| {
+                        known.heard == 0 && !known.seed && !self.anchors.contains(address)
+                    })
                     .max_by_key(|(_, known)| known.written_at)
                     .map(|(address, _)| *address)
             }
@@ -565,7 +603,9 @@ impl AddressBook {
                 .rev()
                 .find(|seat| {
                     let (Reverse(heard), _, address) = seat;
-                    *heard == 0 && !self.known.get(address).is_some_and(|known| known.seed)
+                    *heard == 0
+                        && !self.known.get(address).is_some_and(|known| known.seed)
+                        && !self.anchors.contains(address)
                 })
                 .map(|seat| seat.2),
         };
@@ -608,21 +648,32 @@ impl AddressBook {
     }
 
     /// Tells the book which peers this node went out to and is talking to,
-    /// which are its anchors from now on.
+    /// which are its anchors from now on, topped up to `most` with the
+    /// anchors it had.
     ///
-    /// A node holding nobody it went out to tells it nothing new. It has
-    /// nobody to vouch for, and the anchors it had are still the best guess
-    /// it has at where to start from. Taken as news, a node whose network went
-    /// for a minute, or one killed between its first dial at a start and the
-    /// answer to it, would write down that it should start from nobody, and
-    /// the next start would dial the book in its order, which is the order an
-    /// attacker who filled the book chose.
-    pub(crate) fn anchor(&mut self, outbound: impl IntoIterator<Item = SocketAddr>) {
-        let told: BTreeSet<SocketAddr> = outbound.into_iter().map(canonical).collect();
-        if told.is_empty() || told == self.anchors {
+    /// Topped up rather than replaced. A node whose network went for a
+    /// minute, or one killed between its first dial at a start and the answer
+    /// to it, holds nobody it went out to, or one, and the anchors it had are
+    /// still the best guess it has at where to start from. Taken as the whole
+    /// of its anchors, the peers held at that instant were written down, and
+    /// a kill then left the next start one anchor or none to dial ahead of
+    /// the book's order, which is the order an attacker who filled the book
+    /// chose.
+    pub(crate) fn anchor(&mut self, outbound: impl IntoIterator<Item = SocketAddr>, most: usize) {
+        let mut anchors: BTreeSet<SocketAddr> = outbound.into_iter().map(canonical).collect();
+        let room = most.saturating_sub(anchors.len());
+        let kept: Vec<SocketAddr> = self
+            .anchors
+            .iter()
+            .filter(|address| !anchors.contains(address))
+            .take(room)
+            .copied()
+            .collect();
+        anchors.extend(kept);
+        if anchors == self.anchors {
             return;
         }
-        self.anchors = told;
+        self.anchors = anchors;
         self.anchor_changes = self.anchor_changes.saturating_add(1);
     }
 
@@ -658,20 +709,31 @@ impl AddressBook {
         if !is_dialable(&address) {
             return false;
         }
-        let fresh = !self.known.contains_key(&address);
+        // The operator decides.
+        self.insert_past_the_ceilings(address);
         let entry = self.known.entry(address).or_default();
         let was_seed = entry.seed;
         entry.seed = true;
-        if fresh {
-            // Counted like any other, so a seed does not sit outside the
-            // accounting, but never refused by it: the operator decides.
-            let group = group_of(&address);
-            let held = self.groups.get(&group).copied().unwrap_or(0);
-            self.groups.insert(group, held.saturating_add(1));
-            self.changes = self.changes.saturating_add(1);
-            self.seat(address, 0);
-        }
         !was_seed
+    }
+
+    /// Puts in an address that no ceiling refuses, when it is not there
+    /// already: a seed the operator named, or an anchor this node went out
+    /// to and held.
+    ///
+    /// Counted like any other, so it does not sit outside the accounting, but
+    /// never refused by it. Neither is a name a stranger passed on, and the
+    /// ceilings are there against strangers.
+    fn insert_past_the_ceilings(&mut self, address: SocketAddr) {
+        if self.known.contains_key(&address) {
+            return;
+        }
+        let group = group_of(&address);
+        let held = self.groups.get(&group).copied().unwrap_or(0);
+        self.groups.insert(group, held.saturating_add(1));
+        self.changes = self.changes.saturating_add(1);
+        self.known.insert(address, Known::default());
+        self.seat(address, 0);
     }
 
     /// Whether this address was given rather than learned.
@@ -754,6 +816,7 @@ impl AddressBook {
         };
         known.misses = 0;
         known.turned_away = 0;
+        known.timed_out = 0;
         known.quiet_until = 0;
         let before = known.heard;
         known.heard = now;
@@ -800,6 +863,25 @@ impl AddressBook {
         true
     }
 
+    /// Notes that a dial to this address ran out of time, or was made in line
+    /// because this machine would not start a thread for it.
+    ///
+    /// Returns whether that was the last chance it had. Waits as a miss does,
+    /// and is allowed [`MAX_TIMED_OUT`] of them rather than [`MAX_MISSES`]:
+    /// see the first for why.
+    pub(crate) fn timed_out(&mut self, address: &SocketAddr, now: u64) -> bool {
+        let Some(known) = self.known.get_mut(address) else {
+            return false;
+        };
+        known.timed_out = known.timed_out.saturating_add(1);
+        known.quiet_until = now.saturating_add(Known::quiet_for(known.timed_out));
+        if known.timed_out < MAX_TIMED_OUT || known.seed {
+            return false;
+        }
+        self.remove(address);
+        true
+    }
+
     /// Notes that this address answered a dial from another protocol
     /// version, another network or another first block.
     ///
@@ -831,12 +913,23 @@ impl AddressBook {
     /// Only for an address already in the book, as with what it keeps.
     pub(crate) fn handed_over_a_path(&mut self, address: &SocketAddr) {
         if let Some(known) = self.known.get_mut(address) {
-            known.handed_a_path = true;
+            known.paths = Paths::Folded;
         }
     }
 
-    /// Addresses that said they keep the cold set: the ones that once handed
-    /// over a path that folded first, then the rest, each newest first.
+    /// Writes down that an address answered a question about where a fallen
+    /// note sits with nothing that folded.
+    ///
+    /// Only for an address already in the book, as with a path that folded.
+    pub(crate) fn refused_a_path(&mut self, address: &SocketAddr) {
+        if let Some(known) = self.known.get_mut(address) {
+            known.paths = Paths::Refused;
+        }
+    }
+
+    /// Addresses that said they keep the cold set: the ones whose last answer
+    /// was a path that folded first, then the ones not asked yet, then the
+    /// ones whose last answer folded nothing, each newest first.
     ///
     /// For a wallet that needs a path rebuilt and is connected to nobody who
     /// can rebuild one, or only to peers that said they could and did not.
@@ -846,21 +939,16 @@ impl AddressBook {
     /// claimers is the one who spoke last, and a node reaching for a few
     /// addresses reached for its claimers. A claim is a bit in a handshake;
     /// a path that folded took keeping the whole cold set, so an address that
-    /// once handed one over goes first however long ago it spoke.
+    /// handed one over goes first however long ago it spoke, until it answers
+    /// with nothing that folds.
     pub(crate) fn archivists(&self) -> Vec<SocketAddr> {
-        let mut found: Vec<(bool, u64, SocketAddr)> = self
+        let mut found: Vec<(Paths, Reverse<u64>, SocketAddr)> = self
             .known
             .iter()
             .filter(|(_, known)| known.archives)
-            .map(|(address, known)| (known.handed_a_path, known.heard, *address))
+            .map(|(address, known)| (known.paths, Reverse(known.heard), *address))
             .collect();
-        found.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then(right.1.cmp(&left.1))
-                .then(left.2.cmp(&right.2))
-        });
+        found.sort();
         found.into_iter().map(|(_, _, address)| address).collect()
     }
 
@@ -876,6 +964,7 @@ impl AddressBook {
         for known in self.known.values_mut() {
             known.misses = 0;
             known.turned_away = 0;
+            known.timed_out = 0;
             known.quiet_until = 0;
         }
     }
@@ -1076,6 +1165,11 @@ impl AddressBook {
     /// different moments and the book can have lost a peer the anchors kept.
     /// An anchor is a peer this node went out to and held, not a name
     /// somebody passed on, and a start dials it first whatever the book says.
+    /// So it has a seed's standing in the book: kept past its neighbourhood's
+    /// ceiling and the book's, and never given up to make room. Put in as any
+    /// other address, an anchor whose neighbourhood was full of addresses
+    /// this node had heard from was in neither the book nor the anchors, and
+    /// nothing said so.
     ///
     /// A line that does not read is passed over rather than set aside, as the
     /// book's would be. This file is the node's own note of who it was
@@ -1090,8 +1184,8 @@ impl AddressBook {
                 continue;
             };
             let address = canonical(address);
-            self.insert(address);
-            if self.contains(&address) {
+            if is_dialable(&address) {
+                self.insert_past_the_ceilings(address);
                 self.anchors.insert(address);
             }
         }
@@ -2309,6 +2403,34 @@ mod tests {
         assert!(!book.contains(&busy));
     }
 
+    /// An address whose dials ran out of time is kept for more of them than
+    /// one that refused, is left alone between them as after a miss, and is
+    /// dropped in the end.
+    ///
+    /// Every failed dial was a miss, so three rounds on a machine too busy to
+    /// finish a dial in time took an honest address out of the book.
+    #[test]
+    fn an_address_whose_dials_ran_out_of_time_is_tried_for_longer_and_then_dropped() {
+        let mut book = AddressBook::new();
+        let slow = address(1, 9000);
+        book.insert(slow);
+        let mut now = 1_000;
+        for _ in 1..MAX_TIMED_OUT {
+            assert!(
+                !book.timed_out(&slow, now),
+                "an address whose dials ran out of time was dropped before its last chance"
+            );
+            assert!(book.ready(now).is_empty(), "it was dialled again at once");
+            now += MAX_QUIET;
+            assert_eq!(book.ready(now), vec![slow], "and never again");
+        }
+        assert!(
+            book.timed_out(&slow, now),
+            "an address whose every dial runs out of time was never dropped"
+        );
+        assert!(!book.contains(&slow));
+    }
+
     /// What is held against an address that shut the door goes the way a
     /// miss does: when it answers, and when this machine was away.
     ///
@@ -2732,6 +2854,38 @@ mod tests {
         );
     }
 
+    /// An anchor read back is kept though its neighbourhood is full of
+    /// addresses this node has heard from, and a stranger's address in that
+    /// neighbourhood afterwards does not take its place.
+    ///
+    /// It was put in as any other address, so the ceiling turned it away, and
+    /// it was in neither the book nor the anchors: the start dialled the book
+    /// in its order, which is the order the anchors exist to stop deciding.
+    #[test]
+    fn an_anchor_is_kept_past_its_neighbourhood_s_ceiling() {
+        let directory = scratch("anchors-full-neighbourhood");
+        let mut book = AddressBook::new();
+        for last in 0..u8::try_from(MAX_PER_GROUP).unwrap() {
+            book.insert(address(last, 9000));
+            book.answered(&address(last, 9000), 1_000);
+        }
+        book.save(&directory).unwrap();
+        let anchor = address(200, 9000);
+        save_anchors(&directory, &[anchor]).unwrap();
+        let mut read_back = AddressBook::load(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(
+            read_back.anchors().contains(&anchor) && read_back.contains(&anchor),
+            "an anchor whose neighbourhood was full was dropped from the book and the anchors"
+        );
+        let taken = read_back.insert(address(201, 9000));
+        assert!(
+            read_back.contains(&anchor) && !taken,
+            "a stranger's address took the place of an anchor"
+        );
+    }
+
     /// A line of the anchors that does not read, or names nothing a node can
     /// dial, is passed over, and the lines around it are kept.
     #[test]
@@ -2768,32 +2922,52 @@ mod tests {
     #[test]
     fn being_told_nobody_leaves_the_anchors_where_they_were() {
         let mut book = AddressBook::new();
-        book.anchor([address(1, 9000)]);
+        book.anchor([address(1, 9000)], 8);
         assert_eq!(book.anchor_changes(), 1);
         let mapped = SocketAddr::new(
             IpAddr::V6(Ipv4Addr::new(203, 0, 113, 1).to_ipv6_mapped()),
             9000,
         );
-        book.anchor([mapped]);
+        book.anchor([mapped], 8);
         assert_eq!(
             book.anchor_changes(),
             1,
             "the same anchors, one spelt as IPv6, were counted as news"
         );
-        book.anchor(std::iter::empty());
+        book.anchor(std::iter::empty(), 8);
         assert_eq!(
             book.anchors().iter().copied().collect::<Vec<_>>(),
             vec![address(1, 9000)],
             "a node holding nobody wrote down that it should start from nobody"
         );
         assert_eq!(book.anchor_changes(), 1);
-        book.anchor([address(2, 9000)]);
+        book.anchor([address(2, 9000)], 8);
         assert_eq!(
             book.anchors().iter().copied().collect::<Vec<_>>(),
-            vec![address(2, 9000)],
-            "new anchors did not replace the old"
+            vec![address(1, 9000), address(2, 9000)],
+            "a peer held now was not added to the anchors"
         );
         assert_eq!(book.anchor_changes(), 2, "new anchors were not counted");
+    }
+
+    /// The peers held now are anchors whatever the count, and the anchors a
+    /// node had fill only the places they leave.
+    #[test]
+    fn the_anchors_a_node_had_fill_only_the_places_its_peers_leave() {
+        let mut book = AddressBook::new();
+        book.anchor([address(1, 9000), address(2, 9000)], 2);
+        book.anchor([address(3, 9000)], 2);
+        let anchors = book.anchors();
+        assert!(
+            anchors.len() == 2 && anchors.contains(&address(3, 9000)),
+            "the anchors past their count, or without the peer held now: {anchors:?}"
+        );
+        book.anchor([address(4, 9000), address(5, 9000), address(6, 9000)], 2);
+        assert_eq!(
+            book.anchors().iter().copied().collect::<Vec<_>>(),
+            vec![address(4, 9000), address(5, 9000), address(6, 9000)],
+            "a peer held now was left out for the count"
+        );
     }
 
     /// An anchor kept off the file is dialled first this run and never
@@ -2803,7 +2977,7 @@ mod tests {
         let mut book = AddressBook::new();
         book.insert_seed(address(1, 9000));
         book.keep_off_the_file(address(1, 9000));
-        book.anchor([address(1, 9000), address(2, 9000)]);
+        book.anchor([address(1, 9000), address(2, 9000)], 8);
         assert_eq!(
             book.anchors_to_write(),
             vec![address(2, 9000)],
@@ -3041,6 +3215,52 @@ mod tests {
         let stranger: SocketAddr = "203.0.113.9:9000".parse().unwrap();
         book.handed_over_a_path(&stranger);
         assert_eq!(book.len(), 3);
+    }
+
+    /// An address that handed over a path and has folded nothing since falls
+    /// behind an archivist never asked, however more recently it spoke.
+    ///
+    /// A fold was a mark for the life of the process and a refusal was
+    /// written nowhere, so a peer that folded one path and placed nothing
+    /// after it was reached for first every time, and four of them were the
+    /// whole of a round.
+    #[test]
+    fn an_address_that_folded_and_then_refused_falls_behind_one_never_asked() {
+        let mut book = AddressBook::new();
+        let never_asked: SocketAddr = "203.0.113.1:9000".parse().unwrap();
+        let turned: SocketAddr = "198.51.100.2:9000".parse().unwrap();
+        for (address, heard) in [(never_asked, 100), (turned, 200)] {
+            book.insert(address);
+            book.answered(&address, heard);
+            book.keeps_the_cold_set(&address, true);
+        }
+        book.handed_over_a_path(&turned);
+        assert_eq!(
+            book.archivists(),
+            vec![turned, never_asked],
+            "fixture: an address that handed over a path goes first"
+        );
+
+        for _ in 0..3 {
+            book.refused_a_path(&turned);
+        }
+        assert_eq!(
+            book.archivists(),
+            vec![never_asked, turned],
+            "an address that folded nothing since its one path was reached for ahead of an \
+             archivist never asked"
+        );
+
+        // The last answer decides, so a fold after the refusals puts it first
+        // again: an honest path built a moment too early fails as an invented
+        // one does.
+        book.handed_over_a_path(&turned);
+        assert_eq!(book.archivists(), vec![turned, never_asked]);
+
+        // As with a path, a refusal is not a reason to write an address down.
+        let stranger: SocketAddr = "203.0.113.9:9000".parse().unwrap();
+        book.refused_a_path(&stranger);
+        assert_eq!(book.len(), 2);
     }
 
     #[test]
