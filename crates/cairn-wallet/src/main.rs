@@ -68,10 +68,11 @@ Network options
   --wait <seconds>     how long to spend catching up (default: 30)
   --fee <cairn>        what to pay to be carried. Without one, the least
                        the network will carry, worked out from the transfer,
-                       and a little over it so that a note of it falling out
-                       of the hot set before a block carries it does not
-                       leave it paying too little, and so that a miner earns
-                       more carrying it than carrying filler paid the least
+                       and enough over it that a note of it falling out of
+                       the hot set before a block carries it does not leave
+                       it paying too little, and that a miner earns more
+                       carrying it than carrying filler paid the least,
+                       before such a fall and after it
   --fee-anyway         pay a fee out of all proportion to the amount. Without
                        this the wallet stops and asks, because a fee larger
                        than the payment is usually a decimal point in the
@@ -821,6 +822,14 @@ fn spend(arguments: &[String]) -> Result<(), String> {
     if let Some(unkept) = wallet.payments_unkept() {
         say(&unkept);
     }
+    // Before the payment is offered, as `balance` and the page show it: a
+    // wallet on a branch the network has left, on a slow clock or stranded
+    // waits out its patience and is not still moving, so nothing below
+    // stops it, and the line is what tells the person the money it is about
+    // to spend may be counted from a chain the network does not hold.
+    if let Some(warning) = wallet.progress().warning() {
+        say(&warning);
+    }
     // Not built from a chain still on its way. A payment spending a note
     // that has since fallen, or one another copy of this key has since spent,
     // is refused by every peer that has followed the chain, while this
@@ -1215,15 +1224,31 @@ fn how_the_wait_ended(waited: Waited, patience: u64) -> Vec<String> {
              chain was still arriving. What follows is as far as it had got. Run it again with \
              a longer --wait to read the chain as it stands."
         ),
-        Waited::Behind { ours, theirs } => format!(
+        Waited::Behind {
+            ours,
+            theirs,
+            out_of_reach,
+        } => format!(
             "A peer said its chain is at block {theirs} and has more work behind it than this \
              wallet's, which stands at {} and has not moved for a while. That is a number \
              anybody can write, so it is a reason to look rather than a verdict: if it is true, \
-             what follows is out of date, and a longer --wait reads the rest.",
+             what follows is out of date, and {}",
             ours.map_or_else(
                 || "nothing yet".to_owned(),
                 |height| format!("block {height}")
-            )
+            ),
+            // A node offered a chain it cannot switch to still hears that
+            // chain's claim as one ahead, and waiting does not reach it.
+            if out_of_reach == 0 {
+                "a longer --wait reads the rest.".to_owned()
+            } else {
+                format!(
+                    "no --wait reads the rest: this wallet's node has also been offered \
+                     {out_of_reach} blocks from a chain it cannot switch to, so the chain it \
+                     follows may be a branch the network has left, and waiting does not move \
+                     it off one."
+                )
+            }
         ),
     };
     let mut lines = vec![String::new()];
@@ -1913,20 +1938,49 @@ mod tests {
             Waited::Behind {
                 ours: Some(4),
                 theirs: 90,
+                out_of_reach: 0,
             },
             30,
         )
         .join(" ");
         assert!(behind.contains("at block 90"), "{behind}");
         assert!(behind.contains("stands at block 4"), "{behind}");
+        assert!(
+            behind.contains("a longer --wait reads the rest"),
+            "{behind}"
+        );
         let nothing = how_the_wait_ended(
             Waited::Behind {
                 ours: None,
                 theirs: 90,
+                out_of_reach: 0,
             },
             30,
         )
         .join(" ");
         assert!(nothing.contains("stands at nothing yet"), "{nothing}");
+
+        // AUDIT, repaired (8 October, 04-F4): a node offered blocks from a
+        // chain it cannot switch to still hears that chain's claim as one
+        // ahead, and the line told the person a longer wait reads the rest,
+        // above the warning that says no wait does.
+        let out_of_reach = how_the_wait_ended(
+            Waited::Behind {
+                ours: Some(4),
+                theirs: 90,
+                out_of_reach: 14,
+            },
+            30,
+        )
+        .join(" ");
+        assert!(
+            !out_of_reach.contains("a longer --wait reads the rest"),
+            "a wallet whose node cannot switch to the chain ahead is told waiting reaches \
+             it: {out_of_reach}"
+        );
+        assert!(
+            out_of_reach.contains("14 blocks from a chain it cannot switch to"),
+            "{out_of_reach}"
+        );
     }
 }

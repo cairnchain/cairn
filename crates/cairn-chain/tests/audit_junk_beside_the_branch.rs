@@ -597,3 +597,67 @@ fn junk_lighter_than_an_honest_block_does_not_displace_it_however_high_it_sits()
     ));
     assert_eq!(store.tip(), Some(heavier.id()));
 }
+
+/// The specification with every run of whitespace made one space, so that a
+/// phrase is found whichever line it was wrapped across.
+fn specification() -> String {
+    include_str!("../../../docs/cairn-specification.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The specification said every refusal at the door is answered and charged
+/// as the switch would answer it, and listed the drift last. The door test
+/// above finds the drift not remembered, since the same node takes the same
+/// block once its clock allows it, and `cairn-net` charges nothing for it
+/// (`sync.rs`,
+/// `the_blocks_hanging_on_one_the_clock_refused_are_counted_for_the_clock`):
+/// a node that charged it refused every peer that offered an honest block
+/// dated near its edge, and eclipsed itself. A second implementation is built
+/// from the paragraph, so the paragraph is held to the two.
+#[test]
+fn the_specification_says_the_drift_at_the_door_is_neither_remembered_nor_charged() {
+    let specification = specification();
+    for stated in [
+        "None of the first five refusals changes a verdict",
+        "so it is the one refusal here that two honest nodes can disagree about and that a \
+         node reverses by waiting: a node MUST NOT remember it against the block, and SHOULD \
+         NOT charge the peer that offered it.",
+    ] {
+        assert!(
+            specification.contains(stated),
+            "the specification does not say \"{stated}\""
+        );
+    }
+    assert!(
+        !specification.contains("None of these refusals changes a verdict"),
+        "the specification still says the drift is charged as the switch would charge it"
+    );
+}
+
+/// The specification gave three of the sweep's four steps and warned against
+/// letting go "by arrival". The fourth step is letting the earlier of two that
+/// weigh the same go (`a_block_beside_the_branch_goes_only_once_nothing_builds_on_it`
+/// in `lib.rs`): junk hung where an honest branch leaves ties that branch's
+/// first block, and keeping the earlier drops the honest block as it arrives,
+/// which is E05 again. Read as written, the warning licensed exactly that.
+#[test]
+fn the_specification_gives_the_sweep_beside_the_branch_its_four_steps() {
+    let specification = specification();
+    for stated in [
+        "then the lightest by the total work of the branch the block ends, and of two that \
+         weigh the same the one that arrived first.",
+        "Letting go by height, or by arrival before work,",
+        "Keeping the earlier of two that weigh the same does it too",
+    ] {
+        assert!(
+            specification.contains(stated),
+            "the specification does not say \"{stated}\""
+        );
+    }
+    assert!(
+        !specification.contains("Letting go by height or by arrival lets"),
+        "the specification still warns against arrival as if it were never the tie-break"
+    );
+}

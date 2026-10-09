@@ -11,7 +11,10 @@
 //! and lab scenario R6 asks it of the wallet.
 //!
 //! The wallet's answer is the fee it quotes when none is named: the floor and
-//! one place price over it for every place a falling note can add. Nothing
+//! one place price over it for every place a falling note can add, and since
+//! 8 October (04-F2) never less than what outranks filler that takes no place
+//! and pays the floor, at what the payment weighs once those places are
+//! taken. Nothing
 //! asked whether that answer holds against a flush somebody pays for, all the
 //! way to a block. These tests push the notes out the way an attacker would,
 //! through the pool and an honest miner's choice, paying for every place and
@@ -21,28 +24,31 @@
 //! What they found, on devnet's tier of sixty four and cap of thirty two:
 //!
 //! - At the quote, the payment stays in the pool across the flush and the
-//!   next block carries it. The margin is spent to the pebble: once its note
-//!   has fallen the payment owes exactly what it pays. A payment of two hot
-//!   notes, both pushed out, is carried the same way on a margin of two
-//!   places.
+//!   next block carries it. Once its note has fallen it still pays more than
+//!   it owes, and a pool still ranks it above filler at the floor: until
+//!   04-F2 the margin was spent to the pebble, the payment then paid exactly
+//!   its floor, and filler at the floor outranked it. A payment of two hot
+//!   notes, both pushed out, is carried the same way.
 //! - At the floor, which a person may name, the flush makes the payment one
 //!   no block may carry. Nothing re-signs it. The wallet says why in words
 //!   beside it, holds its notes for `HELD_AFTER_REFUSAL` blocks, then names
 //!   it as not carried with its money back, and the payment sent again spends
 //!   the same note, so the two can never both be carried.
 //! - At the quote, but kept out of every block until its note leaves the
-//!   grace window, the payment needs a proof. The margin covers the place and
-//!   not the proof's bytes: the rules would carry it, and no pool will. The
-//!   wallet then goes the floor's way, in the same plain words.
+//!   grace window, the payment needs a proof. The wallet hands it back with
+//!   one, the quote covers the proof's bytes here, and the first block the
+//!   flush leaves alone carries it. Until 04-F2 the quote covered the place
+//!   and not the proof's bytes, no pool took it, and the wallet went the
+//!   floor's way.
 //!
 //! What a flush costs: the place price for every note ahead of the one it is
 //! after and for that note, less one place each block's coinbase pushes out
-//! for nothing. Here sixteen places, 96 000 pebbles destroyed, and about as
-//! much again to the miner to outbid the payment for the block's places,
-//! which a miner flushing on its own account keeps. Keeping the payment out
-//! past the grace window took sixty five blocks of that, 1 040 places and
-//! 6 240 000 pebbles destroyed. At a public network's cap the window is eight
-//! blocks of about a thousand places each.
+//! for nothing. Here sixteen places, 96 000 pebbles destroyed, and more than
+//! twice as much again to the miner to outbid the payment for the block's
+//! places, which a miner flushing on its own account keeps. Keeping the payment out
+//! until its note left the grace window took sixty five blocks of that, 1 040
+//! places and 6 240 000 pebbles destroyed. At a public network's cap the
+//! window is eight blocks of about a thousand places each.
 
 #![allow(
     clippy::unwrap_used,
@@ -56,7 +62,7 @@
 use std::path::PathBuf;
 
 use cairn_chain::{
-    fee_floor, fee_to_outrank, places_taken, transfer_weight, ChainStore, MIN_FEE_PER_WEIGHT,
+    fee_floor, fee_to_outrank, places_taken, transfer_weight, ChainStore, FLOOR_RATE,
 };
 use cairn_crypto::{PublicKey, SecretKey};
 use cairn_ledger::block::Block;
@@ -294,6 +300,16 @@ impl Scene {
             .with_chain(|chain| chain.pooled(id).cloned())
     }
 
+    /// The rate the pool itself ranks `id` at, which is what a miner walks.
+    fn rate_of(&self, id: &Hash32) -> Option<u128> {
+        self.wallet.node().with_chain(|chain| {
+            chain
+                .pooled_by_rate()
+                .find(|(_, pooled)| *pooled == id)
+                .map(|(rate, _)| rate)
+        })
+    }
+
     fn height(&self) -> u64 {
         self.wallet.progress().height.unwrap()
     }
@@ -451,10 +467,21 @@ fn pushed_out_and_then_carried(
     );
     let made = scene.pooled(&sent.id).expect("the pool took the payment");
     let its_notes = inputs_of(&made);
+    assert!(
+        margin >= params().burn_for(ours.min(made.outputs.len())).unwrap(),
+        "the quote is less than a place price over the floor for each hot note the payment \
+         spends"
+    );
+    let bytes = made.encode().len();
     assert_eq!(
-        margin,
-        params().burn_for(ours.min(made.outputs.len())).unwrap(),
-        "the quote is not a place price over the floor for each hot note the payment spends"
+        fee,
+        params()
+            .burn_for(places_taken(&made, 0))
+            .unwrap()
+            .checked_add(fee_to_outrank(FLOOR_RATE, transfer_weight(&made, bytes, 0)))
+            .unwrap(),
+        "the quote is not what outranks filler at the floor once every note the payment \
+         spends has fallen"
     );
 
     // Outbid for the block's places until every note it spends has fallen.
@@ -494,11 +521,21 @@ fn pushed_out_and_then_carried(
         .pooled(&sent.id)
         .expect("the pool let go of a payment paying the wallet's quote");
     let bytes = held.encode().len();
-    assert_eq!(
-        fee_floor(bytes, places_taken(&held, 0), &params()),
-        fee,
-        "the price after the flush is not the quote to the pebble: the margin was meant to \
-         be exactly the places the fallen notes stopped giving back"
+    // AUDIT, repaired (8 October, 04-F2): this said the price after the
+    // flush was the quote to the pebble. A payment paying exactly its floor,
+    // with places, is the one filler at the floor outranks, and that held
+    // here only because nothing competed with it for the next block.
+    assert!(
+        fee > fee_floor(bytes, places_taken(&held, 0), &params()),
+        "after the flush the payment pays no more than its floor"
+    );
+    let rate = scene
+        .rate_of(&sent.id)
+        .expect("the payment is not in the pool's own index");
+    assert!(
+        rate > FLOOR_RATE,
+        "after the flush the pool ranks the payment at {rate}, no higher than filler that \
+         takes no place and pays the floor, at {FLOOR_RATE}"
     );
 
     // The flush stops, and the next honest block carries it under the rules.
@@ -617,7 +654,7 @@ fn let_go_of_and_sent_again(
 #[test]
 fn a_payment_at_the_quoted_fee_is_carried_after_a_paid_flush_pushes_its_note_out() {
     let measured = pushed_out_and_then_carried("one", 16, 1, cairn("10"), true);
-    assert_eq!(measured.margin, PLACE_PRICE);
+    assert!(measured.margin > PLACE_PRICE);
     assert_eq!(measured.flush_blocks, 1);
     assert_eq!(measured.places, places_a_block());
     assert_eq!(
@@ -646,10 +683,7 @@ fn a_payment_at_the_quoted_fee_is_carried_after_a_paid_flush_pushes_its_note_out
 #[test]
 fn a_payment_whose_two_notes_are_both_pushed_out_is_still_carried() {
     let measured = pushed_out_and_then_carried("two", 15, 2, cairn("30"), false);
-    assert_eq!(
-        measured.margin,
-        PLACE_PRICE.checked_add(PLACE_PRICE).unwrap()
-    );
+    assert!(measured.margin > PLACE_PRICE.checked_add(PLACE_PRICE).unwrap());
     assert_eq!(measured.flush_blocks, 1);
     assert_eq!(
         measured.burned,
@@ -744,40 +778,42 @@ fn a_payment_at_the_floor_is_refused_by_the_rules_after_a_flush_and_the_wallet_s
 }
 
 /// A payment at the quoted fee kept out of every block until its note leaves
-/// the grace window, by a flush outbidding it for every block's places.
+/// the grace window, by a flush outbidding it for every block's places, is
+/// handed back with its proof, still pooled, and carried by the first block
+/// the flush leaves alone.
 ///
-/// The margin pays for the place a fallen note stops giving back. Past the
-/// window the note can only be spent with a proof, and the proof's bytes are
-/// not in the margin: the rules would carry the payment with its proof, and
-/// no pool will. The wallet then says so and goes the way of a payment at the
-/// floor. Here that took sixty five blocks outbid; at a public network's
-/// cap the note bound holds the window to eight.
+/// Past the window the note can only be spent with a proof, and the pool lets
+/// go of the payment as it was made. The wallet hands it back with one, and
+/// the quote now covers the proof's bytes here: it was asked to outbid filler
+/// at the weight of the place a fall adds, 512 units at ten pebbles, which is
+/// more than this proof's bytes at the same ten.
+///
+/// AUDIT, repaired (8 October, 04-F2): until then the quote paid the place
+/// and not the proof's bytes, no pool took the payment with its proof, and
+/// the wallet named it as not carried and gave its money back, the way of a
+/// payment at the floor. Here that took sixty five blocks outbid; at a public
+/// network's cap the note bound holds the window to eight.
 #[test]
-fn a_payment_kept_out_of_blocks_past_the_grace_window_is_named_and_its_money_comes_back() {
+fn a_payment_kept_out_of_blocks_past_the_grace_window_is_handed_back_with_its_proof() {
     let mut scene = Scene::new("grace", 16, 1);
     let payee = scene.payee;
     let amount = cairn("10");
-    let before = scene.wallet.holdings().spendable;
 
     let fee = scene.wallet.fee_for(payee, amount);
     let sent = scene.wallet.send(payee, amount, fee).unwrap();
     let made = scene.pooled(&sent.id).unwrap();
     let its_notes = inputs_of(&made);
-    let note = scene
-        .wallet
-        .node()
-        .with_chain(|chain| chain.state().hot_note(&its_notes[0]))
-        .unwrap();
 
     // Outbid for every block's places, block after block, with a look at the
-    // wallet after each, as a face that redraws takes.
+    // wallet after each, as a face that redraws takes, until the note has left
+    // the grace window.
     let sent_at = scene.height();
     let mut fell_at = None;
     let mut crowded = 0usize;
-    while scene.pooled(&sent.id).is_some() {
+    while scene.hot(&its_notes) > 0 || scene.within_grace(&its_notes) > 0 {
         assert!(
             crowded < GRACE_BLOCKS + 8,
-            "the payment stayed pooled past the grace window"
+            "fixture: the note never left the grace window"
         );
         let chosen = scene.flush_block();
         assert!(
@@ -797,62 +833,36 @@ fn a_payment_kept_out_of_blocks_past_the_grace_window_is_named_and_its_money_com
         );
     }
     let fell_at = fell_at.unwrap();
-    let dropped_at = scene.height();
+    let left_at = scene.height();
     assert_eq!(
         fell_at,
         sent_at + 1,
         "fixture: the note fell later than the first block"
     );
-    assert_eq!(
-        dropped_at,
-        fell_at + GRACE_BLOCKS as u64,
-        "the pool let go of the payment before its note left the grace window"
-    );
-    assert_eq!(scene.within_grace(&its_notes), 0);
+    assert_eq!(left_at, fell_at + GRACE_BLOCKS as u64);
 
-    // The same payment with a proof is one the rules carry, at a floor the
-    // margin does not reach by the proof's bytes.
-    let position = scene.wallet.node().with_chain(|chain| {
-        chain
-            .state()
-            .watched_position(&its_notes[0])
-            .expect("fixture: the wallet's node does not follow its note")
-    });
-    let proof = scene
-        .wallet
-        .node()
-        .with_chain(|chain| chain.state().cold().proof_of(position))
-        .unwrap();
-    let mut proved = made.clone();
-    proved.inputs[0].witness = Input::cold(its_notes[0], note, position, proof).witness;
-    assert_eq!(proved.id(), made.id(), "the proof made it another payment");
+    // Handed back with its proof, and pooled again under the same name.
+    let waiting = scene.wallet.waiting();
+    let one = waiting.iter().find(|one| one.id == sent.id);
     assert!(
-        scene.would_a_block_carry(&proved).is_ok(),
-        "the payment with its proof is one the rules refuse"
+        one.is_some_and(|one| one.pooled && one.why.is_none()),
+        "a payment at the quote whose note left the grace window was not handed back with \
+         its proof: {:?}",
+        one.and_then(|one| one.why.clone())
+    );
+    let proved = scene
+        .pooled(&sent.id)
+        .expect("the pool does not hold the payment the wallet says it holds");
+    assert!(
+        proved.encode().len() > made.encode().len(),
+        "fixture: the payment the pool holds carries no proof"
     );
     let asked = fee_floor(proved.encode().len(), places_taken(&proved, 0), &params());
-    let grew = (proved.encode().len() - made.encode().len()) as u64;
-    assert_eq!(
-        asked.as_pebbles() - fee.as_pebbles(),
-        grew * MIN_FEE_PER_WEIGHT,
-        "what the payment falls short by is not its proof's bytes at the pool's rate"
-    );
-
-    // Said in words, with the number the network asks.
-    let refused_at = scene.height();
-    let waiting = scene.wallet.waiting();
-    let one = waiting.iter().find(|one| one.id == sent.id).unwrap();
-    assert!(!one.pooled);
-    let why = one
-        .why
-        .clone()
-        .expect("a payment its node refused does not say why");
     assert!(
-        why.contains(&asked.to_string()) && why.contains("fallen out"),
-        "the refusal is not said plainly: {why}"
+        fee >= asked,
+        "the quote of {fee} does not reach the {asked} its proof's bytes ask"
     );
-    assert_eq!(one.held_until, Some(refused_at + HELD_AFTER_REFUSAL));
-
+    let grew = proved.encode().len() - made.encode().len();
     let (places, burned, to_miners) = (
         scene.flusher.places,
         scene.flusher.burned,
@@ -861,17 +871,90 @@ fn a_payment_kept_out_of_blocks_past_the_grace_window_is_named_and_its_money_com
     assert_eq!(places, crowded * places_a_block());
     assert_eq!(burned, PLACE_PRICE.as_pebbles() * places as u64);
 
-    // The flush stops; the wallet lets go of it and it is sent again.
-    let quote = let_go_of_and_sent_again(&mut scene, (&sent, &made), &why, refused_at, before);
-    assert!(quote > fee);
+    // The flush stops, and the next honest block carries it.
+    let chosen = scene.honest_block();
+    assert!(
+        chosen.iter().any(|transfer| transfer.id() == sent.id),
+        "the honest block after the flush did not carry the payment with its proof"
+    );
+    assert!(
+        scene.wallet.waiting().is_empty() && scene.wallet.not_carried().is_empty(),
+        "a carried payment is still listed as waiting, or as not carried"
+    );
+    assert_eq!(
+        scene.paid_to_payee(),
+        vec![amount],
+        "the payee was not paid exactly once"
+    );
     println!(
-        "\n  kept out past the grace window: sent at block {sent_at}, fell at {fell_at}, let go\n  \
-         of by the pool at {dropped_at} after {crowded} blocks outbid. It pays {} and its\n  \
-         proof of {grew} bytes asks {}. The flush took {places} places, destroyed {burned}\n  \
-         pebbles and paid {to_miners} to miners. Sent again for {}\n",
+        "\n  kept out until its note left the grace window: sent at block {sent_at}, fell at\n  \
+         {fell_at}, out of the window at {left_at} after {crowded} blocks outbid. It pays {}\n  \
+         and its proof of {grew} bytes asks {}. The flush took {places} places, destroyed\n  \
+         {burned} pebbles and paid {to_miners} to miners. Carried by the next block\n",
         fee.as_pebbles(),
         asked.as_pebbles(),
-        quote.as_pebbles()
     );
     scene.finish();
+}
+
+/// A payment quoted a blank fee while its note is hot, whose note falls out
+/// of the hot set before a block carries it, still ranks above filler that
+/// takes no place and pays the floor.
+///
+/// AUDIT, repaired (8 October, 04-F2). The quote was worked out at the
+/// weight the payment has while its notes are hot. A note that falls adds a
+/// place, and the place adds its burn, which the margin paid, and 512 to the
+/// weight, which nothing paid: the pool ranked this one at 117 197 against
+/// the floor rate's 655 360, so blocks kept full of filler at the floor never
+/// carried it. What pushes the note out here is a block that leaves the
+/// payment out, as any block built before the payment reached its miner does.
+#[test]
+fn a_blank_fee_still_outranks_floor_filler_after_the_note_it_spends_falls() {
+    let mut scene = Scene::new("after-the-fall", 16, 1);
+    let payee = scene.payee;
+    let amount = cairn("1");
+
+    let quote = scene.wallet.fee_for(payee, amount);
+    let sent: Sent = scene.wallet.send(payee, amount, quote).unwrap();
+    let made = scene.pooled(&sent.id).expect("the pool took the payment");
+    let its_notes = inputs_of(&made);
+    let hot_rate = scene
+        .rate_of(&sent.id)
+        .expect("the payment is not in the pool's own index");
+    assert!(
+        hot_rate > FLOOR_RATE,
+        "the quote does not outrank filler at the floor even while its note is hot: \
+         {hot_rate} against {FLOOR_RATE}"
+    );
+
+    let mut blocks = 0;
+    while scene.hot(&its_notes) > 0 {
+        assert!(blocks < 4, "fixture: the flush never reached the note");
+        let chosen = scene.flush_block_of_its_own();
+        assert!(
+            chosen.iter().all(|transfer| transfer.id() != sent.id),
+            "fixture: the payment was carried before its note fell"
+        );
+        blocks += 1;
+    }
+    assert_eq!(
+        scene.within_grace(&its_notes),
+        1,
+        "fixture: the note was meant to have only just fallen"
+    );
+    let held = scene
+        .pooled(&sent.id)
+        .expect("the pool let go of a payment paying the wallet's quote");
+    assert_eq!(places_taken(&held, 0), 2, "fixture: the fall added a place");
+    let fallen_rate = scene
+        .rate_of(&sent.id)
+        .expect("the payment is not in the pool's own index");
+    scene.finish();
+    assert!(
+        fallen_rate > FLOOR_RATE,
+        "a payment quoted a blank fee of {quote}, whose note fell out of the hot set before a \
+         block carried it, is ranked at {fallen_rate}, no higher than filler that takes no \
+         place and pays the floor, at {FLOOR_RATE}: blocks kept full of such filler never \
+         carry it"
+    );
 }

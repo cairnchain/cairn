@@ -335,7 +335,7 @@
     "blocks": {
       "plain": "A block is a page in the ledger. Roughly once a minute, someone finds a valid one, and everything in it becomes settled. Each page points back at the one before it, which is why nobody can quietly rewrite an old one.",
       "curious": "Blocks arrive about once a minute. The chain is chosen by accumulated work rather than by length, so the branch that took the most computing to build is the one every node follows.",
-      "technical": "Fork choice is by cumulative work. Ties keep the branch already followed, and a switch is applied atomically. Difficulty follows a schedule fixed at the first block (ASERT, a one hour half life) with a factor of four per retarget cap."
+      "technical": "Fork choice is by cumulative work. Ties keep the branch already followed, and two tips of one height are a tie until one carries more than half a block of extra work. A switch is applied atomically. Difficulty follows a schedule fixed at the first block (ASERT, a one hour half life) with a factor of four per retarget cap."
     },
     "block": {
       "plain": "Everything below was fixed the moment this block was found. The long strings are fingerprints: change one letter anywhere in the block and every one of them changes completely.",
@@ -541,7 +541,7 @@
         ],
         "technical": [
           "ASERT (aserti3-2d) anchored at the first block, half life of 60 blocks, maximum 4x per retarget. Timestamps are validated against the median of the previous eleven blocks rather than against the parent, which removes the single-block manipulation that a later-than-parent rule permits.",
-          "Fork choice is by cumulative work, not length. Ties keep the branch already followed. Reorganisations are applied atomically, with undo records per active-chain block."
+          "Fork choice is by cumulative work, not length. Ties keep the branch already followed, and two tips of one height are a tie until one carries more than half a block of extra work. Reorganisations are applied atomically, with undo records per active-chain block."
         ]
       }
     },

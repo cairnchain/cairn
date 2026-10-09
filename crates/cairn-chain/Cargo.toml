@@ -21,8 +21,11 @@ thiserror.workspace = true
 cairn-accumulator.workspace = true
 cairn-crypto.workspace = true
 # For the campaigns whose sequences and trees are drawn from a seed, so the
-# nightly run reaches cases the suite does not: `tests/fuzz_block_store.rs`
-# and `tests/fuzz_reorganisation_storm.rs`.
+# nightly run reaches cases the suite does not: `tests/fuzz_block_store.rs`,
+# `tests/fuzz_pool.rs` and `tests/fuzz_reorganisation_storm.rs`. And for its
+# seeded generator alone in `tests/withheld_blocks.rs`, which is no campaign:
+# it draws block times and delays for a simulation that has to come out the
+# same on every run.
 cairn-fuzz.workspace = true
 # For the relay-cost test in `tests/pool.rs`, which counts bytes hashed rather
 # than timing anything. Only the test build asks for it.

@@ -159,8 +159,8 @@ fn a_transfer_the_wallet_signs_is_one_a_block_will_carry() {
 }
 
 /// On a network that burns a price for every place in the hot set, a payment
-/// at the wallet's floor is pooled and mined, and its blank quote carries that
-/// price over the floor for the note that can fall.
+/// at the wallet's floor is pooled and mined, and its blank quote carries at
+/// least that price over the floor for the note that can fall.
 ///
 /// The wallet priced a place at the pool's old weight, five hundred and twelve
 /// bytes at ten pebbles, and knew nothing of a price the rules ask. Its floor
@@ -191,10 +191,13 @@ fn a_payment_at_the_quote_is_pooled_and_mined_where_a_place_is_priced() {
 
     let least = wallet.floor_for(recipient, cairn("1"));
     let quoted = wallet.fee_for(recipient, cairn("1"));
-    assert_eq!(
-        quoted.checked_sub(least),
-        Some(price),
-        "the quote's margin for the one note that can fall is not the place price"
+    // More than the price since 8 October (04-F2): the quote also outranks
+    // filler at the floor at the weight the place adds once the note falls.
+    assert!(
+        quoted
+            .checked_sub(least)
+            .is_some_and(|margin| margin >= price),
+        "the quote's margin for the one note that can fall is less than the place price"
     );
     // What the confirmation says before paying: the burn of the one place the
     // payment takes, and nothing for a spend that cannot be drafted.

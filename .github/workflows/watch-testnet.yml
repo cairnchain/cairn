@@ -6,9 +6,10 @@
 # looks exactly like a chain that is quiet: a height, a supply, a list of
 # blocks, and no complaint. So this asks the questions a person would ask if
 # they were looking, on a schedule, and says so in an issue when the answer is
-# wrong: the tip is old, the difficulty swung, blocks came in a burst, the
-# explorer's own figures disagree, its node reports a fault, a block seen
-# earlier was replaced, or the explorer or the seed does not answer.
+# wrong: the tip is old, the difficulty swung, blocks came in a burst, a run
+# of blocks was mined at the difficulty floor, the explorer's own figures
+# disagree, its node reports a fault, a block seen earlier was replaced, or
+# the explorer or the seed does not answer.
 #
 # One open issue per kind of alarm, labelled `testnet-alarm`, found by a marker
 # in its body so that it is never duplicated: opened when the alarm starts,

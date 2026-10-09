@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       seconds:
-        description: "Seconds per campaign"
+        description: "Seconds per campaign, 180 at most: 23 rounds of it and the build have to fit the timeout"
         required: false
         default: "120"
 
@@ -79,6 +79,20 @@ jobs:
         # byte string, and what they hold is the one rule the attack catalogue
         # rates critical with no attacker in it: a switch between branches
         # leaves the ledger a replay of the winning one gives.
+        #
+        # The arithmetic, pinned so that it holds on any runner.
+        # `CAIRN_FUZZ_SECONDS` is a budget per campaign and every campaign is
+        # one test; cargo runs the test binaries one after another, and inside
+        # a binary as many tests at once as `--test-threads` says. With four,
+        # the 57 campaigns of these 17 targets take 23 rounds (each target's
+        # campaigns over four, rounded up, summed), which at 120 seconds is 46
+        # minutes, and the release build took two more on 8 October 2026: 48
+        # of the 90. Left to cargo the thread count was the runner's core
+        # count, and the same list would take 68 minutes on two cores and 114
+        # on one. On fewer cores than four a round takes as long and runs
+        # fewer cases, since a campaign's budget is wall-clock time. A
+        # campaign added to the list moves the count, and
+        # `crates/cairn-fuzz/tests/the_nightly_run.rs` recounts it.
         run: |
           cargo test --release --locked \
             -p cairn-primitives --test fuzz_codec --test fuzz_hex \
@@ -90,7 +104,7 @@ jobs:
             -p cairn-http --test fuzz_request \
             -p cairn-wallet --test fuzz_history \
             -p cairn-explorer --test fuzz_index_walk \
-            -- --nocapture
+            -- --nocapture --test-threads=4
       - name: Say which seed that was
         if: always()
         run: echo "CAIRN_FUZZ_SEED=${{ steps.seed.outputs.value }}"

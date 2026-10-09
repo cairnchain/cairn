@@ -10,9 +10,24 @@
 //! note that has fallen is blue on this page for exactly the reason it is blue
 //! in the design document.
 
+/// What the page says beside an empty fee box, in the markup and again in the
+/// script that puts it back whenever a quote is cleared.
+///
+/// A macro rather than a constant because `concat!` takes only literals, and
+/// one sentence written twice is two sentences the next change makes differ.
+macro_rules! blank_fee {
+    () => {
+        "Leave the fee blank for the least the network will carry, and enough over it that \
+         a note of it falling out of the hot set before a block carries it does not leave it \
+         paying too little, and that a miner earns more carrying it than carrying filler paid \
+         the least, before such a fall and after it."
+    };
+}
+
 /// The whole of it: markup, style and the small amount of script it takes to
 /// ask the wallet what it holds.
-pub(crate) const HTML: &str = r#"<!doctype html>
+pub(crate) const HTML: &str = concat!(
+    r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -79,10 +94,9 @@ pub(crate) const HTML: &str = r#"<!doctype html>
                    inputmode="decimal" placeholder="0.00">
           </label>
         </div>
-        <p class="note-line" id="quote">Leave the fee blank for the least the
-          network will carry, and a little over it in case a note of it falls
-          out of the hot set before a block carries it, or so that a miner
-          earns more carrying it than carrying filler paid the least.</p>
+        <p class="note-line" id="quote">"#,
+    blank_fee!(),
+    r#"</p>
         <button id="go" type="submit">Send</button>
         <p class="said" id="said"></p>
       </form>
@@ -129,7 +143,8 @@ pub(crate) const HTML: &str = r#"<!doctype html>
 <script src="/wallet.js"></script>
 </body>
 </html>
-"#;
+"#
+);
 
 /// The style, served on its own because the policy this server sends
 /// forbids a page from carrying its own, which is the right default and
@@ -254,7 +269,8 @@ pub(crate) const CSS: &str = r#"  :root{
 ///
 /// Hashed twice, because it writes a block number as `"#" + height` and one
 /// hash would end the string there.
-pub(crate) const JS: &str = r##""use strict";
+pub(crate) const JS: &str = concat!(
+    r##""use strict";
 // The secret that came in the address. Kept in memory and put back on every
 // request; the wallet answers nothing without it.
 const KEY = new URLSearchParams(location.search).get("k") || "";
@@ -565,9 +581,9 @@ const post = (path, body) => fetch(path, {
 let quoting = 0;
 async function quote() {
   const mine = ++quoting;
-  const blank = "Leave the fee blank for the least the network will carry, and a " +
-    "little over it in case a note of it falls out of the hot set before a block carries it, " +
-    "or so that a miner earns more carrying it than carrying filler paid the least.";
+  const blank = ""##,
+    blank_fee!(),
+    r##"";
   if ($("to").value.trim().length !== 64 || $("amount").value.trim() === "") {
     text("quote", blank);
     return;
@@ -664,11 +680,12 @@ $("send").addEventListener("submit", (event) => {
 
 refresh();
 setInterval(refresh, 2000);
-"##;
+"##
+);
 
 #[cfg(test)]
 mod tests {
-    use super::JS;
+    use super::{HTML, JS};
 
     /// The script's `refresh`, from its first line to the next function.
     fn refresh() -> &'static str {
@@ -756,6 +773,28 @@ mod tests {
         assert!(
             JS.contains("result.toItself"),
             "a payment to this wallet's own address is not said to be one"
+        );
+    }
+
+    /// The sentence beside an empty fee box is the one sentence, in the
+    /// markup the page opens with and in the script that puts it back.
+    ///
+    /// It was written out in each, and nothing held the two equal. And it
+    /// says both reasons a blank fee is over the floor and that they hold
+    /// together: until 8 October (04-F2) a payment whose note fell paid
+    /// enough for the first and ranked below filler for the second.
+    #[test]
+    fn the_sentence_beside_an_empty_fee_box_is_said_once_and_both_places_read_it() {
+        assert_eq!(HTML.matches(blank_fee!()).count(), 1, "{HTML}");
+        assert_eq!(JS.matches(blank_fee!()).count(), 1, "{JS}");
+        assert_eq!(
+            JS.matches("text(\"quote\", blank)").count(),
+            2,
+            "the script does not put the sentence back when a quote is cleared"
+        );
+        assert!(
+            blank_fee!().contains("before such a fall and after it"),
+            "the sentence does not say a blank fee outranks filler after a note falls"
         );
     }
 }

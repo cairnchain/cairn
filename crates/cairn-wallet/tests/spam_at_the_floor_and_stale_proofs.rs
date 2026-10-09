@@ -62,11 +62,20 @@
 //! ```
 //!
 //! The fallen payment's miner now keeps 14 911 pebbles for its weight of
-//! 1 491, ten a unit and one pebble over. The hot payment's quote does not
-//! move: its margin already ranked it above the filler. Outbidding the
-//! lowest rate the next block would carry, whenever the pool holds more than
-//! a block, would answer a filler paying over the floor too; that is left
-//! for later, in `docs/cairn-open-questions.md`.
+//! 1 491, ten a unit and one pebble over. The hot payment's quote did not
+//! move then: its margin ranked it above the filler while its note was hot.
+//! Outbidding the lowest rate the next block would carry, whenever the pool
+//! holds more than a block, would answer a filler paying over the floor too;
+//! that is left for later, in `docs/cairn-open-questions.md`.
+//!
+//! **What changed on 8 October (04-F2).** The hot payment's margin ranked it
+//! above the filler only while its note stayed hot. A note that falls before
+//! a block carries it adds a place, whose burn the margin pays, and 512 to the
+//! weight, which nothing paid: at 14 230 the payment then left its miner 2 230
+//! for a weight of 1 247, about a fifth of the filler's rate. The quote now
+//! outranks the filler at the weight and burn the payment has once every note
+//! that can fall has fallen, so the hot payment is quoted 24 471, and is
+//! carried in block 1 as before. The fallen payment's quote does not move.
 
 #![allow(
     clippy::unwrap_used,
@@ -464,22 +473,18 @@ fn follow(scene: &mut Scene, fee: Amount, blocks: usize, spam: usize, stale: boo
 /// **A payment from a hot note, at the wallet's own quote, goes through
 /// blocks kept full at the floor.**
 ///
-/// The quote is the floor and a place's price over it, for the place the
-/// note would stop freeing if it fell before a block. What a pool ranks is
-/// what a fee leaves its miner per unit of weight, and that place's price,
-/// 6 000 pebbles, is more than the 512 units of weight the place adds at ten
-/// pebbles each: the quote ranks above filler at the floor, though the margin
-/// is there for a falling note and not for this. Filler paying about 1.12
-/// times its floor would outrank it.
+/// The quote outranks filler at the floor at the weight and burn the payment
+/// has once its note has fallen: the burn of the place a fall adds, and ten
+/// pebbles and one over for every unit it then weighs, 512 of them for that
+/// place. While the note is hot it ranks higher still.
 #[test]
 fn a_payment_from_a_hot_note_at_the_wallets_quote_goes_through_filler_at_the_floor() {
     let mut scene = Scene::new("hot", false);
     let fee = scene.wallet.fee_for(scene.payee, cairn("1"));
     let floor = scene.wallet.floor_for(scene.payee, cairn("1"));
-    assert_eq!(
-        fee.as_pebbles(),
-        floor.as_pebbles() + PLACE_PRICE.as_pebbles()
-    );
+    assert_eq!(floor.as_pebbles(), 8_230, "fixture: lab D's floor");
+    assert_eq!(fee.as_pebbles(), 24_471);
+    assert!(fee.as_pebbles() > floor.as_pebbles() + PLACE_PRICE.as_pebbles());
     let followed = follow(&mut scene, fee, 4, 4, false);
     println!("\n  a hot payment at the quote of {fee}: {followed:?}\n");
     assert_eq!(followed.carried, Some(1));

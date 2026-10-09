@@ -827,6 +827,77 @@ fn the_documents_quote_the_floor_run_as_measured() {
     quoted("the open questions", "2 244 et de 7 793");
 }
 
+/// The watcher, which the open questions say rings on a run of floor blocks.
+const WATCHER: &str = include_str!("../../../.github/scripts/watch_testnet.py");
+
+/// The open questions record why sixty blocks and no cap were kept with nine
+/// figures nothing in this repository measures: they come from the testnet-9
+/// study's simulations, which live beside its audit and not here. The floor
+/// run's figures were in the same position, stood in four documents a factor
+/// of four low, and needed the guard above to stay corrected. So the item says
+/// where its figures come from, and each is pinned here as quoted: changing
+/// one without measuring it again in the study fails this, and whoever edits
+/// it learns that the measurement is not in this repository.
+///
+/// The same item said the floor run's damage "is treated" outside consensus by
+/// counting confirmations by work and by a watcher alarm, and neither existed.
+/// The alarm does now, and is held to the document; the counting is owed.
+#[test]
+fn the_open_questions_quote_the_half_life_study_as_simulated_elsewhere() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (_, questions) = ELSEWHERE
+        .iter()
+        .find(|(name, _)| *name == "the open questions")
+        .unwrap();
+    let questions = flat(questions);
+    for stated in [
+        // Where the figures come from.
+        "Les chiffres de ce paragraphe sont ceux de ses simulations, qui ne sont pas dans ce \
+         dépôt, et aucun test d'ici ne les mesure",
+        "en médiane sur trente-deux graines (<code>sims/q2_departures.py</code> de l'étude)",
+        "les pertes de débit sur seize (<code>sims/q2_loss.py</code>)",
+        "sur le chemin moyen, sans tirage (<code>sims/q2_onset.py</code>)",
+        // The nine figures, each as the study measured it.
+        "mesurée avec une borne de deux et une de huit, la course s'allonge à deux et raccourcit \
+         un peu à huit, sans jamais disparaître",
+        "allonge les grands blocages d'environ cinq heures à <code>K = 2</code>",
+        "(de rien à deux heures à <code>K = 4</code>)",
+        "67 heures à <code>K = 2</code> après un départ de 4 096 fois",
+        "cent vingt blocs divisent par deux les grands blocages",
+        "après une attaque d'environ 9 100 heures du débit honnête au lieu de 2 300",
+        "les mille blocs suivants ont 6,6 heures de retard contre 3,3",
+        "et 13,2 contre 6,6 après une perte de quatre-vingt-dix-neuf centièmes",
+        "<code>K = 4</code> étant la meilleure constante",
+        // What is done outside consensus, and what is owed.
+        "Le surveillant du réseau de test sonne sur une suite de dix blocs au plancher \
+         (l'alarme <code>floor-run</code> de <code>.github/scripts/watch_testnet.py</code>)",
+        "Le portefeuille et l'explorateur devront compter les confirmations d'un paiement au \
+         travail au-dessus de lui plutôt qu'en blocs : c'est dû, et ce n'est pas encore fait.",
+    ] {
+        assert!(
+            questions.contains(stated),
+            "the open questions no longer say \"{stated}\""
+        );
+    }
+    assert!(
+        !questions.contains("se traite hors du consensus : compter les confirmations"),
+        "the open questions still say the floor run is treated by counting confirmations by work"
+    );
+    for (code, said) in [
+        ("FLOOR = \"floor-run\"", "the alarm the open questions name"),
+        (
+            "FLOOR_RUN_BLOCKS = 10\n",
+            "the ten blocks the open questions say it rings on",
+        ),
+        (
+            "verdicts.append(check_floor_run(blocks))",
+            "the check that rings it",
+        ),
+    ] {
+        assert!(WATCHER.contains(code), "the watcher has lost {said}");
+    }
+}
+
 /// Nine tenths of the hash rate leaves for good, and the blocks are back near
 /// their target within the time the plan published, 3.8 hours, which is what
 /// the moving average managed too (3.9). Measured as `tau.py` does: from the
