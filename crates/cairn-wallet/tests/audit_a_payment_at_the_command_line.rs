@@ -163,6 +163,77 @@ fn a_script_can_answer_yes_in_advance() {
     );
 }
 
+/// `send` shows the line `balance` and the page show above the money, and
+/// shows it before anything about the payment.
+///
+/// AUDIT, repaired (8 October, 04-F3): `send` never asked for it, so a wallet
+/// on a branch the network had left, on a slow clock or stranded, none of
+/// which stops a payment, offered one built from that money and said nothing
+/// of it. An account set aside at an earlier start is the state reached here
+/// because it needs no network: every start looks for one, and the line comes
+/// from the same call as the others. The wallet holds nothing, so `send`
+/// stops where it would price the payment, and the line has to come before
+/// that to be seen at all.
+#[test]
+fn send_says_what_is_wrong_with_the_money_before_anything_about_the_payment() {
+    let home = scratch("warning");
+    let key = home.join("key");
+    let made = Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
+        .args(["new", key.to_str().unwrap()])
+        .output()
+        .expect("the wallet runs");
+    assert!(made.status.success(), "fixture: a key was made");
+    let data = home.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("history.dat.unread-1"),
+        b"an account that did not read back",
+    )
+    .unwrap();
+    let somebody = cairn_ledger::note::Address::from(
+        cairn_crypto::SecretKey::generate().unwrap().public_key(),
+    )
+    .to_text(cairn_ledger::note::NetworkId::DEVNET);
+
+    let sent = Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
+        .args([
+            "send",
+            key.to_str().unwrap(),
+            "--to",
+            &somebody,
+            "--amount",
+            "1",
+            "--yes",
+            "--data",
+            data.to_str().unwrap(),
+            "--network",
+            "devnet",
+            "--seed",
+            "127.0.0.1:9",
+            "--wait",
+            "0",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("the wallet runs");
+    let _ = std::fs::remove_dir_all(&home);
+    let out = String::from_utf8_lossy(&sent.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let err = String::from_utf8_lossy(&sent.stderr);
+
+    assert!(
+        err.contains("more than"),
+        "fixture: a wallet holding nothing was not refused for holding nothing: {err}"
+    );
+    assert!(
+        out.contains("is still set aside"),
+        "`send` did not show the line `balance` shows above the money before it got as far \
+         as pricing the payment: {out}"
+    );
+}
+
 /// `open` serves a page that says which payments are waiting and which were
 /// not carried, and holds nothing back when there are none.
 ///

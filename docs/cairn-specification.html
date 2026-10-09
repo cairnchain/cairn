@@ -1819,7 +1819,16 @@ message     719caadb13b19302e7bed147c459989d3dd42ea7bdacbec020e90c7a2ef29c50
       published network's first block MUST therefore be dated at its announced
       opening and published before it</strong>: a node holding a first block dated ahead of
       its clock waits for it, and a block dated at minting would open late by however
-      long the release and the installs take. The
+      long the release and the installs take. A miner begins at the opening by its
+      own clock, so one whose clock is fast begins before it, and what it finds is
+      taken from as much as the drift allowance before the opening and no earlier: a
+      block dated further ahead of a node's clock than that is refused until that
+      clock catches up. The blocks it finds in that time are
+      dated at or after the opening, since the median of the chain allows nothing
+      earlier, and they are valid: no rule can tell them from blocks found at the
+      opening, and the drift allowance is deliberate. What they cost is a chain that
+      opens a few blocks ahead of its schedule, which the retarget answers by asking
+      more of the blocks after them. The
       moving average this replaced charged a late opening one easy block and
       forgot it.
     </p>

@@ -192,7 +192,9 @@ impl fmt::Display for Waiting {
                 "mining waits until this network opens on {}, by this machine's clock: this \
                  node holds the first block already, since a block is taken from as far ahead \
                  of the clock as the drift, but a block built on it now would be mined before \
-                 the announced opening. It mines from the opening on",
+                 the announced opening. It mines from the opening on. If that date has \
+                 already passed, it is the clock on this machine that is behind, and the time \
+                 on this machine is what to look at",
                 cairn_ledger::genesis::when(*at),
             ),
             Self::ForTheClock => out.write_str(
@@ -494,7 +496,11 @@ fn candidate(
     // opening is when mining starts, for every miner alike. A network with no
     // first block written in has no opening to wait for here, and a block it
     // dates before its `opens_at` is refused by the chain like any other.
-    if params.genesis.is_some() && now < params.opens_at {
+    //
+    // Only while the first block stands alone. A chain past it says the
+    // network has opened, so a clock before the opening is a clock behind,
+    // and the wait for the clock below is the one that names it.
+    if params.genesis.is_some() && chain.height() == Some(0) && now < params.opens_at {
         return Err(Waiting::ForTheOpening(params.opens_at));
     }
     let extending = chain.tip();
@@ -1240,6 +1246,19 @@ mod saying {
         assert_eq!(block.header.height, 1);
         assert_eq!(extending, chain.tip(), "and it is built on the first block");
 
+        // AUDIT, repaired (8 October, 04-F5): a chain past the first block
+        // says the network has opened, and a clock before the opening is then
+        // a clock behind. The gate answered it with the opening, a date in the
+        // past, where before it the wait for the clock named the clock.
+        let block = mine_block(block, 1 << 20).unwrap();
+        chain.add_block(block, opens).unwrap();
+        assert_eq!(
+            candidate(&chain, &pinned, reward_key(), opens - drift - 1).err(),
+            Some(Waiting::ForTheClock),
+            "a node past the first block with its clock before the opening is told the \
+             network has not opened rather than that its clock is behind"
+        );
+
         let unpinned = ConsensusParams {
             opens_at: u64::MAX,
             ..open
@@ -1400,6 +1419,15 @@ mod saying {
         assert!(said(Waiting::ForAChain).contains("first block"));
         assert!(said(Waiting::ForTheOpening(1_791_309_600))
             .contains("until this network opens on 6 October 2026 at 18:00:00 UTC"));
+        // AUDIT, repaired (8 October, 04-F5): a node holding only the first
+        // block reads the same before the opening and behind it, and the line
+        // gave a date with nothing pointing at the clock, which its sibling
+        // `not_open_yet` in main.rs keeps for exactly that case.
+        assert!(
+            said(Waiting::ForTheOpening(1_791_309_600))
+                .contains("If that date has already passed, it is the clock on this machine"),
+            "the line for the opening does not say a clock behind reads the same"
+        );
         assert!(said(Waiting::ForTheClock).contains("waits for the clock"));
         assert!(said(Waiting::CannotAssemble("a reason".into())).contains("(a reason)"));
         assert_eq!(Saying::Resumes.to_string(), "mining again");
