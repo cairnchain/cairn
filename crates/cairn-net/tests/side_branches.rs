@@ -20,11 +20,11 @@
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cairn_chain::ChainStore;
+use cairn_chain::{ChainStore, Located};
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::Block;
 use cairn_ledger::note::{Note, NoteId};
@@ -334,18 +334,23 @@ fn a_branch_that_parts_where_the_locator_skips_heights_is_taken() {
     );
 }
 
-/// A peer that agrees a batch or more below this node's tip is asked only for
-/// what lies above it, and one that agrees less than a batch below is asked
-/// from there.
+/// A peer that agrees a batch or more below this node's tip is asked from
+/// there, and each round after starts past the blocks the last one brought.
 ///
 /// A peer that recognises nothing it was shown answers from nought, which a
-/// locator always shows, and a peer that joined cannot judge the heights below
-/// where it joined. Asking from what either names is a batch of blocks this
-/// node already follows, the same batch every round, and the node never asks
-/// past its tip. Nothing asked this, so a node that asked from any height its
-/// locator showed passed, and so did one that asked only above its tip.
+/// locator always shows, and asking from there is a batch of blocks this node
+/// already follows. That was the same batch every round, so a node asked only
+/// above its tip whenever a peer agreed a batch or more below it. A locator
+/// names no height between seventy two and a hundred and thirty six below the
+/// tip, so that was also every branch parting more than seventy two below it,
+/// none of which was ever taken (T8-7 of testnet-8). Each round now starts
+/// past the last block delivered that this node holds, on its branch or
+/// beside it, so a peer agreeing at nought costs a round for each batch below
+/// the tip, once. Nothing asked this, so a node that asked the same batch
+/// from nought every round passed, and so did one that asked only above its
+/// tip.
 #[test]
-fn a_peer_that_agrees_a_batch_or_more_below_the_tip_is_asked_only_past_it() {
+fn a_peer_that_agrees_a_batch_or_more_below_the_tip_is_asked_from_there_a_batch_a_round() {
     let batch = u64::try_from(MAX_REQUESTED).unwrap();
     let mut forge = Forge {
         state: LedgerState::new(),
@@ -357,37 +362,65 @@ fn a_peer_that_agrees_a_batch_or_more_below_the_tip_is_asked_only_past_it() {
     let mut victim = holding(&[&blocks]);
     let have = u64::try_from(blocks.len()).unwrap();
     let offered = have + 20;
-    let mut asked_from = |from: u64| {
+    // What a peer agreeing at `from` is asked for, round after round, while it
+    // sends every block it is asked for that this node holds: the first height
+    // of each round, until one is asked past the tip.
+    let mut rounds_from = |from: u64| {
         let mut peer = greeted(u128::MAX, offered);
-        peer.chain_asked = true;
-        on_message(
-            &mut local(&mut victim),
-            &mut peer,
-            Message::Chain {
-                from,
-                count: offered - from,
-            },
-            NOW,
-        )
-        .reply
+        let mut firsts = Vec::new();
+        while firsts.len() < blocks.len() {
+            peer.chain_asked = true;
+            let asked = on_message(
+                &mut local(&mut victim),
+                &mut peer,
+                Message::Chain {
+                    from,
+                    count: offered - from,
+                },
+                NOW,
+            )
+            .reply;
+            let Some(Message::GetBlocks(heights)) = asked.first() else {
+                panic!("a peer offering more than this node holds was asked nothing: {asked:?}");
+            };
+            firsts.push(heights[0]);
+            if heights[0] >= have {
+                break;
+            }
+            for at in heights {
+                if let Some(block) = blocks.get(usize::try_from(*at).unwrap()) {
+                    let _ = on_message(
+                        &mut local(&mut victim),
+                        &mut peer,
+                        Message::Block(Box::new(block.clone())),
+                        NOW,
+                    );
+                }
+            }
+        }
+        firsts
     };
-    let past_the_tip = vec![Message::GetBlocks((have..offered).collect())];
 
+    // From one rather than nought: nothing at or below the first block of the
+    // branch this node holds can be taken, and every chain it meets starts
+    // with that block.
     assert_eq!(
-        asked_from(0),
-        past_the_tip,
-        "a peer that recognised nothing it was shown was asked for blocks this node holds"
+        rounds_from(0),
+        vec![1, 1 + batch, have],
+        "a peer that recognised nothing it was shown was not asked a batch at a time from \
+         the block above the first, each round past the last, until past this node's tip"
     );
     let far = have - batch;
     assert_eq!(
-        asked_from(far),
-        past_the_tip,
-        "a peer agreeing a whole batch below the tip was asked for heights this node holds"
+        rounds_from(far),
+        vec![far, have],
+        "a peer agreeing a whole batch below the tip was not asked from there and then past \
+         what it sent"
     );
     let near = far + 1;
     assert_eq!(
-        asked_from(near),
-        vec![Message::GetBlocks((near..near + batch).collect())],
+        rounds_from(near),
+        vec![near, have],
         "a peer agreeing less than a batch below the tip was not asked from there"
     );
 }
@@ -1138,32 +1171,51 @@ fn a_deep_fork(full: bool) -> DeepFork {
     }
 }
 
-/// A victim on the lighter side of `fork` dials one node on the heavier side,
-/// and takes the heavier branch.
-fn the_victim_dials_the_heavier_side(fork: &DeepFork, what: &str) {
-    let params = params();
-    let victim = Node::bind(params, loopback()).unwrap();
-    for block in fork.shared.iter().chain(&fork.followed) {
+/// A victim on the lighter side of `fork`, `depth` blocks above where the
+/// branches part, dials one node on the heavier side, a block longer, and
+/// takes the heavier branch.
+fn the_victim_dials_the_heavier_side(fork: &DeepFork, depth: usize, what: &str) {
+    let victim = Node::bind(params(), loopback()).unwrap();
+    on_the_lighter_side(&victim, fork, depth);
+    dials_the_heavier_side(&victim, params(), fork, depth, what);
+}
+
+/// Hands `victim` the lighter side of `fork`, `depth` blocks above where the
+/// branches part.
+fn on_the_lighter_side(victim: &Node, fork: &DeepFork, depth: usize) {
+    for block in fork.shared.iter().chain(&fork.followed[..depth]) {
         victim.submit_block(block.clone()).unwrap();
     }
-    let depth = u64::try_from(DEPTH).unwrap();
+    let tip = u64::try_from(fork.shared.len() + depth).unwrap() - 1;
     assert_eq!(
         victim.height(),
-        Some(depth + 1),
+        Some(tip),
         "the premise: the victim's branch"
     );
-    let honest = Node::bind(params, loopback()).unwrap();
-    for block in fork.shared.iter().chain(&fork.rival) {
+}
+
+/// `victim`, on the lighter side of `fork`, dials a node judging by `rules`
+/// on the heavier side, a block longer, and takes the heavier branch.
+fn dials_the_heavier_side(
+    victim: &Node,
+    rules: ConsensusParams,
+    fork: &DeepFork,
+    depth: usize,
+    what: &str,
+) {
+    let honest = Node::bind(rules, loopback()).unwrap();
+    for block in fork.shared.iter().chain(&fork.rival[..=depth]) {
         honest.submit_block(block.clone()).unwrap();
     }
+    let tip = u64::try_from(fork.shared.len() + depth).unwrap();
     assert_eq!(
         honest.height(),
-        Some(depth + 2),
+        Some(tip),
         "the premise: the heavier branch"
     );
 
     victim.connect(honest.address()).unwrap();
-    let rival = fork.rival.last().unwrap().id();
+    let rival = fork.rival[depth].id();
     wait_for(what, || victim.with_chain(ChainStore::tip) == Some(rival));
     victim.shutdown();
     honest.shutdown();
@@ -1180,6 +1232,7 @@ fn a_heavier_branch_of_empty_blocks_parting_sixty_below_the_tip_is_taken() {
     let fork = a_deep_fork(false);
     the_victim_dials_the_heavier_side(
         &fork,
+        DEPTH,
         "a node on a lighter branch to take a heavier one of empty blocks parting sixty \
          below its tip",
     );
@@ -1217,7 +1270,397 @@ fn a_heavier_branch_of_full_blocks_weighing_more_than_a_window_is_taken() {
     );
     the_victim_dials_the_heavier_side(
         &fork,
+        DEPTH,
         "a node on a lighter branch to take a heavier one of full blocks that parts sixty \
          below its tip and weighs more than one window of the serving peer's allowance",
     );
+}
+
+/// Empty blocks everybody shares under the forks below: enough that a locator
+/// off a branch parting up to a hundred and thirty six below its tip names a
+/// height among them at a hundred and thirty six, where it skips furthest
+/// under seventy two, as it does on a chain of thousands of blocks.
+const SHARED: usize = 150;
+
+/// `SHARED` empty blocks, then as many the victim follows as the deepest
+/// switch a node makes, and a rival of one more parting at the last shared
+/// block. Every fork depth up to that switch is the first blocks of the two,
+/// so it is mined once for every test that reads it.
+fn a_fork_as_deep_as_a_node_undoes() -> &'static DeepFork {
+    static BUILT: OnceLock<DeepFork> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let mut trunk = Forge {
+            state: LedgerState::new(),
+            clock: 1_000,
+        };
+        let shared = (0..SHARED)
+            .map(|_| trunk.mine(&wallet(1), Vec::new()))
+            .collect();
+        let mut aside = trunk.fork();
+        let followed = (0..undoes())
+            .map(|_| trunk.mine(&wallet(1), Vec::new()))
+            .collect();
+        let rival = (0..=undoes())
+            .map(|_| aside.mine(&wallet(3), Vec::new()))
+            .collect();
+        DeepFork {
+            shared,
+            followed,
+            rival,
+        }
+    })
+}
+
+/// The deepest switch a node makes under the rules here.
+fn undoes() -> usize {
+    usize::try_from(ChainStore::new(params()).undo_limit()).unwrap()
+}
+
+/// The branch a peer on the heavier side of `fork` follows when it parts
+/// `depth` below the victim's tip: the shared blocks, then the rival's first
+/// `depth + 1`.
+fn heavier_side(fork: &DeepFork, depth: usize) -> Vec<&Block> {
+    fork.shared.iter().chain(&fork.rival[..=depth]).collect()
+}
+
+/// What an honest peer following `branch`, every block of it at hand as a
+/// node holds them between its memory and its disk, answers `locator` with:
+/// from just past the highest position it agrees with, to its tip.
+fn offered_by(branch: &[&Block], locator: &[Located]) -> Message {
+    let agreed = locator
+        .iter()
+        .find(|entry| {
+            usize::try_from(entry.height)
+                .ok()
+                .and_then(|at| branch.get(at))
+                .is_some_and(|block| block.id() == entry.id)
+        })
+        .map_or(0, |entry| entry.height + 1);
+    let reaches = u64::try_from(branch.len()).unwrap();
+    Message::Chain {
+        from: agreed,
+        count: reaches - agreed,
+    }
+}
+
+/// The first height a node asks for once a peer on a heavier branch has
+/// answered its locator, at every fork depth up to the deepest switch it
+/// makes, is at most one past where the branches part.
+///
+/// That is where the blocks it does not have begin. From seventy three on it
+/// asked one past its own tip instead: a locator names no height between
+/// seventy two and a hundred and thirty six below the tip, so the peer agreed
+/// a batch or more below it, and a node asked only above its tip there. The
+/// investigation of T8-7 of testnet-8 counted every depth from one to seventy
+/// three, and seventy three was the first lost, against a promise to undo a
+/// thousand and twenty four. A count rather than a sample: every depth up to
+/// that promise is in it.
+#[test]
+fn the_first_height_asked_is_where_the_branches_part_at_every_depth_a_node_undoes() {
+    let fork = a_fork_as_deep_as_a_node_undoes();
+    let parts_at = u64::try_from(SHARED).unwrap() - 1;
+    let mut victim = holding(&[&fork.shared]);
+    let mut lost = Vec::new();
+    for (depth, block) in (1..).zip(&fork.followed) {
+        victim.add_block(block.clone(), NOW).unwrap();
+        let theirs = &fork.rival[depth].header;
+        let mut peer = greeted(theirs.total_work, theirs.height);
+        peer.chain_asked = true;
+        let offer = offered_by(&heavier_side(fork, depth), &victim.locator());
+        let asked = on_message(&mut local(&mut victim), &mut peer, offer.clone(), NOW).reply;
+        let first = asked.iter().find_map(|message| match message {
+            Message::GetBlocks(heights) => heights.first().copied(),
+            _ => None,
+        });
+        if first.is_none_or(|at| at > parts_at + 1) {
+            lost.push((depth, offer, first));
+        }
+    }
+    assert_eq!(
+        fork.followed.len(),
+        undoes(),
+        "the premise: every depth up to the deepest switch"
+    );
+    assert!(
+        lost.is_empty(),
+        "of {} fork depths, {} were asked for from above where the branches part, so the \
+         blocks that came back hung on parents this node did not hold; the first, as (depth, \
+         offer, first height asked): {:?}",
+        undoes(),
+        lost.len(),
+        lost.first()
+    );
+}
+
+/// A sync of a heavier branch parting `d` below a tip at height `h` ends on
+/// that branch, in at most `(h + d) / MAX_REQUESTED + 2` rounds of asking for
+/// blocks.
+///
+/// A bound rather than only an ending, so the fix for the depths above is not
+/// a round for ever or a round a block. A round now starts past the last
+/// block the peer delivered that this node holds, on its branch or beside it,
+/// so it is a round for each batch from where the peer agrees to its tip.
+///
+/// Each side of every depth a locator names, where the height the peer
+/// agrees at moves, and between them the rounds move a batch at a time with
+/// the depth; a depth inside each of the two widest gaps, where the first
+/// batch asked is all blocks this node already follows; and the deepest
+/// switch there is.
+#[test]
+fn a_deep_sync_takes_at_most_h_plus_d_over_a_batch_and_two_rounds() {
+    let fork = a_fork_as_deep_as_a_node_undoes();
+    let batch = u64::try_from(MAX_REQUESTED).unwrap();
+    let deepest = undoes();
+    let mut depths: Vec<usize> = [1, 10, 12, 16, 24, 40, 72, 136, 264, 520]
+        .into_iter()
+        .flat_map(|named| [named, named + 1])
+        .collect();
+    depths.extend([300, 700, deepest - 1, deepest]);
+    let mut measured = Vec::new();
+    for depth in depths {
+        let mut victim = holding(&[&fork.shared, &fork.followed[..depth]]);
+        let h = victim.height().unwrap();
+        let d = u64::try_from(depth).unwrap();
+        let bound = (h + d) / batch + 2;
+        let branch = heavier_side(fork, depth);
+        let theirs = &fork.rival[depth].header;
+        // The choice of whom to follow has fallen on the one peer there is,
+        // which on a node still choosing is what lets it take a block past the
+        // depth it undoes.
+        let mut peer = PeerState {
+            chosen: true,
+            chain_asked: true,
+            ..greeted(theirs.total_work, theirs.height)
+        };
+        let mut asks = vec![Message::GetChain {
+            locator: victim.locator(),
+        }];
+        let mut rounds = 0;
+        while !asks.is_empty() && rounds <= bound {
+            let mut next = Vec::new();
+            for ask in asks {
+                let heard = match ask {
+                    Message::GetChain { locator } => vec![offered_by(&branch, &locator)],
+                    Message::GetBlocks(heights) => {
+                        rounds += 1;
+                        heights
+                            .iter()
+                            .filter_map(|at| branch.get(usize::try_from(*at).unwrap()))
+                            .map(|block| Message::Block(Box::new((*block).clone())))
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                for message in heard {
+                    next.extend(on_message(&mut local(&mut victim), &mut peer, message, NOW).reply);
+                }
+            }
+            asks = next;
+        }
+        assert_eq!(
+            victim.tip(),
+            Some(fork.rival[depth].id()),
+            "a node on a branch parting {depth} below its tip at {h} was not on the heavier \
+             branch after {rounds} rounds of a peer answering everything it asked"
+        );
+        assert!(
+            rounds <= bound,
+            "a sync of a branch parting {depth} below a tip at {h} took {rounds} rounds, past \
+             {bound}"
+        );
+        measured.push((depth, h, rounds, bound));
+    }
+    println!("depth, tip, rounds, bound: {measured:?}");
+}
+
+/// A heavier branch of empty blocks parting seventy two below the tip is taken
+/// over real sockets: the deepest fork whose peer agrees less than a batch
+/// below the tip, and the deepest a node took before T8-7 of testnet-8.
+#[test]
+fn a_heavier_branch_parting_seventy_two_below_the_tip_is_taken() {
+    the_victim_dials_the_heavier_side(
+        a_fork_as_deep_as_a_node_undoes(),
+        72,
+        "a node on a lighter branch to take a heavier one parting seventy two below its tip",
+    );
+}
+
+/// A heavier branch parting seventy three below the tip is taken over real
+/// sockets.
+///
+/// The shallowest fork whose peer agrees a batch or more below the tip, at the
+/// locator's position a hundred and thirty six below it. The node asked only
+/// above its own tip there, every block that came back hung on a parent it
+/// did not hold, and it stayed on the lighter branch while connected to the
+/// heavier one for as long as it was watched: an hour, in the investigation
+/// of T8-7. The fork beside it in this file was sixty deep, twelve under that.
+#[test]
+fn a_heavier_branch_parting_seventy_three_below_the_tip_is_taken() {
+    the_victim_dials_the_heavier_side(
+        a_fork_as_deep_as_a_node_undoes(),
+        73,
+        "a node on a lighter branch to take a heavier one parting seventy three below its tip",
+    );
+}
+
+/// A heavier branch parting a hundred and thirty six below the tip is taken
+/// over real sockets: the deepest fork the locator's position at a hundred and
+/// thirty six still agrees at.
+#[test]
+fn a_heavier_branch_parting_a_hundred_and_thirty_six_below_the_tip_is_taken() {
+    the_victim_dials_the_heavier_side(
+        a_fork_as_deep_as_a_node_undoes(),
+        136,
+        "a node on a lighter branch to take a heavier one parting a hundred and thirty six \
+         below its tip",
+    );
+}
+
+/// A heavier branch parting a hundred and thirty seven below the tip is taken
+/// over real sockets: agreed at the locator's next position, two hundred and
+/// sixty four below the tip, so the whole first batch asked is blocks the node
+/// already follows.
+#[test]
+fn a_heavier_branch_parting_a_hundred_and_thirty_seven_below_the_tip_is_taken() {
+    the_victim_dials_the_heavier_side(
+        a_fork_as_deep_as_a_node_undoes(),
+        137,
+        "a node on a lighter branch to take a heavier one parting a hundred and thirty seven \
+         below its tip",
+    );
+}
+
+/// A heavier branch parting as deep below the tip as a node undoes is taken
+/// over real sockets.
+///
+/// The documents promise a switch that deep, and the one test that made one
+/// handed every block in through `Node::submit_block`, which says what the
+/// chain can follow and nothing about what the node would ever ask for.
+#[test]
+fn a_heavier_branch_parting_as_deep_as_a_node_undoes_is_taken() {
+    the_victim_dials_the_heavier_side(
+        a_fork_as_deep_as_a_node_undoes(),
+        undoes(),
+        "a node on a lighter branch to take a heavier one parting as deep below its tip as it \
+         undoes",
+    );
+}
+
+/// A node with a disk takes a heavier branch parting three hundred below its
+/// tip over real sockets.
+///
+/// Such a node lets go of the bodies of its own branch more than
+/// `WARM_BODIES` below its tip, once they are written. The peer here agrees
+/// at the first block, so the whole first batch asked is blocks of that branch
+/// deeper than that. Counted as arrived only while their
+/// bodies were held, they were never counted, and the same batch was asked
+/// every round. A node without a disk keeps every body, so a test on one
+/// could not tell the two apart.
+#[test]
+fn a_node_with_a_disk_takes_a_heavier_branch_parting_three_hundred_below_its_tip() {
+    let fork = a_fork_as_deep_as_a_node_undoes();
+    let directory = std::env::temp_dir().join(format!(
+        "cairn-side-branches-on-disk-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let (victim, _) = Node::open(params(), loopback(), &directory).unwrap();
+    on_the_lighter_side(&victim, fork, 300);
+    assert!(
+        victim.with_chain(|chain| {
+            fork.shared[1..]
+                .iter()
+                .all(|block| chain.block(&block.id()).is_none())
+        }),
+        "the premise: the bodies of the blocks both branches share are let go of"
+    );
+    dials_the_heavier_side(
+        &victim,
+        params(),
+        fork,
+        300,
+        "a node with a disk to take a heavier branch parting three hundred below its tip",
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Rules under which a node on these forks has chosen whom to follow, as a
+/// node on a chain of thousands of blocks has: it undoes less than it holds.
+/// The shape T8-7 of testnet-8 had.
+fn past_choosing() -> ConsensusParams {
+    params().with_burial(128)
+}
+
+/// Two nodes past choosing whom to follow, the one on the lighter branch
+/// dialling the one on a heavier branch parting seventy three below its tip:
+/// the node takes it.
+///
+/// The investigation of T8-7 watched these two nodes for an hour and two
+/// minutes, connected the whole time, and the node never moved a block.
+#[test]
+fn a_node_past_choosing_takes_a_heavier_branch_parting_seventy_three_below_its_tip() {
+    assert!(
+        73 < ChainStore::new(past_choosing()).undo_limit()
+            && u64::try_from(SHARED + 73).unwrap() > ChainStore::new(past_choosing()).undo_limit(),
+        "the premise: a switch the rules allow, on a chain longer than the node undoes"
+    );
+    let fork = a_fork_as_deep_as_a_node_undoes();
+    let victim = Node::bind(past_choosing(), loopback()).unwrap();
+    on_the_lighter_side(&victim, fork, 73);
+    dials_the_heavier_side(
+        &victim,
+        past_choosing(),
+        fork,
+        73,
+        "a node past choosing to take a heavier branch parting seventy three below its tip",
+    );
+}
+
+/// A node that starts with nothing, reads the lighter branch off the only peer
+/// it can see until it is past choosing whom to follow, and then meets a peer
+/// on a heavier branch parting seventy three below its tip: it takes the
+/// heavier branch.
+///
+/// The investigation of T8-7 watched this newcomer for an hour beside the
+/// heavier peer, and it never moved. It meets that peer here once its choice
+/// is settled, which its upkeep does about once a second: a peer that greets
+/// it in the second before has its answer held off for the choice, and is not
+/// asked again until it announces a block. That is a separate defect from
+/// this one, and this test is about what the node asks once it does ask.
+#[test]
+fn a_newcomer_that_read_the_lighter_branch_first_takes_the_heavier_one() {
+    let fork = a_fork_as_deep_as_a_node_undoes();
+    let rules = past_choosing();
+    let lighter = Node::bind(rules, loopback()).unwrap();
+    for block in fork.shared.iter().chain(&fork.followed[..73]) {
+        lighter.submit_block(block.clone()).unwrap();
+    }
+    let heavier = Node::bind(rules, loopback()).unwrap();
+    for block in fork.shared.iter().chain(&fork.rival[..=73]) {
+        heavier.submit_block(block.clone()).unwrap();
+    }
+    let newcomer = Node::bind(rules, loopback()).unwrap();
+    assert_eq!(newcomer.height(), None, "the premise: a node with nothing");
+
+    newcomer.connect(lighter.address()).unwrap();
+    let tip = fork.followed[72].id();
+    wait_for("the newcomer to read the lighter branch whole", || {
+        newcomer.with_chain(ChainStore::tip) == Some(tip)
+    });
+    assert!(
+        !newcomer.with_chain(cairn_net::sync::holds_nothing_it_cannot_undo),
+        "the premise: the newcomer holds more than it undoes, so it has chosen"
+    );
+    thread::sleep(Duration::from_secs(3));
+
+    newcomer.connect(heavier.address()).unwrap();
+    let rival = fork.rival[73].id();
+    wait_for(
+        "a newcomer that read the lighter branch first to take a heavier one parting seventy \
+         three below its tip",
+        || newcomer.with_chain(ChainStore::tip) == Some(rival),
+    );
+    newcomer.shutdown();
+    lighter.shutdown();
+    heavier.shutdown();
 }
