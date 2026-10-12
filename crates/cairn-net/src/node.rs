@@ -13021,6 +13021,27 @@ mod peers_and_loops {
         }
     }
 
+    /// Starts the writer of a connection opened by [`Line::open`], over what
+    /// the node has said on it since: the thread `attach_peer` starts with
+    /// the connection, started late so a test can put it after anything else.
+    fn writing_late(
+        node: &Node,
+        id: PeerId,
+        said: mpsc::Receiver<(Message, usize)>,
+    ) -> JoinHandle<()> {
+        let peers = node.shared.peers();
+        let peer = &peers[&id];
+        start_writing(
+            id,
+            peer.stream.try_clone().unwrap(),
+            said,
+            node.shared.network(),
+            Arc::clone(&peer.outbound.waiting),
+            Arc::clone(&peer.outbound.let_go),
+        )
+        .unwrap()
+    }
+
     /// An introduction from a peer listening on 9944, claiming `height` blocks
     /// carrying `work`, under the number it `drew` at start.
     fn hello(network: NetworkId, height: u64, work: u128, drew: u64) -> Message {
@@ -14645,19 +14666,7 @@ mod peers_and_loops {
                 reading,
             } = line;
             let network = node.shared.network();
-            let writer = {
-                let peers = node.shared.peers();
-                let peer = &peers[&id];
-                start_writing(
-                    id,
-                    peer.stream.try_clone().unwrap(),
-                    said,
-                    network,
-                    Arc::clone(&peer.outbound.waiting),
-                    Arc::clone(&peer.outbound.let_go),
-                )
-                .unwrap()
-            };
+            let writer = writing_late(&node, id, said);
             far.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
             let first = read_message(&mut far, network, crate::wire::MAX_FRAME_BYTES);
             // The table lets go of its end of the queue as `attach_peer` does
@@ -14780,19 +14789,7 @@ mod peers_and_loops {
             reading,
         } = line;
         let network = node.shared.network();
-        let writer = {
-            let peers = node.shared.peers();
-            let peer = &peers[&id];
-            start_writing(
-                id,
-                peer.stream.try_clone().unwrap(),
-                said,
-                network,
-                Arc::clone(&peer.outbound.waiting),
-                Arc::clone(&peer.outbound.let_go),
-            )
-            .unwrap()
-        };
+        let writer = writing_late(&node, id, said);
         node.shared.peers().remove(&id);
         far.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let after = read_message(&mut far, network, crate::wire::MAX_FRAME_BYTES);
