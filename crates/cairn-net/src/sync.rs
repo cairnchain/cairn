@@ -263,7 +263,9 @@ pub struct PeerState {
     pub chosen: bool,
     /// Where the connection came from, filled in by whoever opened it.
     pub remote: Option<IpAddr>,
-    /// Whether this node went out and opened this connection.
+    /// Whether this node went out and reached this peer: opened this
+    /// connection, or opened one to the same peer that the tie between the two
+    /// ended in favour of this one.
     ///
     /// The one thing about a peer that is not the peer's to decide. A
     /// connection somebody else opened is a connection somebody else chose,

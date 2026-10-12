@@ -806,19 +806,29 @@ mod saying {
         test: impl FnOnce(&Node, &mpsc::Receiver<Heard>),
     ) {
         let node = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
+        mining_on(&node, params, alone, test);
+        node.shutdown();
+    }
+
+    /// [`mining`], on a node the test has already set up and stops itself.
+    fn mining_on(
+        node: &Node,
+        params: ConsensusParams,
+        alone: bool,
+        test: impl FnOnce(&Node, &mpsc::Receiver<Heard>),
+    ) {
         let running = AtomicBool::new(true);
         let (tell, told) = mpsc::channel();
         let key = reward_key();
         thread::scope(|scope| {
             scope.spawn(|| {
-                run(&node, &params, key, alone, &running, |report| {
+                run(node, &params, key, alone, &running, |report| {
                     let _ = tell.send(heard(&report));
                 });
             });
             let _stop = Stop(&running);
-            test(&node, &told);
+            test(node, &told);
         });
-        node.shutdown();
     }
 
     /// Waits until the peer `node` dialled has introduced itself, which is
@@ -945,6 +955,89 @@ mod saying {
             stranger.shutdown();
             peer.shutdown();
         });
+    }
+
+    /// **A miner whose dial lost the tie to the connection its peer opened
+    /// still mines.**
+    ///
+    /// Two nodes that dial each other keep one of the two connections, and
+    /// half the time it is the one the peer opened. The wait for a peer
+    /// counted only the connections this node opened, so a miner restarted
+    /// while its peers still held connections to it dialled each of them,
+    /// lost each tie, and waited for as long as it ran: on testnet-8, twenty
+    /// five minutes on a chain at difficulty 1, after saying it had reached
+    /// the seed.
+    ///
+    /// The peer is this test, at the far end of both connections, and it drew
+    /// nought at start, so the tie keeps its connection whatever the miner
+    /// drew. All of it is settled before the miner first looks: the dial is
+    /// in the table for a moment before the tie ends it, and a miner that
+    /// looked then would have mined without the repair.
+    #[test]
+    fn a_miner_whose_dial_lost_the_tie_still_mines() {
+        use cairn_net::message::{Handshake, Message};
+        use cairn_net::wire::write_message;
+        use cairn_net::{Keeps, PROTOCOL_VERSION};
+        use std::io::Read as _;
+        use std::net::{TcpListener, TcpStream};
+
+        let params = ConsensusParams::testnet();
+        let node = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let door = TcpListener::bind("127.0.0.1:0").unwrap();
+        let handshake = Handshake {
+            version: PROTOCOL_VERSION,
+            network: params.network,
+            genesis: Hash32::ZERO,
+            height: 0,
+            total_work: 0,
+            listen: door.local_addr().unwrap().port(),
+            nonce: 0,
+            keeps: Keeps::default(),
+        };
+        // The peer's own connection, in and introduced first, as the seed's
+        // was.
+        let mut theirs = TcpStream::connect(node.address()).unwrap();
+        write_message(&mut theirs, params.network, &Message::Hello(handshake)).unwrap();
+        introduced(&node);
+        // Then the miner's dial to it, answered.
+        node.connect(door.local_addr().unwrap()).unwrap();
+        let (mut ours, _) = door.accept().unwrap();
+        write_message(&mut ours, params.network, &Message::Welcome(handshake)).unwrap();
+        ours.set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let mut read = [0u8; 4_096];
+        let ended = loop {
+            match ours.read(&mut read) {
+                Ok(0) => break true,
+                Ok(_) => {}
+                Err(error) => {
+                    break !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    )
+                }
+            }
+        };
+        assert!(ended, "fixture: the tie never ended the miner's own dial");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while node.peer_count() > 1 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            (node.peer_count(), node.peers_introduced()),
+            (1, 1),
+            "fixture: the miner's node did not come down to the connection its peer opened"
+        );
+
+        mining_on(&node, params, false, |_, told| {
+            assert_eq!(
+                next(told),
+                Heard::Found(0, true),
+                "a miner whose dial lost the tie to its peer's own connection did not mine"
+            );
+        });
+        node.shutdown();
+        drop(theirs);
     }
 
     /// A block this node's own chain refuses is said, with the reason under
