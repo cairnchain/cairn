@@ -14047,6 +14047,292 @@ mod peers_and_loops {
         );
     }
 
+    /// The order two nodes that dial each other are made to do it in.
+    #[derive(Clone, Copy, Debug)]
+    enum Dialling {
+        /// The peer's dial in and introduced before this node dials: a node
+        /// restarted while its peers still held connections to it.
+        TheirsFirst,
+        /// This node's dial in and introduced before the peer dials.
+        OursFirst,
+        /// Both at the same moment.
+        AtOnce,
+    }
+
+    /// Whether `done` holds within half a minute.
+    fn within_half_a_minute(done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    /// **A node whose dial lost the tie to its peer's own dial has still
+    /// reached that peer.**
+    ///
+    /// Two nodes that dial each other keep one of the two connections, the one
+    /// opened by whichever drew the lower number at start, so half the time
+    /// the one kept is the one the peer opened. The peers a node had reached
+    /// were counted off the connections it opened, so a node whose every dial
+    /// went to a peer that dialled it too, and lost, had reached nobody, and
+    /// the miner waits for a peer it reached. On testnet-8 a miner restarted
+    /// while the seed and the explorer's node still held connections to it
+    /// said it had reached the seed, held three peers, and mined nothing for
+    /// twenty five minutes on a chain at difficulty 1.
+    ///
+    /// The node that drew the higher number is the one whose dial loses, so
+    /// nothing here is left to chance. Each order the two dials arrive in is
+    /// its own way through the tie: the half that gets there second decides
+    /// it, and that is this node's dial in one and the peer's in the other.
+    #[test]
+    fn a_node_whose_dial_lost_the_tie_has_still_reached_its_peer() {
+        for dialling in [Dialling::TheirsFirst, Dialling::OursFirst, Dialling::AtOnce] {
+            let one = Node::bind(ConsensusParams::testnet(), local()).unwrap();
+            let other = Node::bind(ConsensusParams::testnet(), local()).unwrap();
+            let (node, peer) = if one.shared.nonce > other.shared.nonce {
+                (one, other)
+            } else {
+                (other, one)
+            };
+            match dialling {
+                Dialling::TheirsFirst => {
+                    peer.connect(node.address()).unwrap();
+                    assert!(
+                        within_half_a_minute(|| node.peers_introduced() == 1),
+                        "fixture: the peer's dial never introduced itself"
+                    );
+                    node.connect(peer.address()).unwrap();
+                }
+                Dialling::OursFirst => {
+                    node.connect(peer.address()).unwrap();
+                    assert!(
+                        within_half_a_minute(|| node.peers_introduced() == 1),
+                        "fixture: this node's dial never introduced itself"
+                    );
+                    peer.connect(node.address()).unwrap();
+                }
+                Dialling::AtOnce => {
+                    let together = std::sync::Barrier::new(2);
+                    thread::scope(|scope| {
+                        scope.spawn(|| {
+                            together.wait();
+                            peer.connect(node.address()).unwrap();
+                        });
+                        together.wait();
+                        node.connect(peer.address()).unwrap();
+                    });
+                }
+            }
+            // Settled once the one connection left is the one the peer
+            // opened, introduced: this node's dial is the half the tie ends.
+            let settled = within_half_a_minute(|| {
+                let peers = node.shared.peers();
+                peers.len() == 1 && peers.values().all(|held| !held.dialled && held.greeted)
+            });
+            let reached = node.peers_reached();
+            node.shutdown();
+            peer.shutdown();
+            assert!(
+                settled,
+                "fixture, {dialling:?}: the pair never came down to the connection the peer opened"
+            );
+            assert_eq!(
+                reached, 1,
+                "{dialling:?}: a node whose dial lost the tie to its peer's own dial counted no \
+                 peer it had reached, so a miner there waits for as long as it runs"
+            );
+        }
+    }
+
+    /// The two halves of a pair, run through the tie in the order given: the
+    /// dial answered by a node that drew `dial_drew`, and the other half opened
+    /// by one that drew nought, which keeps it whatever this node drew. Gives
+    /// back the node with the dial gone from the table, as its own loop takes
+    /// it once the tie has ended it.
+    fn a_tie_lost_by_the_dial(
+        dialled_at: SocketAddr,
+        listens: SocketAddr,
+        dial_drew: u64,
+        dial_second: bool,
+    ) -> Node {
+        let node = quiet();
+        assert!(
+            node.shared.nonce > 1,
+            "fixture: this node drew nought or one"
+        );
+        let (socket, _far) = a_socket();
+        {
+            let mut peers = node.shared.peers();
+            peers.insert(
+                1,
+                Peer {
+                    dialled_to: Some(dialled_at),
+                    greeted: true,
+                    ..stand_in(&socket, true)
+                },
+            );
+            peers.insert(
+                2,
+                Peer {
+                    greeted: true,
+                    ..stand_in(&socket, false)
+                },
+            );
+        }
+        let introduced = |drew: u64| {
+            let mut state = PeerState::new(Some(listens.ip()));
+            state.greeted = true;
+            state.advertised = Some(listens);
+            state.nonce = drew;
+            state
+        };
+        let dial = (1, introduced(dial_drew), Some(dialled_at));
+        let theirs = (2, introduced(0), None);
+        let (first, second) = if dial_second {
+            (theirs, dial)
+        } else {
+            (dial, theirs)
+        };
+        assert_eq!(
+            what_it_said_it_was(&node.shared, first.0, &first.1, first.2, 1_000),
+            Ending::Keep,
+            "fixture: the first half of the pair was ended"
+        );
+        let ending = what_it_said_it_was(&node.shared, second.0, &second.1, second.2, 1_000);
+        let ended = if dial_second {
+            ending == Ending::HangUp
+        } else {
+            ending == Ending::Keep && node.shared.peers()[&1].outbound.was_let_go()
+        };
+        assert!(ended, "fixture: the tie did not end this node's dial");
+        node.shared.peers().remove(&1);
+        node
+    }
+
+    /// **The half a tie keeps in place of this node's dial counts as a peer
+    /// it reached, at the address it dialled, when it is the same peer, and
+    /// not otherwise.**
+    ///
+    /// Two connections are a pair when they name one address, and every node
+    /// behind one public address that listens on the same port names the same
+    /// one. What says two halves are one node is the number it drew at start:
+    /// a dial answered by one node and a connection another opened, kept in
+    /// its place, is a stranger that dialled in.
+    ///
+    /// The anchors are what a start dials first, and are written from the
+    /// address this node dialled, not the one the peer named, which here are
+    /// two: a peer listening behind a port forwarded from another.
+    #[test]
+    fn the_half_a_tie_keeps_for_a_dial_is_reached_only_when_it_is_the_same_peer() {
+        let dialled_at = SocketAddr::from((Ipv4Addr::LOCALHOST, 19_944));
+        let listens = SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944));
+        for dial_second in [false, true] {
+            for (dial_drew, same) in [(0, true), (1, false)] {
+                let node = a_tie_lost_by_the_dial(dialled_at, listens, dial_drew, dial_second);
+                let reached = node.peers_reached();
+                let anchors = node.shared.went_out_to();
+                stop_all(&node);
+                let order = if dial_second {
+                    "the dial deciding"
+                } else {
+                    "the peer's connection deciding"
+                };
+                if same {
+                    assert_eq!(
+                        reached, 1,
+                        "{order}: the connection the peer opened, kept in place of this \
+                         node's dial to it, was not a peer this node had reached"
+                    );
+                    assert_eq!(
+                        anchors,
+                        vec![dialled_at],
+                        "{order}: and it was not written down as an anchor at the address dialled"
+                    );
+                } else {
+                    assert_eq!(
+                        reached, 0,
+                        "{order}: a connection another node opened, kept in place of this \
+                         node's dial to an address they share, counted as a peer it reached"
+                    );
+                    assert!(
+                        anchors.is_empty(),
+                        "{order}: and the address dialled was written down as an anchor for it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A round does not dial again an address whose dial lost the tie to a
+    /// connection the same peer opened, which this node still holds.
+    ///
+    /// Upkeep skips the addresses it holds, read off its connections: where
+    /// each peer says it listens, and where this node dialled. The half a tie
+    /// keeps in place of a dial is the peer's own connection, so a peer
+    /// listening behind a port forwarded from another was held at the port it
+    /// named and not at the one dialled, and the next round dialled that one
+    /// again, to lose the same tie.
+    #[test]
+    fn a_round_does_not_dial_again_an_address_whose_dial_lost_the_tie() {
+        let door = a_door();
+        let dialled_at = door.local_addr().unwrap();
+        let listens = SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944));
+        let node = a_tie_lost_by_the_dial(dialled_at, listens, 0, true);
+        node.shared.book().insert(dialled_at);
+        node.shared.running.store(true, Ordering::SeqCst);
+        dial_from_book(&node.shared, 1_000);
+        let opened = node
+            .shared
+            .peers()
+            .values()
+            .filter(|peer| peer.dialled)
+            .count();
+        stop_all(&node);
+        assert_eq!(
+            opened, 0,
+            "a round dialled again the address whose dial lost the tie to a peer this node holds"
+        );
+    }
+
+    /// What a peer says about the network is heard as from a peer this node
+    /// dialled, when the tie kept the peer's own connection in place of this
+    /// node's dial.
+    ///
+    /// An address inside this machine or its network is taken only from a
+    /// peer this node dialled, in the same place. The connection's loop read
+    /// that off the connection, set once as it opened, and the dial can lose
+    /// the tie in the dial's own loop after this one has started: a node
+    /// whose dials in a lab all lost took no address of the lab from anybody.
+    #[test]
+    fn a_peer_kept_in_place_of_a_dial_is_heard_as_one_this_node_dialled() {
+        let node = quiet();
+        let greeting = hello(node.shared.network(), 0, 0, stranger(&node));
+        let mut line = Line::open(node, None);
+        line.send(&greeting);
+        assert!(line.hears(|message| matches!(message, Message::Welcome(_))));
+        // What the dial's own loop leaves on this connection as the tie ends
+        // it: the address it dialled.
+        line.node
+            .shared
+            .peers()
+            .get_mut(&line.id)
+            .unwrap()
+            .dialled_to = Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944)));
+        let named = SocketAddr::from((Ipv4Addr::LOCALHOST, 29_944));
+        line.send(&Message::Peers(vec![crate::message::PeerAddress(named)]));
+        let heard = within_half_a_minute(|| line.node.known_addresses().contains(&named));
+        drop(line.close());
+        assert!(
+            heard,
+            "a loopback address named by a peer this node had dialled, over the connection \
+             the tie kept in place of the dial, was not taken"
+        );
+    }
+
     /// A node whose table is full dials nobody.
     ///
     /// The round took a dial as allowed when either the refusal or the room
