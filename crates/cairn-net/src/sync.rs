@@ -1490,6 +1490,25 @@ fn past_what_arrived(chain: &ChainStore, from: u64, arrived: Option<Located>) ->
     from
 }
 
+/// The lowest height a block from a peer can be taken at: one above the
+/// deepest block a switch can land on, and one above the first block of the
+/// branch this node holds.
+///
+/// A block at or under either is refused whatever comes with it, as too deep
+/// to switch to or as hanging below everything held. A peer agrees with a
+/// locator at one of the few heights it names under the window held in full,
+/// as low as the first block, so a branch parting deep enough for the locator
+/// to meet it only down there was asked for from there, refused a batch at a
+/// time, and never asked past it.
+fn lowest_worth_asking(chain: &ChainStore) -> u64 {
+    let deepest = chain
+        .height()
+        .and_then(|tip| tip.checked_sub(chain.undo_limit()));
+    deepest
+        .max(chain.branch_start())
+        .map_or(0, |floor| floor.saturating_add(1))
+}
+
 /// Asks for a stretch of a peer's branch, starting at `from`.
 ///
 /// `prompted` is whether this node had asked for a chain. It decides nothing
@@ -2298,13 +2317,14 @@ fn on_block_charged(
     if asked && chain.id_at(at) == Some(id) {
         peer.hand_back(charged.saturating_sub(COST_TRIVIAL), now);
     }
-    // Held, on the branch followed or beside it: new here, or a body this node
+    // On the branch followed, or held beside it: new here, or a body this node
     // already held from this peer or from another. Not a block hanging on a
     // parent nobody has sent yet, which is not held at all, and would
     // otherwise put what did arrive out of reach of the next round. One on the
-    // branch followed counts as much as one beside it: see
-    // [`PeerState::aside`].
-    if chain.held_header(&id).is_some() {
+    // branch counts as much as one beside it, see [`PeerState::aside`], and
+    // is asked of the branch rather than of the bodies held: a node with a
+    // disk lets go of those more than `WARM_BODIES` below its tip.
+    if chain.id_at(at) == Some(id) || chain.held_header(&id).is_some() {
         peer.aside = Some(Located::new(at, id));
     }
     reaction
@@ -2407,7 +2427,8 @@ fn answer(
         Message::Chain { from, count } => {
             // Taken whatever this answer comes to: see [`PeerState::aside`].
             let arrived = peer.aside.take();
-            let start = past_what_arrived(local.chain, from, arrived);
+            let lowest = from.max(lowest_worth_asking(local.chain));
+            let start = past_what_arrived(local.chain, lowest, arrived);
             let end = from.saturating_add(count);
             // Taken rather than read, so one `GetChain` pays for one answer
             // and a peer that sends five gets the price of a push for four.
