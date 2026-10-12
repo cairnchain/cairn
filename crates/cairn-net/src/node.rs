@@ -6061,6 +6061,36 @@ impl Node {
         })
     }
 
+    /// Whether a peer this node reached itself said, when it introduced
+    /// itself, that its chain has work this node's fork choice would take
+    /// over the branch it follows: [`Self::claim_ahead`] among
+    /// [`Self::peers_reached`].
+    ///
+    /// For a miner that has just started, deciding whether to take a chain
+    /// before it builds on its own tip. Only peers this node reached, because
+    /// a claim is written by whoever makes it, and a stranger that dials in
+    /// and claims a lot must not be able to stop a miner.
+    ///
+    /// A peer reached whose claim is not written down yet counts as claiming
+    /// more. The introduction that makes it reached is the one that carries
+    /// the claim, and the two are written a moment apart: read in between,
+    /// the peer is reached and has said nothing, and a miner looking then
+    /// would build on the tip it is about to leave.
+    pub fn a_peer_reached_claims_more(&self) -> bool {
+        let claims: Vec<Option<(u64, u128)>> = self
+            .shared
+            .peers()
+            .values()
+            .filter(|peer| peer.reached())
+            .map(|peer| peer.claims)
+            .collect();
+        self.with_chain(|chain| {
+            claims
+                .into_iter()
+                .any(|claim| claim.is_none_or(|(height, work)| chain.outweighed_by(height, work)))
+        })
+    }
+
     /// Connected peers that say they keep the whole cold set.
     ///
     /// For whatever is showing a wallet its money: a note whose path this node
@@ -17013,6 +17043,46 @@ mod peers_and_loops {
             Some((height, work + 8)),
             "fixture: the tie is the most work claimed"
         );
+        stop_all(&node);
+    }
+
+    /// **What holds a miner that has just started is the claim of a peer
+    /// this node reached, and never a stranger's.**
+    ///
+    /// A stranger that dialled in and claims a heavier chain is not read, a
+    /// peer reached that claims nothing more is no reason to wait, and one
+    /// that claims more, or whose claim is still on its way, is.
+    #[test]
+    fn only_a_peer_reached_holds_a_miner_with_its_claim() {
+        let node = quiet();
+        let (near, _far) = a_socket();
+        let ahead = (5, 100);
+        let reached = |claims: Option<(u64, u128)>| Peer {
+            dialled_to: Some(near.peer_addr().unwrap()),
+            greeted: true,
+            claims,
+            ..stand_in(&near, true)
+        };
+        node.shared.peers().insert(
+            1,
+            Peer {
+                greeted: true,
+                claims: Some(ahead),
+                ..stand_in(&near, false)
+            },
+        );
+        node.shared.peers().insert(2, reached(Some((0, 0))));
+        assert!(
+            !node.a_peer_reached_claims_more(),
+            "a stranger that dialled in and claimed a heavier chain held a miner"
+        );
+        node.shared.peers().insert(3, reached(None));
+        assert!(
+            node.a_peer_reached_claims_more(),
+            "a peer reached whose claim had not been written down let a miner build"
+        );
+        node.shared.peers().insert(3, reached(Some(ahead)));
+        assert!(node.a_peer_reached_claims_more());
         stop_all(&node);
     }
 }
