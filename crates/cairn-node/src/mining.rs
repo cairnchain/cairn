@@ -911,7 +911,9 @@ mod saying {
 
     /// A peer that holds `chain`, says so when the node under test reaches it,
     /// and answers the node's question for the chain, from the height `from`
-    /// on, only once `deliver` is set. It ends when the connection does.
+    /// on, only once `deliver` is set. It ends when the connection does, or
+    /// a minute after it started, so a test that fails cannot leave it
+    /// waiting for ever.
     ///
     /// Written out rather than a node, because a node hands its chain over as
     /// fast as the loopback carries it, and a miner that built before the
@@ -932,7 +934,7 @@ mod saying {
         let count = blocks.len() as u64 - from;
         let serving = thread::spawn(move || {
             door.set_nonblocking(true).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(30);
+            let deadline = Instant::now() + Duration::from_secs(60);
             let mut stream = loop {
                 match door.accept() {
                     Ok((stream, _)) => break stream,
@@ -945,7 +947,7 @@ mod saying {
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .unwrap();
             let mut asked = false;
-            loop {
+            while Instant::now() < deadline {
                 let mut answers = Vec::new();
                 if asked && deliver.load(Ordering::SeqCst) {
                     asked = false;
@@ -1408,6 +1410,11 @@ mod saying {
     ///
     /// What a peer says is not proof of anything, and the wait reads it: a
     /// peer that lies buys this much of a miner's time, once, at the start.
+    ///
+    /// The miner first waits for a peer for longer than that time, as one
+    /// waited twenty five minutes on testnet-8 on 12 October. The time
+    /// is counted from the peer, so it is all still there once the peer is
+    /// reached.
     #[test]
     fn a_peer_reached_that_never_hands_its_chain_over_holds_the_miner_only_so_long() {
         let params = ConsensusParams {
@@ -1426,9 +1433,14 @@ mod saying {
 
         mining_on(&node, params, false, |node, told| {
             assert_eq!(next(told), Heard::Waits(Waiting::ForAPeer));
+            thread::sleep(Duration::from_secs(catch_up + 1));
             let reached = Instant::now();
             node.connect(peer).unwrap();
-            assert_eq!(next(told), Heard::Waits(Waiting::ForTheirChain(catch_up)));
+            assert_eq!(
+                next(told),
+                Heard::Waits(Waiting::ForTheirChain(catch_up)),
+                "the time given to a peer's chain was spent waiting for the peer"
+            );
             assert_eq!(
                 next(told),
                 Heard::Resumes,

@@ -17045,6 +17045,46 @@ mod peers_and_loops {
         );
         stop_all(&node);
     }
+
+    /// **What holds a miner that has just started is the claim of a peer
+    /// this node reached, and never a stranger's.**
+    ///
+    /// A stranger that dialled in and claims a heavier chain is not read, a
+    /// peer reached that claims nothing more is no reason to wait, and one
+    /// that claims more, or whose claim is still on its way, is.
+    #[test]
+    fn only_a_peer_reached_holds_a_miner_with_its_claim() {
+        let node = quiet();
+        let (near, _far) = a_socket();
+        let ahead = (5, 100);
+        let reached = |claims: Option<(u64, u128)>| Peer {
+            dialled_to: Some(near.peer_addr().unwrap()),
+            greeted: true,
+            claims,
+            ..stand_in(&near, true)
+        };
+        node.shared.peers().insert(
+            1,
+            Peer {
+                greeted: true,
+                claims: Some(ahead),
+                ..stand_in(&near, false)
+            },
+        );
+        node.shared.peers().insert(2, reached(Some((0, 0))));
+        assert!(
+            !node.a_peer_reached_claims_more(),
+            "a stranger that dialled in and claimed a heavier chain held a miner"
+        );
+        node.shared.peers().insert(3, reached(None));
+        assert!(
+            node.a_peer_reached_claims_more(),
+            "a peer reached whose claim had not been written down let a miner build"
+        );
+        node.shared.peers().insert(3, reached(Some(ahead)));
+        assert!(node.a_peer_reached_claims_more());
+        stop_all(&node);
+    }
 }
 
 /// What a node says and does about a clock, its own or a block's.
