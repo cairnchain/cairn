@@ -1393,6 +1393,9 @@ struct Outbound {
     /// loop, and looked at by that loop whenever a read returns: see
     /// [`Peer::let_go`].
     let_go: Arc<AtomicBool>,
+    /// Set with `let_go` when what is already queued is to be written before
+    /// the connection closes: see [`Peer::let_go_once_written`].
+    once_written: Arc<AtomicBool>,
 }
 
 impl Outbound {
@@ -1402,12 +1405,19 @@ impl Outbound {
             waiting: Arc::new(AtomicUsize::new(0)),
             asked_for_the_chain: Arc::new(AtomicBool::new(false)),
             let_go: Arc::new(AtomicBool::new(false)),
+            once_written: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Whether this node has ended the connection from outside its loop.
     fn was_let_go(&self) -> bool {
         self.let_go.load(Ordering::SeqCst)
+    }
+
+    /// Whether this node, ending the connection from outside its loop, left
+    /// what was queued for it to be written first.
+    fn closes_once_written(&self) -> bool {
+        self.once_written.load(Ordering::SeqCst)
     }
 
     /// Queues a message this node composed outside the connection's own
@@ -1637,6 +1647,32 @@ impl Peer {
     fn let_go(&self) {
         self.outbound.let_go.store(true, Ordering::SeqCst);
         let _ = self.stream.shutdown(Shutdown::Both);
+    }
+
+    /// Ends this connection from outside its own loop once what is queued
+    /// for it has been written: the half of a pair the tie ends from the
+    /// other half's loop.
+    ///
+    /// When the far end opened it, it is the far end's dial, and the far end
+    /// works the same tie out, and counts the half kept in its place as a
+    /// peer it reached, only from this node's introduction on it. The
+    /// connection's own loop queues that introduction as it writes itself
+    /// down, which is before the other half can find it, but not always
+    /// before the writer has sent it. Shut both ways here, the introduction
+    /// went to a socket already shut and the far end's dial ended on nothing:
+    /// two nodes that dialled each other at the same moment met that three
+    /// times in two hundred on a laptop, and on the Windows runner, and the
+    /// one whose dial lost counted no peer it had reached.
+    ///
+    /// [`Self::let_go`] with the writing half left open. The loop leaves at
+    /// its next read, and shuts only its reading half as it does after a last
+    /// word of its own, so the writer delivers what is queued and shuts the
+    /// rest once the queue is closed and done. Marked first, so a read the
+    /// shutdown wakes finds both marks.
+    fn let_go_once_written(&self) {
+        self.outbound.once_written.store(true, Ordering::SeqCst);
+        self.outbound.let_go.store(true, Ordering::SeqCst);
+        let _ = self.stream.shutdown(Shutdown::Read);
     }
 }
 
@@ -10718,8 +10754,13 @@ fn what_it_said_it_was(
         shared.carry_the_dial(other, id);
         // This is the half to keep, so the other half goes. Both ends work the
         // rule out the same way, so they end the same connection; what neither
-        // end could do before was end it from this side of the pair.
-        shared.hang_up(other);
+        // end could do before was end it from this side of the pair. It goes
+        // once what it has queued is written, which is this node's
+        // introduction when the far end dialled it: see
+        // `Peer::let_go_once_written`.
+        if let Some(half) = shared.peers().get(&other) {
+            half.let_go_once_written();
+        }
     }
     Ending::Keep
 }
@@ -10996,7 +11037,9 @@ fn read_loop(
     // Only the reading half after a last word, which the writer has still to
     // deliver: it shuts the rest itself once its queue is closed and done, and
     // the far end ends the connection from its side as soon as it reads it.
-    let _ = stream.shutdown(if last_word {
+    // The same for a connection ended from outside once what is queued for it
+    // is written: see `Peer::let_go_once_written`.
+    let _ = stream.shutdown(if last_word || outbound.closes_once_written() {
         Shutdown::Read
     } else {
         Shutdown::Both
