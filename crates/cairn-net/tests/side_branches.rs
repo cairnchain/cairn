@@ -1177,7 +1177,7 @@ fn a_deep_fork(full: bool) -> DeepFork {
 fn the_victim_dials_the_heavier_side(fork: &DeepFork, depth: usize, what: &str) {
     let victim = Node::bind(params(), loopback()).unwrap();
     on_the_lighter_side(&victim, fork, depth);
-    dials_the_heavier_side(victim, params(), fork, depth, what);
+    dials_the_heavier_side(&victim, params(), fork, depth, what);
 }
 
 /// Hands `victim` the lighter side of `fork`, `depth` blocks above where the
@@ -1197,7 +1197,7 @@ fn on_the_lighter_side(victim: &Node, fork: &DeepFork, depth: usize) {
 /// `victim`, on the lighter side of `fork`, dials a node judging by `rules`
 /// on the heavier side, a block longer, and takes the heavier branch.
 fn dials_the_heavier_side(
-    victim: Node,
+    victim: &Node,
     rules: ConsensusParams,
     fork: &DeepFork,
     depth: usize,
@@ -1351,9 +1351,10 @@ fn offered_by(branch: &[&Block], locator: &[Located]) -> Message {
 /// asked one past its own tip instead: a locator names no height between
 /// seventy two and a hundred and thirty six below the tip, so the peer agreed
 /// a batch or more below it, and a node asked only above its tip there. The
-/// investigation of T8-7 of testnet-8 counted seventy two depths reached and
-/// every one after them lost, against a promise to undo a thousand and twenty
-/// four. A count rather than a sample: every depth in between is in it.
+/// investigation of T8-7 of testnet-8 counted every depth from one to seventy
+/// three, and seventy three was the first lost, against a promise to undo a
+/// thousand and twenty four. A count rather than a sample: every depth up to
+/// that promise is in it.
 #[test]
 fn the_first_height_asked_is_where_the_branches_part_at_every_depth_a_node_undoes() {
     let fork = a_fork_as_deep_as_a_node_undoes();
@@ -1371,7 +1372,7 @@ fn the_first_height_asked_is_where_the_branches_part_at_every_depth_a_node_undoe
             Message::GetBlocks(heights) => heights.first().copied(),
             _ => None,
         });
-        if !first.is_some_and(|at| at <= parts_at + 1) {
+        if first.is_none_or(|at| at > parts_at + 1) {
             lost.push((depth, offer, first));
         }
     }
@@ -1393,50 +1394,28 @@ fn the_first_height_asked_is_where_the_branches_part_at_every_depth_a_node_undoe
 
 /// A sync of a heavier branch parting `d` below a tip at height `h` ends on
 /// that branch, in at most `(h + d) / MAX_REQUESTED + 2` rounds of asking for
-/// blocks, at every depth where the height the peer agrees at moves.
+/// blocks.
 ///
 /// A bound rather than only an ending, so the fix for the depths above is not
 /// a round for ever or a round a block. A round now starts past the last
 /// block the peer delivered that this node holds, on its branch or beside it,
-/// so it is a round for each batch from where the peer agrees to its tip. The
-/// depths are each side of every locator position under the tip, and the
-/// deepest switch there is, since between two positions the rounds move one
-/// batch at a time with the depth.
+/// so it is a round for each batch from where the peer agrees to its tip.
+///
+/// Each side of every depth a locator names, where the height the peer
+/// agrees at moves, and between them the rounds move a batch at a time with
+/// the depth; a depth inside each of the two widest gaps, where the first
+/// batch asked is all blocks this node already follows; and the deepest
+/// switch there is.
 #[test]
-fn a_sync_of_a_branch_parting_d_below_a_tip_at_h_takes_about_h_plus_d_over_a_batch_rounds() {
+fn a_deep_sync_takes_at_most_h_plus_d_over_a_batch_and_two_rounds() {
     let fork = a_fork_as_deep_as_a_node_undoes();
     let batch = u64::try_from(MAX_REQUESTED).unwrap();
     let deepest = undoes();
-    let depths = [
-        1,
-        2,
-        10,
-        11,
-        12,
-        13,
-        16,
-        17,
-        24,
-        25,
-        40,
-        41,
-        72,
-        73,
-        136,
-        137,
-        200,
-        264,
-        265,
-        392,
-        393,
-        520,
-        521,
-        776,
-        904,
-        905,
-        deepest - 1,
-        deepest,
-    ];
+    let mut depths: Vec<usize> = [1, 10, 12, 16, 24, 40, 72, 136, 264, 520]
+        .into_iter()
+        .flat_map(|named| [named, named + 1])
+        .collect();
+    depths.extend([300, 700, deepest - 1, deepest]);
     let mut measured = Vec::new();
     for depth in depths {
         let mut victim = holding(&[&fork.shared, &fork.followed[..depth]]);
@@ -1596,7 +1575,7 @@ fn a_node_with_a_disk_takes_a_heavier_branch_parting_three_hundred_below_its_tip
         "the premise: the bodies of the blocks both branches share are let go of"
     );
     dials_the_heavier_side(
-        victim,
+        &victim,
         params(),
         fork,
         300,
@@ -1629,7 +1608,7 @@ fn a_node_past_choosing_takes_a_heavier_branch_parting_seventy_three_below_its_t
     let victim = Node::bind(past_choosing(), loopback()).unwrap();
     on_the_lighter_side(&victim, fork, 73);
     dials_the_heavier_side(
-        victim,
+        &victim,
         past_choosing(),
         fork,
         73,
