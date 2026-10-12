@@ -14186,6 +14186,9 @@ mod peers_and_loops {
     /// nothing here is left to chance. Each order the two dials arrive in is
     /// its own way through the tie: the half that gets there second decides
     /// it, and that is this node's dial in one and the peer's in the other.
+    /// With the peer's dial first, the order seen live, the peer decides on
+    /// its side before this node's dial has heard a word, and it ended that
+    /// dial without introducing itself, so this node never saw a pair at all.
     #[test]
     fn a_node_whose_dial_lost_the_tie_has_still_reached_its_peer() {
         for dialling in [Dialling::TheirsFirst, Dialling::OursFirst, Dialling::AtOnce] {

@@ -806,12 +806,13 @@ mod saying {
         test: impl FnOnce(&Node, &mpsc::Receiver<Heard>),
     ) {
         let node = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
-        mining_on(node, params, alone, test);
+        mining_on(&node, params, alone, test);
+        node.shutdown();
     }
 
-    /// [`mining`], on a node the test has already set up.
+    /// [`mining`], on a node the test has already set up and stops itself.
     fn mining_on(
-        node: Node,
+        node: &Node,
         params: ConsensusParams,
         alone: bool,
         test: impl FnOnce(&Node, &mpsc::Receiver<Heard>),
@@ -821,14 +822,13 @@ mod saying {
         let key = reward_key();
         thread::scope(|scope| {
             scope.spawn(|| {
-                run(&node, &params, key, alone, &running, |report| {
+                run(node, &params, key, alone, &running, |report| {
                     let _ = tell.send(heard(&report));
                 });
             });
             let _stop = Stop(&running);
-            test(&node, &told);
+            test(node, &told);
         });
-        node.shutdown();
     }
 
     /// Waits until the peer `node` dialled has introduced itself, which is
@@ -1029,13 +1029,14 @@ mod saying {
             "fixture: the miner's node did not come down to the connection its peer opened"
         );
 
-        mining_on(node, params, false, |_, told| {
+        mining_on(&node, params, false, |_, told| {
             assert_eq!(
                 next(told),
                 Heard::Found(0, true),
                 "a miner whose dial lost the tie to its peer's own connection did not mine"
             );
         });
+        node.shutdown();
         drop(theirs);
     }
 
