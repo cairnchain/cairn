@@ -401,8 +401,9 @@ fn a_peer_that_agrees_a_batch_or_more_below_the_tip_is_asked_from_there_a_batch_
         firsts
     };
 
-    // From one rather than nought: the first block is one every chain this
-    // node meets starts with, and nothing parts below the block above it.
+    // From one rather than nought: nothing at or below the first block of the
+    // branch this node holds can be taken, and every chain it meets starts
+    // with that block.
     assert_eq!(
         rounds_from(0),
         vec![1, 1 + batch, have],
@@ -1566,17 +1567,18 @@ fn a_heavier_branch_parting_as_deep_as_a_node_undoes_is_taken() {
     );
 }
 
-/// A node with a disk takes a heavier branch parting a hundred and thirty
-/// seven below its tip over real sockets.
+/// A node with a disk takes a heavier branch parting three hundred below its
+/// tip over real sockets.
 ///
 /// Such a node lets go of the bodies of its own branch more than
-/// `WARM_BODIES` below its tip, once they are written, and the whole first
-/// batch asked here is blocks of that branch deeper than that. Counted as
-/// arrived only while their bodies were held, they were never counted, and
-/// the same batch was asked every round. A node without a disk keeps every
-/// body, so the tests above could not tell the two apart.
+/// `WARM_BODIES` below its tip, once they are written. The peer here agrees
+/// at the first block, so the whole first batch asked is blocks of that branch
+/// deeper than that. Counted as arrived only while their
+/// bodies were held, they were never counted, and the same batch was asked
+/// every round. A node without a disk keeps every body, so a test on one
+/// could not tell the two apart.
 #[test]
-fn a_node_with_a_disk_takes_a_heavier_branch_parting_a_hundred_and_thirty_seven_below_its_tip() {
+fn a_node_with_a_disk_takes_a_heavier_branch_parting_three_hundred_below_its_tip() {
     let fork = a_fork_as_deep_as_a_node_undoes();
     let directory = std::env::temp_dir().join(format!(
         "cairn-side-branches-on-disk-{}",
@@ -1584,19 +1586,21 @@ fn a_node_with_a_disk_takes_a_heavier_branch_parting_a_hundred_and_thirty_seven_
     ));
     let _ = std::fs::remove_dir_all(&directory);
     let (victim, _) = Node::open(params(), loopback(), &directory).unwrap();
-    on_the_lighter_side(&victim, fork, 137);
+    on_the_lighter_side(&victim, fork, 300);
     assert!(
-        victim.with_chain(|chain| chain.block(&fork.shared[SHARED - 1].id()).is_none()),
-        "the premise: the body of the block where the branches part, far below the tip, is \
-         let go of"
+        victim.with_chain(|chain| {
+            fork.shared[1..]
+                .iter()
+                .all(|block| chain.block(&block.id()).is_none())
+        }),
+        "the premise: the bodies of the blocks both branches share are let go of"
     );
     dials_the_heavier_side(
         victim,
         params(),
         fork,
-        137,
-        "a node with a disk to take a heavier branch parting a hundred and thirty seven below \
-         its tip",
+        300,
+        "a node with a disk to take a heavier branch parting three hundred below its tip",
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
