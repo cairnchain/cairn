@@ -1660,9 +1660,9 @@ impl Peer {
     /// can find it, but not always before the writer has sent it. Let go of
     /// as [`Self::let_go`] does, the introduction went to a socket already
     /// shut and the far end's dial ended on nothing: two nodes that dialled
-    /// each other at the same moment met that three times in two hundred on a
-    /// laptop, and on the Windows runner, and the one whose dial lost counted
-    /// no peer it had reached.
+    /// each other at the same moment met that eight times in fourteen hundred
+    /// on a laptop, and on the Windows runner, and the one whose dial lost
+    /// counted no peer it had reached.
     ///
     /// Marked and not shut. The loop leaves at its next read, which is the
     /// far end ending its dial once the introduction has reached it, or
@@ -14594,8 +14594,8 @@ mod peers_and_loops {
     /// and it shut the connection both ways at once. The far end's loop had
     /// queued the introduction, and whether the writer sent it before the
     /// shutdown or after was chance: two nodes on a laptop that dialled each
-    /// other at the same moment lost it three times in two hundred, and the
-    /// one whose dial lost counted no peer it had reached.
+    /// other at the same moment lost it eight times in fourteen hundred, and
+    /// the one whose dial lost counted no peer it had reached.
     ///
     /// The writer is started here only once the tie is decided and the
     /// connection's loop has left, so whatever either of them shut is shut
