@@ -12895,8 +12895,16 @@ mod peers_and_loops {
         /// Opens one into `node`: a connection this node dialled to `dialled`,
         /// or without it one somebody else opened.
         fn open(node: Node, dialled: Option<SocketAddr>) -> Self {
+            Self::open_on(node, dialled, a_socket())
+        }
+
+        /// The same, on both ends of a connection the test made itself.
+        fn open_on(
+            node: Node,
+            dialled: Option<SocketAddr>,
+            (near, far): (TcpStream, TcpStream),
+        ) -> Self {
             node.shared.running.store(true, Ordering::SeqCst);
-            let (near, far) = a_socket();
             let remote = near.peer_addr().ok().map(|address| address.ip());
             let id = node.shared.next_id.fetch_add(1, Ordering::Relaxed);
             let (sender, said) = mpsc::sync_channel(4_096);
@@ -14511,6 +14519,137 @@ mod peers_and_loops {
             then.is_empty(),
             "and was sent more than the introduction on its way out: {then:?}"
         );
+    }
+
+    /// **A dial the tie ends here carries this node's introduction to the far
+    /// end before it closes, whichever half of the pair introduced itself
+    /// first.**
+    ///
+    /// The far end counts the half kept in place of its dial as a peer it
+    /// reached only once it has read this node's introduction on that dial:
+    /// see [`Shared::carry_the_dial`]. With this node's own dial introduced
+    /// second, it is that dial's loop that ends the far end's, from outside,
+    /// and it shut the connection both ways at once. The far end's loop had
+    /// queued the introduction, and whether the writer sent it before the
+    /// shutdown or after was chance: two nodes on a laptop that dialled each
+    /// other at the same moment lost it three times in two hundred, and the
+    /// one whose dial lost counted no peer it had reached.
+    ///
+    /// The writer is started here only once the tie is decided, the order
+    /// that lost it, which no test over loopback can hold the threads to.
+    #[test]
+    fn a_dial_the_tie_ends_here_carries_the_introduction_whichever_half_came_first() {
+        for ours_first in [true, false] {
+            let node = quiet();
+            assert!(
+                node.shared.nonce < u64::MAX,
+                "fixture: this node drew the highest number there is"
+            );
+            // This node's own dial to the same peer, decided by hand.
+            let (socket, _far) = a_socket();
+            let listens = SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944));
+            node.shared.peers().insert(
+                1_000,
+                Peer {
+                    dialled_to: Some(listens),
+                    greeted: true,
+                    ..stand_in(&socket, true)
+                },
+            );
+            let ours = |shared: &Arc<Shared>| {
+                let mut state = PeerState::new(Some(listens.ip()));
+                state.greeted = true;
+                state.advertised = Some(listens);
+                state.nonce = u64::MAX;
+                what_it_said_it_was(shared, 1_000, &state, Some(listens), 1_000)
+            };
+            if ours_first {
+                assert_eq!(
+                    ours(&node.shared),
+                    Ending::Keep,
+                    "fixture: this node's dial was ended"
+                );
+            }
+            // The peer drew the higher number, so its dial is the half that
+            // goes, introduced to and not yet written to. With the deadline
+            // `attach_peer` gives a connection, which is when the loop looks
+            // for a mark on Windows, where a shutdown does not wake a read.
+            let greeting = hello(node.shared.network(), 0, 0, u64::MAX);
+            let (near, far) = a_socket();
+            near.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+            let mut line = Line::open_on(node, None, (near, far));
+            line.send(&greeting);
+            let answered = within_half_a_minute(|| {
+                line.node
+                    .shared
+                    .peers()
+                    .get(&line.id)
+                    .is_some_and(|peer| peer.outbound.queued() > 0)
+            });
+            if !ours_first {
+                assert_eq!(
+                    ours(&line.node.shared),
+                    Ending::Keep,
+                    "fixture: this node's dial was ended"
+                );
+            }
+            let Line {
+                node,
+                id,
+                mut far,
+                said,
+                reading,
+            } = line;
+            let network = node.shared.network();
+            let writer = {
+                let peers = node.shared.peers();
+                let peer = &peers[&id];
+                start_writing(
+                    id,
+                    peer.stream.try_clone().unwrap(),
+                    said,
+                    network,
+                    Arc::clone(&peer.outbound.waiting),
+                    Arc::clone(&peer.outbound.let_go),
+                )
+                .unwrap()
+            };
+            far.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let first = read_message(&mut far, network, crate::wire::MAX_FRAME_BYTES);
+            // Once the loop has left, the table lets go of its end of the
+            // queue as `attach_peer` does, and the writer shuts the rest.
+            let left = within_half_a_minute(|| reading.is_finished());
+            node.shared.peers().remove(&id);
+            let closed = loop {
+                match read_message(&mut far, network, crate::wire::MAX_FRAME_BYTES) {
+                    Ok(Incoming::Message(_)) => {}
+                    Ok(Incoming::Quiet) => break false,
+                    Err(_) => break true,
+                }
+            };
+            let _ = far.shutdown(Shutdown::Both);
+            reading.join().unwrap();
+            writer.join().unwrap();
+            stop_all(&node);
+            let order = if ours_first {
+                "this node's dial introduced first"
+            } else {
+                "the peer's dial introduced first"
+            };
+            assert!(
+                answered,
+                "fixture, {order}: the peer's dial was not answered"
+            );
+            assert!(
+                matches!(first, Ok(Incoming::Message(Message::Welcome(_)))),
+                "{order}: a dial the tie ended here closed without carrying this node's \
+                 introduction, so the far end never saw a pair: {first:?}"
+            );
+            assert!(
+                left && closed,
+                "{order}: and the tie did not end it (loop left: {left}, closed: {closed})"
+            );
+        }
     }
 
     /// A node whose table is full dials nobody.
