@@ -6061,6 +6061,36 @@ impl Node {
         })
     }
 
+    /// Whether a peer this node reached itself said, when it introduced
+    /// itself, that its chain has work this node's fork choice would take
+    /// over the branch it follows: [`Self::claim_ahead`] among
+    /// [`Self::peers_reached`].
+    ///
+    /// For a miner that has just started, deciding whether to take a chain
+    /// before it builds on its own tip. Only peers this node reached, because
+    /// a claim is written by whoever makes it, and a stranger that dials in
+    /// and claims a lot must not be able to stop a miner.
+    ///
+    /// A peer reached whose claim is not written down yet counts as claiming
+    /// more. The introduction that makes it reached is the one that carries
+    /// the claim, and the two are written a moment apart: read in between,
+    /// the peer is reached and has said nothing, and a miner looking then
+    /// would build on the tip it is about to leave.
+    pub fn a_peer_reached_claims_more(&self) -> bool {
+        let claims: Vec<Option<(u64, u128)>> = self
+            .shared
+            .peers()
+            .values()
+            .filter(|peer| peer.reached())
+            .map(|peer| peer.claims)
+            .collect();
+        self.with_chain(|chain| {
+            claims
+                .into_iter()
+                .any(|claim| claim.is_none_or(|(height, work)| chain.outweighed_by(height, work)))
+        })
+    }
+
     /// Connected peers that say they keep the whole cold set.
     ///
     /// For whatever is showing a wallet its money: a note whose path this node

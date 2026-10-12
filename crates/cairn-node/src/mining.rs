@@ -143,6 +143,16 @@ pub(crate) enum Waiting {
     /// network has already left, and would be undone as soon as the rest of
     /// the chain arrived, or, deep enough, never.
     ForTheChain,
+    /// A peer this node reached itself says its chain is heavier than this
+    /// node's, and the miner reached its first peer only a moment ago. Holds
+    /// the longest it waits, in seconds.
+    ///
+    /// The wait above cannot see this when the chain is mined at the
+    /// difficulty floor, whose blocks come seconds apart and are each dated
+    /// now. On testnet-8 a node restarted with mining on at 7 424, while a
+    /// peer it had reached held 741 blocks more, and mined 1 800 blocks on
+    /// its own tip at once.
+    ForTheirChain(u64),
     /// A network whose first block is written into the program, and a chain
     /// that does not hold it yet: anything built here would be a second first
     /// block, refused.
@@ -182,6 +192,13 @@ impl fmt::Display for Waiting {
                 "mining waits while the chain arrives: its newest block is dated long ago, and \
                  a block built on it would be built on a chain the network has left. It mines \
                  once blocks stop arriving",
+            ),
+            Self::ForTheirChain(seconds) => write!(
+                out,
+                "mining waits while this node takes the chain a peer it reached says is \
+                 heavier than its own: a block built on this node's tip now could be built on \
+                 a chain the network has already left. It mines once this node holds as much, \
+                 and {seconds} seconds after it first reached a peer at the latest",
             ),
             Self::ForAChain => out.write_str(
                 "mining waits until this node holds its network's first block: anything built \
@@ -304,14 +321,50 @@ fn still_arriving(newest: Option<u64>, now: u64, still_for: Duration, block_time
     })
 }
 
+/// Block times, counted from the first peer it reached, that a miner gives a
+/// peer it reached to hand over the heavier chain it says it has, before
+/// building on its own tip.
+///
+/// The wait for the chain reads only the age of this node's newest block,
+/// which says nothing during a run at the difficulty floor. So this reads
+/// what a peer says, and only a peer this node went out and found: the same
+/// trust the wait for a peer already gives it. What ends the wait early is
+/// this node's own chain holding as much as that peer said.
+///
+/// Two, which is two minutes on testnet-8. Long enough for what a restart
+/// leaves a node short of: a newcomer read 1 536 blocks of testnet-8 in 45
+/// seconds the morning a node restarted 741 behind, so those take about
+/// twenty, and two minutes carry some four thousand. Short enough that a peer
+/// reached that lies about its chain costs little: two block times of this
+/// miner's work, once. Counted from the first peer reached rather than from
+/// the start, because a miner can wait far longer than this for a peer, as
+/// one did for twenty five minutes the same morning, and would then have
+/// reached it with the time already spent.
+const CATCH_UP_IN_BLOCKS: u64 = 2;
+
+/// Whether a miner that first reached a peer `since_reached` ago, if it has,
+/// is still inside the `catch_up` seconds it gives such a peer's chain.
+fn still_starting(since_reached: Option<Duration>, catch_up: u64) -> bool {
+    since_reached.is_some_and(|since| since.as_secs() < catch_up)
+}
+
 /// Whether anything stops the miner before it looks at the chain.
 ///
 /// `alone` is a node with nowhere to start from: no seed was given and none is
 /// written in for its network. That node is the whole of its network, the way
 /// the throwaway network is run on one machine, and it mines alone because
 /// there is nobody else to wait for. Every other node waits for a peer it
-/// reached itself, and then for the chain to stop arriving.
-fn held_back(on_probation: bool, peers: usize, alone: bool, arriving: bool) -> Option<Waiting> {
+/// reached itself, then for the chain to stop arriving, and then, while it
+/// has only just started, for the heavier chain a peer it reached says it
+/// has: `behind` is how many seconds that last wait lasts at most, when a
+/// peer says so and they have not run out.
+fn held_back(
+    on_probation: bool,
+    peers: usize,
+    alone: bool,
+    arriving: bool,
+    behind: Option<u64>,
+) -> Option<Waiting> {
     if on_probation {
         Some(Waiting::ForProbation)
     } else if alone {
@@ -321,7 +374,7 @@ fn held_back(on_probation: bool, peers: usize, alone: bool, arriving: bool) -> O
     } else if arriving {
         Some(Waiting::ForTheChain)
     } else {
-        None
+        behind.map(Waiting::ForTheirChain)
     }
 }
 
@@ -405,6 +458,10 @@ pub(crate) fn run(
     // start arriving before building on it.
     let mut last_tip = None;
     let mut moved = Instant::now();
+    // When the miner first had a peer it reached, which is where the time it
+    // gives such a peer's heavier chain starts, once.
+    let mut first_reached: Option<Instant> = None;
+    let catch_up = params.target_block_time.saturating_mul(CATCH_UP_IN_BLOCKS);
     while running.load(Ordering::SeqCst) {
         let (replaced, tip, newest) = node.with_chain(|chain| {
             let replaced = mined.settle(chain.height(), |at| chain.id_at(at));
@@ -428,14 +485,16 @@ pub(crate) fn run(
             moved.elapsed(),
             params.target_block_time,
         );
+        let peers = node.peers_reached();
+        if peers > 0 {
+            first_reached.get_or_insert_with(Instant::now);
+        }
+        let behind = (still_starting(first_reached.map(|at| at.elapsed()), catch_up)
+            && node.a_peer_reached_claims_more())
+        .then_some(catch_up);
         // A refusal for probation lands here on the next round, and is a wait
         // like any other rather than a reason to build again.
-        let built = match held_back(
-            node.probation().is_some(),
-            node.peers_reached(),
-            alone,
-            arriving,
-        ) {
+        let built = match held_back(node.probation().is_some(), peers, alone, arriving, behind) {
             Some(reason) => Err(reason),
             None => build(node, params, reward_to),
         };
@@ -748,16 +807,20 @@ mod saying {
     use super::{candidate, held_back, run, Mined, Report, Saying, Waiting, PAUSE};
     use cairn_chain::{Accepted, ChainStore};
     use cairn_crypto::SecretKey;
-    use cairn_ledger::block::{Activation, BLOCK_VERSION};
+    use cairn_ledger::block::{Activation, Block, BLOCK_VERSION};
     use cairn_ledger::note::Address;
     use cairn_ledger::pow::median_time_past;
     use cairn_ledger::validation::{mine_block, ConsensusParams};
-    use cairn_net::Node;
+    use cairn_net::message::Message;
+    use cairn_net::sync::local_handshake;
+    use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
+    use cairn_net::{Keeps, Node};
     use cairn_primitives::Hash32;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const NOW: u64 = 2_000_000_000;
 
@@ -844,6 +907,75 @@ mod saying {
             1,
             "fixture: the peer never introduced itself"
         );
+    }
+
+    /// A peer that holds `chain`, says so when the node under test reaches it,
+    /// and answers the node's question for the chain, from the height `from`
+    /// on, only once `deliver` is set. It ends when the connection does.
+    ///
+    /// Written out rather than a node, because a node hands its chain over as
+    /// fast as the loopback carries it, and a miner that built before the
+    /// chain arrived would then be caught only on a slow machine. Here the
+    /// test decides when the chain arrives.
+    fn holding(
+        chain: &ChainStore,
+        from: u64,
+        deliver: Arc<AtomicBool>,
+    ) -> (SocketAddr, thread::JoinHandle<()>) {
+        let door = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = door.local_addr().unwrap();
+        let network = chain.params().network;
+        let said = local_handshake(chain, Keeps::default(), address.port(), 1);
+        let blocks: Vec<Block> = (0..=chain.height().unwrap())
+            .map(|height| chain.block_at(height).unwrap().clone())
+            .collect();
+        let count = blocks.len() as u64 - from;
+        let serving = thread::spawn(move || {
+            door.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut stream = loop {
+                match door.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                    Err(_) => return,
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .unwrap();
+            let mut asked = false;
+            loop {
+                let mut answers = Vec::new();
+                if asked && deliver.load(Ordering::SeqCst) {
+                    asked = false;
+                    answers.push(Message::Chain { from, count });
+                }
+                match read_message(&mut stream, network, MAX_FRAME_BYTES) {
+                    Ok(Incoming::Message(Message::Hello(_))) => {
+                        answers.push(Message::Welcome(said));
+                    }
+                    Ok(Incoming::Message(Message::GetChain { .. })) => asked = true,
+                    Ok(Incoming::Message(Message::GetBlocks(heights))) => {
+                        answers.extend(heights.iter().filter_map(|&height| {
+                            let block = blocks.get(usize::try_from(height).ok()?)?;
+                            Some(Message::Block(Box::new(block.clone())))
+                        }));
+                    }
+                    Ok(Incoming::Message(Message::Ping(nonce))) => {
+                        answers.push(Message::Pong(nonce));
+                    }
+                    Ok(_) => {}
+                    Err(_) => return,
+                }
+                for answer in &answers {
+                    if write_message(&mut stream, network, answer).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        (address, serving)
     }
 
     /// The next thing the miner says. Half a minute is many times what any
@@ -1170,20 +1302,208 @@ mod saying {
         peer.shutdown();
     }
 
+    /// **A miner restarted behind a peer it reached takes that peer's chain
+    /// before it mines, and mines on top of it.**
+    ///
+    /// AUDIT, repaired (testnet-8, T8-7). The only wait for the chain read
+    /// the age of this node's newest block, and blocks mined at the
+    /// difficulty floor are each dated now. On 12 October a node restarted
+    /// with mining on at 7 424, reached a peer holding 741 blocks more, and
+    /// mined 1 800 blocks on its own tip at once.
+    ///
+    /// The chain here is floor blocks dated now, as that one was, and the
+    /// peer hands it over only once the miner has said what it waits for.
+    #[test]
+    fn a_miner_restarted_behind_a_peer_it_reached_takes_their_chain_before_it_mines() {
+        let params = ConsensusParams::testnet();
+        let (ours, theirs) = (5, 25);
+        let chain = grown(&params, theirs, super::unix_now());
+        let node = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
+        for height in 0..ours {
+            node.submit_block(chain.block_at(height).unwrap().clone())
+                .unwrap();
+        }
+        let deliver = Arc::new(AtomicBool::new(false));
+        let (peer, serving) = holding(&chain, ours, Arc::clone(&deliver));
+        let catch_up = params.target_block_time * super::CATCH_UP_IN_BLOCKS;
+
+        mining_on(&node, params, false, |node, told| {
+            assert_eq!(next(told), Heard::Waits(Waiting::ForAPeer));
+            node.connect(peer).unwrap();
+            assert_eq!(
+                next(told),
+                Heard::Waits(Waiting::ForTheirChain(catch_up)),
+                "a miner that reached a peer with a heavier chain did not wait for it"
+            );
+            assert_eq!(
+                node.height(),
+                Some(ours - 1),
+                "and it mined on the tip it was about to leave"
+            );
+            deliver.store(true, Ordering::SeqCst);
+            assert_eq!(
+                next(told),
+                Heard::Resumes,
+                "and never resumed once it held the peer's chain"
+            );
+            assert_eq!(
+                next(told),
+                Heard::Found(theirs, true),
+                "the miner did not build on top of the chain it took"
+            );
+        });
+        node.shutdown();
+        serving.join().unwrap();
+    }
+
+    /// A stranger that dials in and says its chain is heavier does not hold
+    /// the miner, and a peer it reached that says nothing of the kind lets it
+    /// mine at once.
+    ///
+    /// The wait for a peer's chain reads what a peer says, which anybody can
+    /// write. Read off every peer, it would let a stranger that dialled in
+    /// and claimed a lot stop a miner after every restart.
+    #[test]
+    fn a_stranger_that_dials_in_and_claims_more_does_not_hold_the_miner() {
+        let params = ConsensusParams::testnet();
+        let (ours, theirs) = (5, 25);
+        let chain = grown(&params, theirs, super::unix_now());
+        let node = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let peer = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
+        for height in 0..ours {
+            let block = chain.block_at(height).unwrap();
+            node.submit_block(block.clone()).unwrap();
+            peer.submit_block(block.clone()).unwrap();
+        }
+
+        mining_on(&node, params, false, |node, told| {
+            assert_eq!(next(told), Heard::Waits(Waiting::ForAPeer));
+            let mut stranger = TcpStream::connect(node.address()).unwrap();
+            let claim = local_handshake(&chain, Keeps::default(), 0, 2);
+            write_message(&mut stranger, params.network, &Message::Hello(claim)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while node.claim_ahead().is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                node.claim_ahead().is_some(),
+                "fixture: the stranger's claim was never written down"
+            );
+            node.connect(peer.address()).unwrap();
+            assert_eq!(
+                next(told),
+                Heard::Resumes,
+                "a stranger that dialled in and claimed a heavier chain held the miner"
+            );
+            assert_eq!(next(told), Heard::Found(ours, true));
+            drop(stranger);
+        });
+        node.shutdown();
+        peer.shutdown();
+    }
+
+    /// A peer reached that says its chain is heavier and never hands it over
+    /// holds the miner for the time it is given and no longer, and the miner
+    /// then mines on its own tip.
+    ///
+    /// What a peer says is not proof of anything, and the wait reads it: a
+    /// peer that lies buys this much of a miner's time, once, at the start.
+    #[test]
+    fn a_peer_reached_that_never_hands_its_chain_over_holds_the_miner_only_so_long() {
+        let params = ConsensusParams {
+            target_block_time: 1,
+            ..ConsensusParams::testnet()
+        };
+        let (ours, theirs) = (5, 25);
+        let chain = grown(&params, theirs, super::unix_now());
+        let node = Node::bind(params, "127.0.0.1:0".parse().unwrap()).unwrap();
+        for height in 0..ours {
+            node.submit_block(chain.block_at(height).unwrap().clone())
+                .unwrap();
+        }
+        let (peer, serving) = holding(&chain, ours, Arc::new(AtomicBool::new(false)));
+        let catch_up = params.target_block_time * super::CATCH_UP_IN_BLOCKS;
+
+        mining_on(&node, params, false, |node, told| {
+            assert_eq!(next(told), Heard::Waits(Waiting::ForAPeer));
+            let reached = Instant::now();
+            node.connect(peer).unwrap();
+            assert_eq!(next(told), Heard::Waits(Waiting::ForTheirChain(catch_up)));
+            assert_eq!(
+                next(told),
+                Heard::Resumes,
+                "a peer reached that never handed its chain over held the miner for good"
+            );
+            // The rounds the miner looks in, and room for a machine busy with
+            // the rest of the suite.
+            let waited = reached.elapsed();
+            assert!(
+                waited < Duration::from_secs(catch_up + 5),
+                "a peer reached that never handed its chain over held the miner {waited:?}, \
+                 past the {catch_up} seconds it is given"
+            );
+            assert_eq!(
+                next(told),
+                Heard::Found(ours, true),
+                "and the miner did not then mine on its own tip"
+            );
+        });
+        node.shutdown();
+        serving.join().unwrap();
+    }
+
     /// Every reason to hold the miner back, in the order they are asked.
     #[test]
     fn a_miner_is_held_back_by_probation_and_by_having_nobody_to_mine_for() {
-        assert_eq!(held_back(true, 3, true, false), Some(Waiting::ForProbation));
-        assert_eq!(held_back(true, 0, false, true), Some(Waiting::ForProbation));
-        assert_eq!(held_back(false, 0, false, false), Some(Waiting::ForAPeer));
-        assert_eq!(held_back(false, 0, false, true), Some(Waiting::ForAPeer));
-        assert_eq!(held_back(false, 1, false, true), Some(Waiting::ForTheChain));
         assert_eq!(
-            held_back(false, 0, true, true),
+            held_back(true, 3, true, false, None),
+            Some(Waiting::ForProbation)
+        );
+        assert_eq!(
+            held_back(true, 0, false, true, Some(120)),
+            Some(Waiting::ForProbation)
+        );
+        assert_eq!(
+            held_back(false, 0, false, false, None),
+            Some(Waiting::ForAPeer)
+        );
+        assert_eq!(
+            held_back(false, 0, false, true, Some(120)),
+            Some(Waiting::ForAPeer)
+        );
+        assert_eq!(
+            held_back(false, 1, false, true, Some(120)),
+            Some(Waiting::ForTheChain)
+        );
+        assert_eq!(
+            held_back(false, 1, false, false, Some(120)),
+            Some(Waiting::ForTheirChain(120))
+        );
+        assert_eq!(
+            held_back(false, 0, true, true, Some(120)),
             None,
             "a node alone waits for nobody"
         );
-        assert_eq!(held_back(false, 1, false, false), None);
+        assert_eq!(held_back(false, 1, false, false, None), None);
+    }
+
+    /// The time a miner gives the heavier chain of a peer it reached starts
+    /// with that peer and ends, whatever the peer does.
+    #[test]
+    fn the_time_given_to_a_peers_chain_is_counted_from_the_first_peer_and_ends() {
+        let seconds = Duration::from_secs;
+        let catch_up = 60 * super::CATCH_UP_IN_BLOCKS;
+        assert!(
+            !super::still_starting(None, catch_up),
+            "a miner with no peer reached has nobody's chain to wait for"
+        );
+        assert!(super::still_starting(Some(seconds(0)), catch_up));
+        assert!(super::still_starting(Some(seconds(catch_up - 1)), catch_up));
+        assert!(
+            !super::still_starting(Some(seconds(catch_up)), catch_up),
+            "a peer reached that never hands over the chain it claims held the miner past \
+             the time it is given"
+        );
     }
 
     /// A chain whose newest block is old and which has just moved is still
@@ -1509,6 +1829,13 @@ mod saying {
         let said = |waiting: Waiting| Saying::Waits(&waiting).to_string();
         assert!(said(Waiting::ForProbation).contains("ledger it was handed"));
         assert!(said(Waiting::ForAPeer).contains("until this node has a peer it reached itself"));
+        assert!(said(Waiting::ForTheirChain(120))
+            .contains("takes the chain a peer it reached says is heavier than its own"));
+        assert!(
+            said(Waiting::ForTheirChain(120))
+                .contains("120 seconds after it first reached a peer at the latest"),
+            "the line for a peer's heavier chain does not say how long it waits at most"
+        );
         assert!(said(Waiting::ForAChain).contains("first block"));
         assert!(said(Waiting::ForTheOpening(1_791_309_600))
             .contains("until this network opens on 6 October 2026 at 18:00:00 UTC"));
