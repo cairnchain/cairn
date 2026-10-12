@@ -1490,23 +1490,28 @@ fn past_what_arrived(chain: &ChainStore, from: u64, arrived: Option<Located>) ->
     from
 }
 
-/// The lowest height a block from a peer can be taken at: one above the
-/// deepest block a switch can land on, and one above the first block of the
-/// branch this node holds.
+/// The lowest height worth asking a peer for: one above the first block of
+/// the branch this node holds, which on a chain longer than the window held
+/// in full is the bottom of that window.
 ///
-/// A block at or under either is refused whatever comes with it, as too deep
-/// to switch to or as hanging below everything held. A peer agrees with a
-/// locator at one of the few heights it names under the window held in full,
-/// as low as the first block, so a branch parting deep enough for the locator
-/// to meet it only down there was asked for from there, refused a batch at a
-/// time, and never asked past it.
+/// Below it this node keeps no identifier for most heights, so a block there
+/// is refused as too deep to switch to whether or not it is on this node's
+/// own branch, and the refusal is said as a branch out of reach and asks
+/// nothing further. A peer agrees with a locator down there only at one of
+/// the few heights it names, as low as the first block, so a branch parting
+/// deep enough for the locator to meet it only there would be asked for from
+/// there, refused a batch at a time as out of reach though it is not, and
+/// never asked past it.
+///
+/// Not the deepest block a switch can land on, where the network undoes less
+/// than the window holds. What lies between is this node's own branch, which
+/// arrives as blocks it already holds, or a branch parting deeper than it
+/// undoes, which is refused there and said: that is how a node left on the
+/// lighter half of a split too deep to cross tells its operator so.
 fn lowest_worth_asking(chain: &ChainStore) -> u64 {
-    let deepest = chain
-        .height()
-        .and_then(|tip| tip.checked_sub(chain.undo_limit()));
-    deepest
-        .max(chain.branch_start())
-        .map_or(0, |floor| floor.saturating_add(1))
+    chain
+        .branch_start()
+        .map_or(0, |first| first.saturating_add(1))
 }
 
 /// Asks for a stretch of a peer's branch, starting at `from`.
