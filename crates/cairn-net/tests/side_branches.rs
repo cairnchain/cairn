@@ -1623,24 +1623,13 @@ fn a_node_past_choosing_takes_a_heavier_branch_parting_seventy_three_below_its_t
 ///
 /// The investigation of T8-7 watched this newcomer for an hour beside the
 /// heavier peer, and it never moved. It meets that peer here once its choice
-/// is settled, which its upkeep does about once a second: a peer that greets
-/// it in the second before has its answer held off for the choice, and is not
-/// asked again until it announces a block. That is a separate defect from
-/// this one, and this test is about what the node asks once it does ask.
+/// is settled, which its upkeep does about once a second, and this test is
+/// about what the node asks once it does ask. A peer that greets it in the
+/// second before is the test after this one.
 #[test]
 fn a_newcomer_that_read_the_lighter_branch_first_takes_the_heavier_one() {
     let fork = a_fork_as_deep_as_a_node_undoes();
-    let rules = past_choosing();
-    let lighter = Node::bind(rules, loopback()).unwrap();
-    for block in fork.shared.iter().chain(&fork.followed[..73]) {
-        lighter.submit_block(block.clone()).unwrap();
-    }
-    let heavier = Node::bind(rules, loopback()).unwrap();
-    for block in fork.shared.iter().chain(&fork.rival[..=73]) {
-        heavier.submit_block(block.clone()).unwrap();
-    }
-    let newcomer = Node::bind(rules, loopback()).unwrap();
-    assert_eq!(newcomer.height(), None, "the premise: a node with nothing");
+    let (lighter, heavier, newcomer) = a_newcomer_beside_both_branches(fork);
 
     newcomer.connect(lighter.address()).unwrap();
     let tip = fork.followed[72].id();
@@ -1663,4 +1652,63 @@ fn a_newcomer_that_read_the_lighter_branch_first_takes_the_heavier_one() {
     newcomer.shutdown();
     lighter.shutdown();
     heavier.shutdown();
+}
+
+/// The same newcomer meeting the heavier peer the moment it holds more than
+/// it undoes, in the second before its upkeep makes the choice: it takes the
+/// heavier branch within a block interval, which is before that peer would
+/// announce its next block.
+///
+/// T8-8 of testnet-8. The peer's claim was not written down, since the
+/// newcomer no longer held nothing it could not undo, and its answer to the
+/// question its greeting was asked was held off, since the choice was still
+/// open. The choice then named nobody, and nothing asked the peer again until
+/// it announced a block. Nobody announces one here, so the newcomer stayed on
+/// the lighter branch.
+#[test]
+fn a_newcomer_that_meets_the_heavier_peer_as_it_chooses_takes_the_heavier_one() {
+    let fork = a_fork_as_deep_as_a_node_undoes();
+    let (lighter, heavier, newcomer) = a_newcomer_beside_both_branches(fork);
+
+    newcomer.connect(lighter.address()).unwrap();
+    wait_for("the newcomer to read past the depth it undoes", || {
+        !newcomer.with_chain(cairn_net::sync::holds_nothing_it_cannot_undo)
+    });
+    newcomer.connect(heavier.address()).unwrap();
+    let met = Instant::now();
+    let interval = Duration::from_secs(past_choosing().target_block_time);
+    let rival = fork.rival[73].id();
+    while newcomer.with_chain(ChainStore::tip) != Some(rival) {
+        assert!(
+            met.elapsed() < interval,
+            "a newcomer that met a peer on a heavier branch in the second before it made its \
+             choice did not take that branch within a block interval"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    println!(
+        "took the heavier branch {:?} after meeting its peer",
+        met.elapsed()
+    );
+    newcomer.shutdown();
+    lighter.shutdown();
+    heavier.shutdown();
+}
+
+/// A node on the lighter side of `fork` seventy three blocks above where the
+/// branches part, one on the heavier side a block longer, both under rules
+/// that undo less than either holds, and a newcomer with nothing.
+fn a_newcomer_beside_both_branches(fork: &DeepFork) -> (Node, Node, Node) {
+    let rules = past_choosing();
+    let lighter = Node::bind(rules, loopback()).unwrap();
+    for block in fork.shared.iter().chain(&fork.followed[..73]) {
+        lighter.submit_block(block.clone()).unwrap();
+    }
+    let heavier = Node::bind(rules, loopback()).unwrap();
+    for block in fork.shared.iter().chain(&fork.rival[..=73]) {
+        heavier.submit_block(block.clone()).unwrap();
+    }
+    let newcomer = Node::bind(rules, loopback()).unwrap();
+    assert_eq!(newcomer.height(), None, "the premise: a node with nothing");
+    (lighter, heavier, newcomer)
 }

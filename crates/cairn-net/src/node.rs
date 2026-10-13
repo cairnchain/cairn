@@ -10684,6 +10684,12 @@ fn paid_and_decoded(
 /// the reorganisation limit is the choice being made by a stranger. The peer's
 /// turn comes when the chooser asks it, or once the choice is made.
 ///
+/// Once the choice is made only for a peer the chooser can name, and a peer
+/// that greets after the chain passes the depth it undoes, in the second
+/// before the next round of upkeep makes the choice, has no claim written
+/// down. So a chain held off is told to the chooser, which asks the peer
+/// again: see `Chooser::held_off_a_chain`.
+///
 /// This holds off only while a claim long enough to be final stands, which is
 /// a peer's word about its own height. A peer that said its chain was short
 /// is held to that in the sync layer instead, which takes no block past what
@@ -10699,9 +10705,14 @@ fn held_off(shared: &Arc<Shared>, id: PeerId, peer: &PeerState, message: &Messag
     if matches!(
         message,
         Message::Block(_) | Message::Announce(_) | Message::Chain { .. }
-    ) && shared.choosing().holds_off(id)
-    {
-        return true;
+    ) {
+        let mut choosing = shared.choosing();
+        if choosing.holds_off(id) {
+            if matches!(message, Message::Chain { .. }) {
+                choosing.held_off_a_chain(id, peer.height, peer.total_work);
+            }
+            return true;
+        }
     }
     peer.greeted && matches!(message, Message::Transaction(_)) && shared.probation().is_some()
 }
@@ -15256,6 +15267,55 @@ mod peers_and_loops {
         );
     }
 
+    /// **A peer whose chain was held off in the second before the choice was
+    /// made is asked for it again once it is.**
+    ///
+    /// T8-8 of testnet-8. A peer that greets once the chain is past the depth
+    /// it undoes has no claim written down, and its answer to the question
+    /// its greeting was asked is held off while the choice is still open. The
+    /// round that made the choice named nobody, and nothing asked the peer
+    /// again until it announced a block, a block interval later.
+    #[test]
+    fn a_chain_held_off_before_the_choice_is_made_is_asked_for_again() {
+        let params = ConsensusParams::testnet().with_burial(2);
+        let node = Node::bind(params, local()).unwrap();
+        node.shutdown();
+        let (socket, _far) = a_socket();
+        let _claimant = a_claimant(&node, &socket, 1_000, unix_now());
+        for block in super::tests::chain_of(4, params) {
+            node.submit_block(block).unwrap();
+        }
+        let greeting = hello(
+            node.shared.network(),
+            40,
+            u128::from(u64::MAX),
+            stranger(&node),
+        );
+        let mut line = Line::open(node, None);
+        line.send(&greeting);
+        assert!(
+            line.hears(|message| matches!(message, Message::GetChain { .. })),
+            "the premise: a peer claiming more is asked for its chain as it greets"
+        );
+        assert!(
+            !sync::holds_nothing_it_cannot_undo(&line.node.shared.chain())
+                && line.node.shared.choosing().holds_off(line.id),
+            "the premise: past the depth it undoes, with the choice still open"
+        );
+        line.send(&Message::Chain { from: 4, count: 36 });
+        // Read in order, so the chain was held off once the pong is back.
+        line.send(&Message::Ping(1));
+        assert!(line.hears(|message| matches!(message, Message::Pong(1))));
+        drive_choosing(&line.node.shared, unix_now());
+        let asked = line.hears(|message| matches!(message, Message::GetChain { .. }));
+        drop(line.close());
+        assert!(
+            asked,
+            "a peer whose chain was held off in the second before the choice was made \
+             was not asked for it again once it was"
+        );
+    }
+
     /// A connection that turns out to be this node's own takes its address
     /// out of the book, and is never counted as a peer that introduced
     /// itself.
@@ -18561,7 +18621,7 @@ mod tests {
     }
 
     /// A short valid chain, built off to the side.
-    fn chain_of(count: usize, params: ConsensusParams) -> Vec<Block> {
+    pub(super) fn chain_of(count: usize, params: ConsensusParams) -> Vec<Block> {
         let miner = cairn_crypto::SecretKey::from_bytes(&[7; 32]);
         let mut state = LedgerState::new();
         let mut clock = 1_000u64;
