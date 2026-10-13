@@ -18,3 +18,9 @@ cairn-*-data/
 # it, because it is a reading of one moment and not a fact about the code.
 mutants.out/
 mutants.out.old/
+
+# The index CodeGraph builds for an agent to read the code by (CONTRIBUTING.md).
+# It is a cache of this checkout, rebuilt by `codegraph init` in seconds, and
+# a copy of somebody else's would describe a tree they had and you do not.
+.codegraph/
+.codegraph-*/
