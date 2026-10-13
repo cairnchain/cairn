@@ -203,6 +203,10 @@ struct Lab {
     flooding: AtomicBool,
     /// Connections the victim dialled to a listener and was answered on.
     holding: AtomicUsize,
+    /// Whether the connections the listeners opened to the victim and kept
+    /// are to be ended, and the threads answering on them.
+    leaving: AtomicBool,
+    staying: Mutex<Vec<thread::JoinHandle<()>>>,
     /// Listeners that answered a dial while churning.
     spent: Mutex<HashSet<u16>>,
     /// When a connection answered while churning last opened or closed.
@@ -250,12 +254,15 @@ impl Stranger {
     /// Every listener dials the victim and introduces itself with its own
     /// port, which is how an address gets into a book without anybody
     /// having been asked: the socket's door. The first `leaving` hang up
-    /// again; the rest stay, as inbound peers of the victim, and are not
-    /// dialled while they do, since the victim counts a peer that named an
-    /// address as connected at it.
-    fn greet(&self, victim: SocketAddr, leaving: usize) -> Vec<TcpStream> {
+    /// again; the rest stay, as inbound peers of the victim that answer what
+    /// it asks, and are not dialled while they do, since the victim counts a
+    /// peer that named an address as connected at it. Says how many stay.
+    ///
+    /// The victim writes a greeting's address in its book before it queues
+    /// the welcome, so once this returns every listener is in the book.
+    fn greet(&self, victim: SocketAddr, leaving: usize) -> usize {
         let network = params().network;
-        let mut kept = Vec::new();
+        let mut kept = 0;
         for (at, listener) in self.listeners.iter().enumerate() {
             let mut socket = TcpStream::connect(victim).unwrap();
             socket
@@ -271,10 +278,21 @@ impl Stranger {
             if at < leaving {
                 let _ = socket.shutdown(Shutdown::Both);
             } else {
-                kept.push(socket);
+                let lab = Arc::clone(&self.lab);
+                let staying = thread::spawn(move || stay(socket, &lab));
+                self.lab.staying.lock().unwrap().push(staying);
+                kept += 1;
             }
         }
         kept
+    }
+
+    /// Ends every connection a listener opened to the victim and kept.
+    fn leave(&self) {
+        self.lab.leaving.store(true, Ordering::SeqCst);
+        for staying in self.lab.staying.lock().unwrap().drain(..) {
+            let _ = staying.join();
+        }
     }
 
     fn holding(&self) -> usize {
@@ -387,6 +405,33 @@ fn answer(mut socket: TcpStream, port: u16, lab: &Lab) {
         }
     }
     lab.holding.fetch_sub(1, Ordering::SeqCst);
+}
+
+/// One connection a listener opened to the victim and kept: it answers a
+/// request for addresses with none and a ping with a pong, as a peer does,
+/// until the stranger leaves, and the socket closes with the thread.
+///
+/// It used to say nothing, and a peer that says nothing for `PEER_SILENCE`,
+/// ninety seconds, is let go of. The readings below count these connections
+/// as held, and wait up to `PATIENCE`, twice that: past ninety seconds the
+/// count they compared against was one the victim no longer held, and no
+/// reading could be taken whatever the victim did.
+fn stay(mut socket: TcpStream, lab: &Lab) {
+    let network = params().network;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    while !lab.stopped.load(Ordering::SeqCst) && !lab.leaving.load(Ordering::SeqCst) {
+        let reply = match read_message(&mut socket, network, MAX_FRAME_BYTES) {
+            Ok(Incoming::Message(Message::GetPeers)) => Message::Peers(Vec::new()),
+            Ok(Incoming::Message(Message::Ping(nonce))) => Message::Pong(nonce),
+            Ok(_) => continue,
+            Err(_) => return,
+        };
+        if write_message(&mut socket, network, &reply).is_err() {
+            return;
+        }
+    }
 }
 
 /// The counts the readings below are taken from: the victim's outbound
@@ -504,10 +549,21 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
         "the victim read the honest chain"
     );
 
+    // The flood begins once every listener is in the book, and not before.
+    // A neighbourhood at its ceiling gives up the address it was told last,
+    // so the listeners told first are never given up to the flood, and the
+    // stranger has twelve that answer to take the five free slots with.
+    // Flooding from before the greeting, a round that dialled a listener
+    // that had already hung up brought a flood back while the rest were
+    // still greeting, and from then on each greeting gave up the one before
+    // it: the victim was left one listener that answers among dead
+    // addresses, held four outbound peers, and had nobody to dial for the
+    // other four. That is all the book promises, and windows-latest read it
+    // as never settled at four outbound, one of them the stranger's, twice.
     let stranger = Stranger::start();
-    stranger.lab.flooding.store(true, Ordering::SeqCst);
     let inbound = stranger.greet(victim.address(), LISTENERS / 2);
-    let (honest_out, stranger_out) = outbound(&victim, &stranger, inbound.len());
+    stranger.lab.flooding.store(true, Ordering::SeqCst);
+    let (honest_out, stranger_out) = outbound(&victim, &stranger, inbound);
     assert_eq!(
         (honest_out, stranger_out),
         (HONEST, TARGET_PEERS - HONEST),
@@ -531,7 +587,7 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
         if now != last {
             last = now;
             since = Instant::now();
-        } else if since.elapsed() >= SETTLED && no_feeler_open(now, inbound.len()) {
+        } else if since.elapsed() >= SETTLED && no_feeler_open(now, inbound) {
             fewest_honest = fewest_honest.min(now.0.saturating_sub(now.1));
             readings += 1;
         }
@@ -548,10 +604,9 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
         .filter(|address| address.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST))
         .count();
     println!(
-        "flood: {flooded} addresses handed over, {} inbound held by the stranger; the victim \
-         knows {} addresses, {in_the_strangers_neighbourhood} of them the stranger's; fewest \
-         honest outbound seen: {fewest_honest}",
-        inbound.len(),
+        "flood: {flooded} addresses handed over, {inbound} inbound held by the stranger; the \
+         victim knows {} addresses, {in_the_strangers_neighbourhood} of them the stranger's; \
+         fewest honest outbound seen: {fewest_honest}",
         known.len()
     );
     assert!(flooded >= 1_000, "the fixture: the flood was a flood");
@@ -586,7 +641,7 @@ fn a_flood_of_addresses_takes_no_honest_slot_and_a_clean_restart_redials_every_a
 
     // A clean restart: the node is asked to stop, writes its anchors, and is
     // started again on the same directory.
-    drop(inbound);
+    stranger.leave();
     victim.shutdown();
     drop(victim);
     assert!(
