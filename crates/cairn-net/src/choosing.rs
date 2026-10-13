@@ -1269,12 +1269,10 @@ impl Chooser {
                 (*peer, claimed)
             })
             .collect();
-        for (peer, held) in self.chains_held_off.drain() {
-            let claimed = named.entry(peer).or_insert(held);
-            if held.work > claimed.work {
-                *claimed = held;
-            }
-        }
+        // What a peer claimed as its chain was held off is never older than
+        // the claim written down for it, since whatever moved the claim was
+        // read into its connection's figures first, so it stands in place.
+        named.extend(self.chains_held_off.drain());
         let mut behind: Vec<Claimed> = named
             .into_values()
             .filter(|claimed| {
