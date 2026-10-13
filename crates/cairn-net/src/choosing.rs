@@ -381,6 +381,16 @@ pub struct Chooser {
     /// Set once the node has a chain. The choice was the whole job, so
     /// after it there is nothing here for the rest of the node's life.
     done: bool,
+    /// Peers whose chain arrived while the choice held them off, with the
+    /// height and work each claimed then, for [`Self::finish`] to name.
+    ///
+    /// A claim is written down only while the chain holds nothing it cannot
+    /// undo, and the choice is made at the next round of upkeep after that
+    /// stops being so. A peer that greeted in between was asked for its chain
+    /// at the handshake, had the answer held off here, and had no claim for
+    /// the finish to name, so nothing asked it again until it announced a
+    /// block: a block interval with a heavier chain in reach and not read.
+    chains_held_off: HashMap<u64, Claimed>,
     /// The height from which a claim is long enough to be final: the depth
     /// a node on this network undoes, past which a node that followed the
     /// claim from nothing can never back out of it.
@@ -406,6 +416,7 @@ impl Default for Chooser {
             asked: None,
             proven: None,
             done: false,
+            chains_held_off: HashMap::new(),
             final_from: JOIN_RATHER_THAN_READ,
         }
     }
@@ -576,6 +587,21 @@ impl Chooser {
             return false;
         }
         self.asked.is_none_or(|(asked, _, _)| asked != peer)
+    }
+
+    /// Writes down that a chain `peer` sent was held off, with the height and
+    /// work the peer claims, so that it is asked for its chain again once the
+    /// choice is made.
+    ///
+    /// A chain, of the three things held off, because it is the answer to a
+    /// question this node put, and a peer answers a question once: a block or
+    /// an announcement held off comes again with the peer's next block.
+    pub fn held_off_a_chain(&mut self, peer: u64, height: u64, work: u128) {
+        if self.done {
+            return;
+        }
+        self.chains_held_off
+            .insert(peer, Claimed { peer, height, work });
     }
 
     /// Whether a piece of a join answer from `peer` is the one being waited
@@ -804,6 +830,10 @@ impl Chooser {
         // for as long as the network stays that young, and notes a claim for
         // every connection that greets it meanwhile.
         self.claims.retain(|peer, _| connected.contains(peer));
+        // A chain held off goes with its connection too, so strangers coming
+        // and going for as long as the choice stays open do not pile up here.
+        self.chains_held_off
+            .retain(|peer, _| connected.contains(peer));
         let Some(first) = self.first_claim_at else {
             return Step::Quiet;
         };
@@ -1219,27 +1249,42 @@ impl Chooser {
     /// this choice asked can deliver while it is open.
     ///
     /// What is handed back is every peer still claiming more work than that
-    /// chain carries. They were held off while the choice was open, and
+    /// chain carries, whether its claim was written down or only its chain
+    /// was held off. They were held off while the choice was open, and
     /// nothing else will ever ask them: a node only asks for a chain when a
     /// message from the peer gives it a reason to, and the messages that
-    /// would have were the ones held off.
+    /// would have were the ones held off. See [`Self::held_off_a_chain`].
     fn finish(&mut self, chain_work: u128, connected: &[u64]) -> Step {
         self.done = true;
         let asked = self.asked.map(|(peer, _, _)| peer);
-        let mut behind: Vec<Claimed> = self
+        let mut named: HashMap<u64, Claimed> = self
             .claims
             .iter()
-            .filter(|(peer, claim)| {
-                connected.contains(peer) && claim.work > chain_work && Some(**peer) != asked
+            .map(|(peer, claim)| {
+                let claimed = Claimed {
+                    peer: *peer,
+                    height: claim.height,
+                    work: claim.work,
+                };
+                (*peer, claimed)
             })
-            .map(|(peer, claim)| Claimed {
-                peer: *peer,
-                height: claim.height,
-                work: claim.work,
+            .collect();
+        for (peer, held) in self.chains_held_off.drain() {
+            let claimed = named.entry(peer).or_insert(held);
+            if held.work > claimed.work {
+                *claimed = held;
+            }
+        }
+        let mut behind: Vec<Claimed> = named
+            .into_values()
+            .filter(|claimed| {
+                connected.contains(&claimed.peer)
+                    && claimed.work > chain_work
+                    && Some(claimed.peer) != asked
             })
             .collect();
         // Nothing here is read again for the rest of the node's life, and
-        // both of these were fed by strangers. Kept until now and not a
+        // all of these were fed by strangers. Kept until now and not a
         // moment longer.
         self.claims = HashMap::new();
         self.unbacked_hosts = HashMap::new();
@@ -1802,6 +1847,50 @@ mod tests {
             "the choice was the whole job"
         );
         assert!(!chooser.holds_off(2), "nobody is held off after it");
+    }
+
+    /// **A peer whose chain was held off while the choice was open is named
+    /// once it is made, whether or not its claim was written down.**
+    ///
+    /// T8-8 of testnet-8: a peer that greets after the chain passes the depth
+    /// it undoes, and before the round that makes the choice, has no claim
+    /// written down and its chain held off. The finish named nobody, and
+    /// nothing asked the peer again until it announced a block.
+    #[test]
+    fn a_chain_held_off_while_the_choice_was_open_is_named_once_it_is_made() {
+        let mut chooser = contested();
+        chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2, 3, 4]);
+        assert!(chooser.holds_off(3), "the premise: the choice is open");
+        chooser.held_off_a_chain(3, LONG + 5, 2_000);
+        chooser.held_off_a_chain(2, LONG + 1, 700);
+        chooser.held_off_a_chain(4, LONG + 5, 3_000);
+        // Peer 4 leaves. Connection numbers are never given out twice, so it
+        // is listed again below only to ask whether its chain went with it.
+        chooser.step(205, true, 0, JoinProgress::NothingYet, &[1, 2, 3]);
+        assert_eq!(
+            chooser.step(210, false, 600, JoinProgress::NothingYet, &[1, 2, 3, 4]),
+            Step::Nudge(vec![
+                Claimed {
+                    peer: 2,
+                    height: LONG + 1,
+                    work: 700
+                },
+                Claimed {
+                    peer: 3,
+                    height: LONG + 5,
+                    work: 2_000
+                }
+            ]),
+            "peer 3 has no claim and its chain was held off, peer 2 claimed less \
+             than the chain carries and its chain says more, peer 4 left, and \
+             peer 1 is the one the chain came from"
+        );
+        chooser.held_off_a_chain(5, LONG, 5_000);
+        assert!(
+            chooser.chains_held_off.is_empty(),
+            "a chain held off after the choice was made was written down, though \
+             nothing ever reads it again"
+        );
     }
 
     /// AUDIT (finding 1): a heavier claim from a connected peer that never
