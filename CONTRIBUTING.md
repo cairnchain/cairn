@@ -30,6 +30,39 @@ The dependencies are compiled with optimisation in every profile, deliberately,
 because the tests mine and mining is blake3. The reason is written at the
 bottom of `Cargo.toml`, along with why `debug-assertions` stays on regardless.
 
+## Reading the code with an agent
+
+Optional, and nothing in the build depends on it. The workspace is about two
+hundred and forty thousand lines of Rust, and a coding agent that answers "who
+calls this" by reading files one after another spends most of its effort
+finding things.
+[CodeGraph](https://github.com/colbymchenry/codegraph) (MIT) parses the
+workspace into a local index of functions, types, calls and imports, and
+serves it to the agent over MCP. It runs on the contributor's own machine: no
+account, no key, no service, and the code never leaves the checkout.
+
+It needs Node.js 18 or later. From the root of a checkout, build the index
+once:
+
+```
+CODEGRAPH_TELEMETRY=0 npx -y @colbymchenry/codegraph@1.6.2 init -y
+```
+
+That takes a few seconds and writes `.codegraph/`, which git ignores. While the
+agent runs, the server keeps it current as files change.
+
+Claude Code reads `.mcp.json` at the root and asks, the first time, whether to
+start the server it names; nothing else is to be set. Any other agent that
+speaks MCP takes the same command, arguments and environment from that file.
+The version is pinned so that everyone indexes with the same parser, and a
+change to it changes `.mcp.json` and the command above together. The tool can
+send anonymous usage counts; `CODEGRAPH_TELEMETRY=0`, here and in `.mcp.json`,
+keeps them off.
+
+`codegraph.json` ranks the tests, the fuzz campaigns and the examples below the
+code that ships, so that a question about the node is answered from the node
+before the hundreds of tests that exercise it. They stay in the index.
+
 ## What has to hold
 
 ```

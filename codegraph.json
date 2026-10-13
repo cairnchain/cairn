@@ -1,0 +1,7 @@
+{
+  "deprioritize": [
+    "crates/*/tests/**",
+    "crates/cairn-fuzz/**",
+    "crates/*/examples/**"
+  ]
+}
