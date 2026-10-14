@@ -542,10 +542,10 @@ pub(crate) fn run(
         );
         let peers = node.peers_reached();
         // Asked only once the waits before it are over, so what is spent is
-        // time spent on this wait and on no other.
+        // time spent on this wait and on no other. A node with no peer
+        // reached has no claim to read, so that wait needs no asking here.
         let claims_more = node.probation().is_none()
             && !alone
-            && peers > 0
             && !arriving
             && node.a_peer_reached_claims_more(AHEAD_IN_BLOCKS);
         let behind = catching_up.holds(claims_more, Instant::now());
@@ -1590,12 +1590,18 @@ mod saying {
             Some(catch_up),
             "the longest a wait lasts is said once, as it begins"
         );
-        assert_eq!(catching_up.holds(false, first + seconds(40)), None);
+        // Half a second past forty: what is left is said in whole seconds,
+        // rounded up, so the line never promises less than the wait.
+        assert_eq!(
+            catching_up.holds(false, first + Duration::from_millis(40_500)),
+            None
+        );
         let again = first + seconds(100);
         assert_eq!(
             catching_up.holds(true, again),
             Some(catch_up - 40),
-            "a second claim was given more than what the first had left"
+            "a second claim was given other than what the first had left, in whole seconds \
+             rounded up"
         );
         assert_eq!(
             catching_up.holds(true, again + seconds(catch_up - 41)),
