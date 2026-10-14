@@ -144,8 +144,9 @@ pub(crate) enum Waiting {
     /// the chain arrived, or, deep enough, never.
     ForTheChain,
     /// A peer this node reached itself says its chain is heavier than this
-    /// node's, and the miner reached its first peer only a moment ago. Holds
-    /// the longest it waits, in seconds.
+    /// node's by more than a block or two, and the miner has time left of the
+    /// little it gives such claims over the life of the process. Holds the
+    /// longest this wait lasts, in seconds from when it starts.
     ///
     /// The wait above cannot see this when the chain is mined at the
     /// difficulty floor, whose blocks come seconds apart and are each dated
@@ -198,7 +199,7 @@ impl fmt::Display for Waiting {
                 "mining waits while this node takes the chain a peer it reached says is \
                  heavier than its own: a block built on this node's tip now could be built on \
                  a chain the network has already left. It mines once this node holds as much, \
-                 and {seconds} seconds after it first reached a peer at the latest",
+                 and {seconds} seconds from now at the latest",
             ),
             Self::ForAChain => out.write_str(
                 "mining waits until this node holds its network's first block: anything built \
@@ -321,9 +322,9 @@ fn still_arriving(newest: Option<u64>, now: u64, still_for: Duration, block_time
     })
 }
 
-/// Block times, counted from the first peer it reached, that a miner gives a
-/// peer it reached to hand over the heavier chain it says it has, before
-/// building on its own tip.
+/// Block times a miner gives, over the life of the process, to peers it
+/// reached to hand over the heavier chains they say they have, before it
+/// builds on its own tip.
 ///
 /// The wait for the chain reads only the age of this node's newest block,
 /// which says nothing during a run at the difficulty floor. So this reads
@@ -334,18 +335,72 @@ fn still_arriving(newest: Option<u64>, now: u64, still_for: Duration, block_time
 /// Two, which is two minutes on testnet-8. Long enough for what a restart
 /// leaves a node short of: a newcomer read 1 536 blocks of testnet-8 in 45
 /// seconds the morning a node restarted 741 behind, so those take about
-/// twenty, and two minutes carry some four thousand. Short enough that a peer
-/// reached that lies about its chain costs little: two block times of this
-/// miner's work, once. Counted from the first peer reached rather than from
-/// the start, because a miner can wait far longer than this for a peer, as
-/// one did for twenty five minutes the same morning, and would then have
-/// reached it with the time already spent.
+/// twenty, and two minutes carry some four thousand. Short enough that peers
+/// reached that lie about their chains cost little: two block times of this
+/// miner's work in all, however many of them and however often they connect.
+///
+/// Spent only while a peer reached claims more, and not from the first peer
+/// reached on. It was a clock started by that first peer, whatever it
+/// claimed, so a peer that answered first and claimed nothing spent it all,
+/// and a peer reached a minute later with six hundred blocks more held the
+/// miner for nothing: it mined on a tip the network had left, as on
+/// testnet-8. Nor from the start, because a miner can wait far longer than
+/// this for a peer, as one did for twenty five minutes the same morning.
 const CATCH_UP_IN_BLOCKS: u64 = 2;
 
-/// Whether a miner that first reached a peer `since_reached` ago, if it has,
-/// is still inside the `catch_up` seconds it gives such a peer's chain.
-fn still_starting(since_reached: Option<Duration>, catch_up: u64) -> bool {
-    since_reached.is_some_and(|since| since.as_secs() < catch_up)
+/// Blocks' work, at the difficulty of this node's tip, a peer's claim has to
+/// stand past before it holds the miner.
+///
+/// Honest peers claim a block more than this node holds all the time: one
+/// reached a moment after it found a block, or one on the other side of a
+/// race for the next. Each would spend a second or so of the time above,
+/// and a node up for a few weeks, its peers restarted once a day for the
+/// day's release, would have none left for the restart it is there for. A
+/// node more than two blocks behind a peer it reached is behind, not in a
+/// race.
+const AHEAD_IN_BLOCKS: u64 = 2;
+
+/// The time a miner has left to give the chains peers it reached say are
+/// heavier, spent only while one says so.
+struct CatchUp {
+    /// What is left, of [`CATCH_UP_IN_BLOCKS`] block times.
+    left: Duration,
+    /// When the claim that holds the miner now was first seen, while one
+    /// does.
+    since: Option<Instant>,
+}
+
+impl CatchUp {
+    fn new(catch_up: u64) -> Self {
+        Self {
+            left: Duration::from_secs(catch_up),
+            since: None,
+        }
+    }
+
+    /// Whether the miner waits now, given whether a peer it reached claims
+    /// more, and if so the most it waits from here, in whole seconds.
+    ///
+    /// The seconds are what was left when this wait began, so the miner says
+    /// it once per wait rather than once a second.
+    fn holds(&mut self, claims_more: bool, now: Instant) -> Option<u64> {
+        if !claims_more {
+            if let Some(since) = self.since.take() {
+                self.left = self
+                    .left
+                    .saturating_sub(now.saturating_duration_since(since));
+            }
+            return None;
+        }
+        let since = *self.since.get_or_insert(now);
+        if now.saturating_duration_since(since) >= self.left {
+            self.left = Duration::ZERO;
+            self.since = None;
+            return None;
+        }
+        let left = self.left;
+        Some(left.as_secs() + u64::from(left.subsec_nanos() > 0))
+    }
 }
 
 /// Whether anything stops the miner before it looks at the chain.
@@ -354,10 +409,10 @@ fn still_starting(since_reached: Option<Duration>, catch_up: u64) -> bool {
 /// written in for its network. That node is the whole of its network, the way
 /// the throwaway network is run on one machine, and it mines alone because
 /// there is nobody else to wait for. Every other node waits for a peer it
-/// reached itself, then for the chain to stop arriving, and then, while it
-/// has only just started, for the heavier chain a peer it reached says it
-/// has: `behind` is how many seconds that last wait lasts at most, when a
-/// peer says so and they have not run out.
+/// reached itself, then for the chain to stop arriving, and then for the
+/// heavier chain a peer it reached says it has: `behind` is how many seconds
+/// that last wait lasts at most, when a peer says so and the time the miner
+/// gives such claims has not run out.
 fn held_back(
     on_probation: bool,
     peers: usize,
@@ -458,10 +513,7 @@ pub(crate) fn run(
     // start arriving before building on it.
     let mut last_tip = None;
     let mut moved = Instant::now();
-    // When the miner first had a peer it reached, which is where the time it
-    // gives such a peer's heavier chain starts, once.
-    let mut first_reached: Option<Instant> = None;
-    let catch_up = params.target_block_time.saturating_mul(CATCH_UP_IN_BLOCKS);
+    let mut catching_up = CatchUp::new(params.target_block_time.saturating_mul(CATCH_UP_IN_BLOCKS));
     while running.load(Ordering::SeqCst) {
         let (replaced, tip, newest) = node.with_chain(|chain| {
             let replaced = mined.settle(chain.height(), |at| chain.id_at(at));
@@ -486,12 +538,14 @@ pub(crate) fn run(
             params.target_block_time,
         );
         let peers = node.peers_reached();
-        if peers > 0 {
-            first_reached.get_or_insert_with(Instant::now);
-        }
-        let behind = (still_starting(first_reached.map(|at| at.elapsed()), catch_up)
-            && node.a_peer_reached_claims_more())
-        .then_some(catch_up);
+        // Asked only once the waits before it are over, so what is spent is
+        // time spent on this wait and on no other.
+        let claims_more = node.probation().is_none()
+            && !alone
+            && peers > 0
+            && !arriving
+            && node.a_peer_reached_claims_more(AHEAD_IN_BLOCKS);
+        let behind = catching_up.holds(claims_more, Instant::now());
         // A refusal for probation lands here on the next round, and is a wait
         // like any other rather than a reason to build again.
         let built = match held_back(node.probation().is_some(), peers, alone, arriving, behind) {
@@ -1499,22 +1553,60 @@ mod saying {
         assert_eq!(held_back(false, 1, false, false, None), None);
     }
 
-    /// The time a miner gives the heavier chain of a peer it reached starts
-    /// with that peer and ends, whatever the peer does.
+    /// The time a miner gives the heavier chains of peers it reached is spent
+    /// only while one claims more, and never comes to more than the whole of
+    /// it, however often a claim comes and goes.
+    ///
+    /// It was a clock started by the first peer reached, whatever that peer
+    /// claimed: a first peer that claimed nothing spent it all, and a peer
+    /// reached later with a far heavier chain held the miner for nothing.
     #[test]
-    fn the_time_given_to_a_peers_chain_is_counted_from_the_first_peer_and_ends() {
+    fn the_time_given_to_peers_chains_is_spent_only_while_one_claims_more() {
         let seconds = Duration::from_secs;
         let catch_up = 60 * super::CATCH_UP_IN_BLOCKS;
-        assert!(
-            !super::still_starting(None, catch_up),
-            "a miner with no peer reached has nobody's chain to wait for"
+        let start = Instant::now();
+        let mut catching_up = super::CatchUp::new(catch_up);
+        assert_eq!(
+            catching_up.holds(false, start),
+            None,
+            "a miner none of whose peers claims more waited"
         );
-        assert!(super::still_starting(Some(seconds(0)), catch_up));
-        assert!(super::still_starting(Some(seconds(catch_up - 1)), catch_up));
-        assert!(
-            !super::still_starting(Some(seconds(catch_up)), catch_up),
-            "a peer reached that never hands over the chain it claims held the miner past \
-             the time it is given"
+        assert_eq!(
+            catching_up.holds(false, start + seconds(3_600)),
+            None,
+            "fixture: an hour with peers that claim nothing more"
+        );
+        let first = start + seconds(3_600);
+        assert_eq!(
+            catching_up.holds(true, first),
+            Some(catch_up),
+            "a peer reached an hour after the first, claiming more, was given none of the time"
+        );
+        assert_eq!(
+            catching_up.holds(true, first + seconds(30)),
+            Some(catch_up),
+            "the longest a wait lasts is said once, as it begins"
+        );
+        assert_eq!(catching_up.holds(false, first + seconds(40)), None);
+        let again = first + seconds(100);
+        assert_eq!(
+            catching_up.holds(true, again),
+            Some(catch_up - 40),
+            "a second claim was given more than what the first had left"
+        );
+        assert_eq!(
+            catching_up.holds(true, again + seconds(catch_up - 41)),
+            Some(catch_up - 40)
+        );
+        assert_eq!(
+            catching_up.holds(true, again + seconds(catch_up - 40)),
+            None,
+            "claims that came and went held the miner past the whole of the time it gives them"
+        );
+        assert_eq!(
+            catching_up.holds(true, again + seconds(catch_up)),
+            None,
+            "a claim made once the time was spent held the miner again"
         );
     }
 
