@@ -391,6 +391,22 @@ pub struct Chooser {
     /// the finish to name, so nothing asked it again until it announced a
     /// block: a block interval with a heavier chain in reach and not read.
     chains_held_off: HashMap<u64, Claimed>,
+    /// When the first block that would have ended the choice was not taken
+    /// because the branch it ended it on carried less work than another
+    /// claim standing stated, which fixes the claims that can do that to a
+    /// branch from then on: those heard by that moment. See
+    /// [`Self::must_carry`].
+    ///
+    /// Without it the set never stopped growing. Each turn a branch was held
+    /// off, the claim holding it off was asked and ranked by what it sent,
+    /// and by then a stranger had connected again with a fresh claim of
+    /// more work than anybody holds, which held off the next branch: a
+    /// connection a turn kept a node choosing for good. Fixed at the moment
+    /// of the first refusal, the set only shrinks, as claims are asked and
+    /// ranked by what they sent, or fail, or leave, and each is asked within
+    /// a rotation or two, so the branch carrying the most work is taken
+    /// within that.
+    first_short_at: Option<u64>,
     /// The height from which a claim is long enough to be final: the depth
     /// a node on this network undoes, past which a node that followed the
     /// claim from nothing can never back out of it.
@@ -417,6 +433,7 @@ impl Default for Chooser {
             proven: None,
             done: false,
             chains_held_off: HashMap::new(),
+            first_short_at: None,
             final_from: JOIN_RATHER_THAN_READ,
         }
     }
@@ -546,7 +563,8 @@ impl Chooser {
     /// What the sync layer is told before every message, as
     /// `PeerState::chosen`: a node that could still undo everything it holds
     /// takes no block past that depth from a peer this does not answer yes
-    /// for. See `crate::sync::holds_nothing_it_cannot_undo`.
+    /// for, and from one it does only what [`Self::must_carry`] allows. See
+    /// `crate::sync::holds_nothing_it_cannot_undo`.
     #[must_use]
     pub fn has_chosen(&self, peer: u64) -> bool {
         self.done || self.asked.is_some_and(|(asked, _, _)| asked == peer)
@@ -574,6 +592,74 @@ impl Chooser {
                 *at = now;
             }
         }
+    }
+
+    /// The work a branch `peer` offers must carry for the block that takes
+    /// this node past the depth it undoes to be taken from it while the
+    /// choice is open: the most any other claim still worth a turn states,
+    /// of those heard by the first time a branch fell short of this.
+    ///
+    /// What the sync layer is told before every message beside
+    /// [`Self::has_chosen`], as `PeerState::must_carry`. The choice falls
+    /// first on the heaviest claim, which is a number nobody checks, and a
+    /// peer that cannot show its chain is read rather than weighed; this is
+    /// what that read is weighed against. Other claims and not the peer's
+    /// own: a branch is taken past the depth one block before its tip, so
+    /// nothing short of a weighing ever shows the work a peer claims for its
+    /// tip, while the claims beside it are what a lighter branch must not be
+    /// taken over. A claim of the same chain from another peer holds the
+    /// branch off once, and is then asked itself and ranked by what it
+    /// sends: see [`Self::fell_short`].
+    ///
+    /// Of the claims worth a turn, because those are the ones the choice will
+    /// still ask; one it has stopped chasing would hold a branch off and never
+    /// be asked to make good on it.
+    #[must_use]
+    pub fn must_carry(&self, peer: u64, now: u64) -> u128 {
+        if self.done {
+            return 0;
+        }
+        let standing = self.best_standing();
+        let ceiling = self.ceiling(now);
+        self.claims
+            .iter()
+            .filter(|(other, claim)| {
+                **other != peer
+                    && self.first_short_at.is_none_or(|at| claim.heard <= at)
+                    && Self::worth_a_turn(claim, standing, ceiling, now)
+            })
+            .map(|(_, claim)| claim.work)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The peer the choice fell on sent the block that would have ended it,
+    /// at `height`, on a branch carrying `work` below it, which is less than
+    /// another claim standing states: see [`Self::must_carry`].
+    ///
+    /// It is ranked by that from now on, as by [`Self::outgrew`], and its
+    /// turn is over without anything held against it, since what stopped it
+    /// is a claim the choice has not looked at yet and not anything it did.
+    /// The next turn goes to the heaviest claim left, which is the one that
+    /// held it off or one heavier still, and that one is weighed the same
+    /// way against everything else, this peer's branch included.
+    pub fn fell_short(
+        &mut self,
+        peer: u64,
+        host: Option<IpAddr>,
+        height: u64,
+        work: u128,
+        shows_the_chain: bool,
+        now: u64,
+    ) {
+        if self.done {
+            return;
+        }
+        self.outgrew(peer, host, height, work, shows_the_chain, now);
+        if self.asked.is_some_and(|(asked, _, _)| asked == peer) {
+            self.asked = None;
+        }
+        self.first_short_at.get_or_insert(now);
     }
 
     /// Whether messages that would start this node following `peer`'s chain
@@ -907,9 +993,7 @@ impl Chooser {
         // and the turns come out of one shared budget rather than one each,
         // which is what keeps the whole thing bounded by [`HELD_OFF_AT_MOST`]
         // however many claims there are.
-        let ceiling = self.proven.and_then(|(best, at)| {
-            (now.saturating_sub(at) >= PROVEN_PATIENCE).then_some((best, at))
-        });
+        let ceiling = self.ceiling(now);
         // A paused claim is never the end of the road: [`Self::last_resort`]
         // ignores the pause and reads from the heaviest claim there is, which
         // is what makes it affordable for a pause to run half an hour.
@@ -927,6 +1011,14 @@ impl Chooser {
         self.turned = true;
         self.asked = Some((peer, approach, now));
         Step::Ask(peer, approach)
+    }
+
+    /// The most work anybody has shown and when, once the patience after the
+    /// first showing has run out: see [`Self::step`].
+    fn ceiling(&self, now: u64) -> Option<(u128, u64)> {
+        self.proven.and_then(|(best, at)| {
+            (now.saturating_sub(at) >= PROVEN_PATIENCE).then_some((best, at))
+        })
     }
 
     /// The claim the next turn goes to, beginning the next rotation when
@@ -1001,6 +1093,9 @@ impl Chooser {
             *at = (*at).min(now);
         }
         if let Some((_, at)) = self.proven.as_mut() {
+            *at = (*at).min(now);
+        }
+        if let Some(at) = self.first_short_at.as_mut() {
             *at = (*at).min(now);
         }
         for claim in self.claims.values_mut() {
@@ -1246,7 +1341,8 @@ impl Chooser {
     /// choice and this stays open: see `crate::sync::holds_nothing_it_cannot_undo`.
     /// What ends it is a ledger handed over, which is a branch the node cannot
     /// undo below, or the first block past that depth, which only the peer
-    /// this choice asked can deliver while it is open.
+    /// this choice asked can deliver while it is open, and only on as much
+    /// work as any other claim standing states: see [`Self::must_carry`].
     ///
     /// What is handed back is every peer still claiming more work than that
     /// chain carries, whether its claim was written down or only its chain
@@ -1269,10 +1365,25 @@ impl Chooser {
                 (*peer, claimed)
             })
             .collect();
-        // What a peer claimed as its chain was held off is never older than
-        // the claim written down for it, since whatever moved the claim was
-        // read into its connection's figures first, so it stands in place.
-        named.extend(self.chains_held_off.drain());
+        // Whichever of the two figures for a peer carries more work. The
+        // figures a chain was held off with are its connection's, which a
+        // weighing never touches, so they can be older than a claim a proof
+        // raised, and replacing the claim with them named a peer whose chain
+        // was shown with the work it greeted with instead. Taking the heavier
+        // can also hand back a claim a peer's own blocks took down, which
+        // costs one question the fork choice answers. The height breaks a
+        // tie of work, so which one stands never rests on the order the two
+        // are met in.
+        for (peer, held) in self.chains_held_off.drain() {
+            named
+                .entry(peer)
+                .and_modify(|written| {
+                    *written = std::cmp::max_by_key(*written, held, |claimed| {
+                        (claimed.work, claimed.height)
+                    });
+                })
+                .or_insert(held);
+        }
         let mut behind: Vec<Claimed> = named
             .into_values()
             .filter(|claimed| {
