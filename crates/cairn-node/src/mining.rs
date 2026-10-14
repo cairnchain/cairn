@@ -382,7 +382,7 @@ impl CatchUp {
     /// more, and if so the most it waits from here, in whole seconds.
     ///
     /// The seconds are what was left when this wait began, so the miner says
-    /// it once per wait rather than once a second.
+    /// it once per wait rather than at every round it looks.
     fn holds(&mut self, claims_more: bool, now: Instant) -> Option<u64> {
         if !claims_more {
             if let Some(since) = self.since.take() {
