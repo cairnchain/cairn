@@ -1936,8 +1936,7 @@ mod saying {
         assert!(said(Waiting::ForTheirChain(120))
             .contains("takes the chain a peer it reached says is heavier than its own"));
         assert!(
-            said(Waiting::ForTheirChain(120))
-                .contains("120 seconds from now at the latest"),
+            said(Waiting::ForTheirChain(120)).contains("120 seconds from now at the latest"),
             "the line for a peer's heavier chain does not say how long it waits at most"
         );
         assert!(said(Waiting::ForAChain).contains("first block"));
