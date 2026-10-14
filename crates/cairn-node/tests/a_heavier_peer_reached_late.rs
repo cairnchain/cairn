@@ -48,7 +48,9 @@ fn peer(
     thread::spawn(move || {
         let listen = door.local_addr().unwrap().port();
         door.set_nonblocking(true).unwrap();
-        let deadline = start + Duration::from_secs(RUN_FOR + 10);
+        let deadline = start
+            .checked_add(Duration::from_secs(RUN_FOR.saturating_add(10)))
+            .unwrap();
         let mut stream = loop {
             match door.accept() {
                 Ok((stream, _)) => break stream,
@@ -193,6 +195,6 @@ fn a_heavier_peer_reached_long_after_the_first_holds_the_miner() {
     assert!(
         mined_while_waiting.is_empty(),
         "the miner said it waited for the heavier chain and mined all the same: {:?}",
-        &mined_while_waiting[..mined_while_waiting.len().min(6)]
+        mined_while_waiting.get(..6).unwrap_or(&mined_while_waiting)
     );
 }

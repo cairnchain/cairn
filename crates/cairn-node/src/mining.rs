@@ -399,7 +399,10 @@ impl CatchUp {
             return None;
         }
         let left = self.left;
-        Some(left.as_secs() + u64::from(left.subsec_nanos() > 0))
+        Some(
+            left.as_secs()
+                .saturating_add(u64::from(left.subsec_nanos() > 0)),
+        )
     }
 }
 

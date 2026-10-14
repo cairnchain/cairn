@@ -16629,21 +16629,7 @@ mod peers_and_loops {
     #[test]
     fn the_half_a_tie_kept_for_a_dial_is_not_let_go_of_for_a_visitor() {
         let crowd = |at: usize| IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1]);
-        let kept = |socket: &TcpStream| Peer {
-            dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944))),
-            greeted: true,
-            ..from_outside(socket, crowd(200))
-        };
-        let unanswered = |socket: &TcpStream| Peer {
-            host: Some(crowd(201)),
-            dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 19_944))),
-            ..stand_in(socket, true)
-        };
-        let cases: [(&dyn Fn(&TcpStream) -> Peer, &str); 2] = [
-            (&kept, "the half a tie kept in place of this node's dial"),
-            (&unanswered, "a dial of this node's not yet answered"),
-        ];
-        for (chosen, what) in cases {
+        for unanswered in [false, true] {
             let node = quiet();
             let (socket, _far) = a_socket();
             let youngest: PeerId = 1_000_000;
@@ -16655,7 +16641,22 @@ mod peers_and_loops {
                 for at in 1..TARGET_PEERS {
                     peers.insert(1_000 + u64::try_from(at).unwrap(), stand_in(&socket, true));
                 }
-                peers.insert(youngest, chosen(&socket));
+                // The half a tie kept, or a dial of this node's not yet
+                // answered.
+                let chosen = if unanswered {
+                    Peer {
+                        host: Some(crowd(201)),
+                        dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 19_944))),
+                        ..stand_in(&socket, true)
+                    }
+                } else {
+                    Peer {
+                        dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944))),
+                        greeted: true,
+                        ..from_outside(&socket, crowd(200))
+                    }
+                };
+                peers.insert(youngest, chosen);
             }
             let visitor = IpAddr::from([192, 0, 2, 1]);
             assert!(
@@ -16673,7 +16674,12 @@ mod peers_and_loops {
             assert_eq!(let_go.len(), 1, "fixture: room was made by other than one");
             assert!(
                 !let_go.contains(&youngest),
-                "{what} was let go of for a visitor"
+                "{} was let go of for a visitor",
+                if unanswered {
+                    "a dial of this node's not yet answered"
+                } else {
+                    "the half a tie kept in place of this node's dial"
+                }
             );
         }
     }
