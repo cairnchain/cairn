@@ -292,8 +292,8 @@ pub struct PeerState {
     /// The work a branch this peer offers must carry for the block that takes
     /// this node past the depth it undoes to be taken from it while the choice
     /// is open: the most that any other claim standing in front of the choice
-    /// states. Written by the node beside [`Self::chosen`], from the chooser
-    /// (`Chooser::must_carry`).
+    /// stands for at that block's height. Written by the node beside
+    /// [`Self::chosen`], from the chooser (`Chooser::must_carry`).
     ///
     /// The choice falling on a peer was all it took, and the choice falls
     /// first on the peer claiming the most work, which is a number in its
@@ -1877,7 +1877,7 @@ fn held_to_its_word(
 
 /// What a block at `height`, hanging on `parent`, says about the peer the
 /// choice fell on when it would have ended the choice on less work than
-/// another claim standing states: see [`Reaction::fell_short`].
+/// another claim standing stands for there: see [`Reaction::fell_short`].
 ///
 /// The work of `parent` when this node holds it and nought when it does not,
 /// as in [`held_to_its_word`], and for the same reason.
@@ -1945,7 +1945,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
             return held_to_its_word(chain, peer, height, parent);
         }
         // And from the peer it has fallen on, only one that ends the choice
-        // on as much work as any other claim standing states. The work in
+        // on as much work as any other claim standing stands for there. The work in
         // the header is the peer's word until the block is judged, and it is
         // judged next: taken, the header's work is the branch's. See
         // [`PeerState::must_carry`].

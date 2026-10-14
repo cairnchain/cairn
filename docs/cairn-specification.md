@@ -2939,7 +2939,10 @@ the choice settled on, does.
 
 **Nor MAY it take that block from the peer its choice settled on when the
 branch the block ends on carries less work than another claim still standing
-in front of the choice states.** The choice settles first on the heaviest
+in front of the choice stands for at that height.** A claim is of a tip; at a
+lower height it stands for its work spread evenly over its blocks, as many as
+the branch has there, and all of its work when its tip is no higher. The
+choice settles first on the heaviest
 claim, which is the peer's word, and a peer that keeps no headers is read
 rather than weighed, so without this a peer claiming more than the honest
 chain beside it ended the choice on a branch from the first block mined at the

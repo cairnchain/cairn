@@ -167,8 +167,9 @@ fn the_two_chains() -> (Vec<Block>, Vec<Block>) {
 /// carry, which costs nothing to say. The first turn still goes to peer 2,
 /// read: whom to ask first is a question about words, and a read checks every
 /// block as it arrives. What changed is what the read is held to before it
-/// can end the choice, which is the work peer 1 claims, and that once its
-/// branch falls short of that the turn goes to peer 1.
+/// can end the choice, which is what peer 1 claims for a chain of that many
+/// blocks, and that once its branch falls short of that the turn goes to
+/// peer 1.
 ///
 /// The report's first half asserted that peer 2 is not handed the first turn
 /// at all. Not kept: the turn costs one answering window at most, which the
@@ -190,9 +191,9 @@ fn the_heaviest_unchecked_claim_read_first_is_held_to_the_claims_beside_it() {
     assert!(chooser.has_chosen(2), "fixture: the choice fell on peer 2");
     assert_eq!(
         chooser.must_carry(2, 200),
-        900_000,
-        "a read of a claim nobody checked must end the choice on at least the work the \
-         honest peer beside it claims"
+        900_000 * u128::from(UNDO + 2) / u128::from(UNDO + 51),
+        "a read of a claim nobody checked must end the choice on at least what the honest \
+         peer beside it claims, spread evenly over as many blocks as the branch has then"
     );
 
     // Its branch reaches the depth carrying 5 467 units and no more.

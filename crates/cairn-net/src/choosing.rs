@@ -195,6 +195,28 @@ fn held_off_for(failures: u32) -> u64 {
         .min(MAX_HELD_OFF)
 }
 
+/// What a claim of `work` behind a tip at `height` stands for at `at`: all of
+/// it when the tip is no higher, and otherwise its share of `at + 1` blocks
+/// out of `height + 1`, the work spread evenly over them. See
+/// [`Chooser::must_carry`].
+///
+/// Rounded down, and divided first when the product would not fit, which only
+/// a claim of nearly all the work a `u128` holds makes it do.
+fn share_at(work: u128, height: u64, at: u64) -> u128 {
+    if height <= at {
+        return work;
+    }
+    let blocks = u128::from(height).saturating_add(1);
+    let upto = u128::from(at).saturating_add(1);
+    match work.checked_mul(upto) {
+        Some(scaled) => scaled.checked_div(blocks).unwrap_or(work),
+        None => work
+            .checked_div(blocks)
+            .unwrap_or(work)
+            .saturating_mul(upto),
+    }
+}
+
 /// Addresses whose claims went unshown that are remembered at once.
 ///
 /// This exists so that a peer cannot wash a broken claim clean by
@@ -610,20 +632,31 @@ impl Chooser {
 
     /// The work a branch `peer` offers must carry for the block that takes
     /// this node past the depth it undoes to be taken from it while the
-    /// choice is open: the most any other claim still worth a turn states,
-    /// of those heard by the first time a branch fell short of this.
+    /// choice is open: the most that any other claim still worth a turn
+    /// stands for at that block's height, of those heard by the first time a
+    /// branch fell short of this.
     ///
     /// What the sync layer is told before every message beside
     /// [`Self::has_chosen`], as `PeerState::must_carry`. The choice falls
     /// first on the heaviest claim, which is a number nobody checks, and a
     /// peer that cannot show its chain is read rather than weighed; this is
     /// what that read is weighed against. Other claims and not the peer's
-    /// own: a branch is taken past the depth one block before its tip, so
-    /// nothing short of a weighing ever shows the work a peer claims for its
-    /// tip, while the claims beside it are what a lighter branch must not be
-    /// taken over. A claim of the same chain from another peer holds the
-    /// branch off once, and is then asked itself and ranked by what it
-    /// sends: see [`Self::fell_short`].
+    /// own, since the claims beside it are what a lighter branch must not be
+    /// taken over.
+    ///
+    /// At that block's height, because a claim is of a tip and the block is
+    /// one past the depth: what a chain longer than that stands for there is
+    /// its work spread evenly over its blocks, as many as the branch has (see
+    /// [`share_at`]). Held to the whole of every other claim, no read of a
+    /// chain longer than the depth could end the choice while one other peer
+    /// claimed that chain: each was held off in turn, ranked by its branch up
+    /// to the depth, and the last one asked ended the choice against those,
+    /// which on a network split in two was as often the lighter half's.
+    /// Spread evenly, a branch walked down to the lowest difficulty there is
+    /// still carries a small part of what an honest chain beside it stands
+    /// for, and a branch of an honest chain about what the others do. One
+    /// whose difficulty rose along it can fall short of its own average; it
+    /// is held off once, ranked by what it sent, and taken on its next turn.
     ///
     /// Of the claims worth a turn, because those are the ones the choice will
     /// still ask; one it has stopped chasing would hold a branch off and never
@@ -642,14 +675,14 @@ impl Chooser {
                     && self.first_short_at.is_none_or(|at| claim.heard <= at)
                     && Self::worth_a_turn(claim, standing, ceiling, now)
             })
-            .map(|(_, claim)| claim.work)
+            .map(|(_, claim)| share_at(claim.work, claim.height, self.final_from.saturating_add(1)))
             .max()
             .unwrap_or(0)
     }
 
     /// The peer the choice fell on sent the block that would have ended it,
     /// at `height`, on a branch carrying `work` below it, which is less than
-    /// another claim standing states: see [`Self::must_carry`].
+    /// another claim standing stands for there: see [`Self::must_carry`].
     ///
     /// It is ranked by that from now on, as by [`Self::outgrew`], and its
     /// turn is over without anything held against it, since what stopped it
@@ -1357,7 +1390,8 @@ impl Chooser {
     /// What ends it is a ledger handed over, which is a branch the node cannot
     /// undo below, or the first block past that depth, which only the peer
     /// this choice asked can deliver while it is open, and only on as much
-    /// work as any other claim standing states: see [`Self::must_carry`].
+    /// work as any other claim standing stands for there: see
+    /// [`Self::must_carry`].
     ///
     /// What is handed back is every peer still claiming more work than that
     /// chain carries, whether its claim was written down or only its chain
@@ -2742,17 +2776,29 @@ mod tests {
         );
     }
 
+    /// The height of the block that would end the choice of a [`Chooser::new`].
+    const CROSSING: u64 = JOIN_RATHER_THAN_READ + 1;
+
+    /// Two claims of a chain whose tip is the block that would end the choice,
+    /// so what each stands for there is all of it: peer 1 heavy, peer 2
+    /// lighter.
+    fn contested_at_the_crossing() -> Chooser {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, CROSSING, true, 100);
+        chooser.noted(2, Some(host(2)), 500, CROSSING, true, 100);
+        chooser
+    }
+
     /// The block that would end the choice is weighed against every other
     /// claim worth a turn, and not against the asked peer's own.
     ///
-    /// Its own claim is of its tip, which a branch taken one block past the
-    /// depth never reaches; the claims beside it are what a lighter branch
-    /// must not be taken over. One that failed is not, nor one the choice has
-    /// stopped chasing, and once the choice is made nothing is.
+    /// The claims beside it are what a lighter branch must not be taken over.
+    /// One that failed is not, nor one the choice has stopped chasing, and
+    /// once the choice is made nothing is.
     #[test]
     fn a_branch_must_carry_what_every_other_claim_worth_a_turn_states() {
-        let mut chooser = contested();
-        chooser.noted(3, Some(host(3)), 2_000, LONG, false, 100);
+        let mut chooser = contested_at_the_crossing();
+        chooser.noted(3, Some(host(3)), 2_000, CROSSING, false, 100);
         assert_eq!(
             chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2, 3]),
             Step::Ask(3, Approach::Read)
@@ -2769,6 +2815,37 @@ mod tests {
         assert_eq!(chooser.must_carry(3, 202), 0, "the choice is made");
     }
 
+    /// A claim of a chain longer than the depth stands, at the block that
+    /// would end the choice, for its work spread evenly over its blocks.
+    ///
+    /// Held to the whole of it, no read of such a chain could end the choice
+    /// while a second peer claimed the same chain, and on a network split in
+    /// two the last peer asked ended it, as often the lighter half's.
+    #[test]
+    fn a_longer_claim_stands_for_its_even_share_at_the_block_that_ends_the_choice() {
+        let mut chooser = Chooser::new();
+        // A chain of twice as many blocks as the branch at the crossing.
+        let tip = CROSSING * 2 + 1;
+        chooser.noted(1, Some(host(1)), 4_000, tip, false, 100);
+        chooser.noted(2, Some(host(2)), 1_000, CROSSING - 1, false, 100);
+        assert_eq!(
+            chooser.must_carry(3, 100),
+            2_000,
+            "a claim of twice the blocks stood for more than half its work at the crossing"
+        );
+        chooser.noted(1, Some(host(1)), u128::MAX, tip, false, 100);
+        assert_eq!(
+            chooser.must_carry(3, 100),
+            u128::MAX / u128::from(tip + 1) * u128::from(CROSSING + 1),
+            "a claim whose product with the blocks does not fit is spread all the same"
+        );
+        assert_eq!(
+            chooser.must_carry(1, 100),
+            1_000,
+            "a claim no longer than the branch stands for all of its work"
+        );
+    }
+
     /// Once a branch has fallen short, a claim heard afterwards holds no
     /// branch off, so the claims that can are a set that only shrinks.
     ///
@@ -2777,7 +2854,7 @@ mod tests {
     /// choice never ended.
     #[test]
     fn a_claim_heard_after_a_branch_fell_short_holds_no_branch_off() {
-        let mut chooser = contested();
+        let mut chooser = contested_at_the_crossing();
         assert_eq!(
             chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]),
             Step::Ask(1, Approach::Join)
@@ -2787,15 +2864,15 @@ mod tests {
             500,
             "fixture: the claim standing beside it"
         );
-        chooser.noted(3, Some(host(3)), u128::MAX, LONG, false, 205);
+        chooser.noted(3, Some(host(3)), u128::MAX, CROSSING, false, 205);
         assert_eq!(
             chooser.must_carry(1, 205),
             u128::MAX,
             "before any branch fell short, every claim standing holds one off"
         );
-        chooser.fell_short(1, Some(host(1)), LONG, 400, true, 206);
+        chooser.fell_short(1, Some(host(1)), CROSSING, 400, true, 206);
         assert!(!chooser.has_chosen(1), "the turn is over");
-        chooser.noted(4, Some(host(4)), u128::MAX, LONG, false, 207);
+        chooser.noted(4, Some(host(4)), u128::MAX, CROSSING, false, 207);
         assert_eq!(
             chooser.must_carry(2, 207),
             u128::MAX,
