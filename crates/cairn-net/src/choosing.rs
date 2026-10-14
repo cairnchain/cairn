@@ -2903,17 +2903,24 @@ mod tests {
             Step::Ask(3, Approach::Read)
         );
         chooser.delivered(3, 8, 210);
-        chooser.delivered(3, 8, 200 + FIRST_ANSWER_PATIENCE + 5);
+        chooser.delivered(3, 9, 230);
+        assert_eq!(
+            chooser.step(250, true, 0, JoinProgress::NothingYet, &[1, 2, 3]),
+            Step::Quiet,
+            "a block taking the branch higher did not renew the read"
+        );
+        chooser.delivered(3, 9, 255);
+        chooser.delivered(3, 8, 256);
         assert_eq!(
             chooser.step(
-                210 + FIRST_ANSWER_PATIENCE,
+                230 + FIRST_ANSWER_PATIENCE,
                 true,
                 0,
                 JoinProgress::NothingYet,
                 &[1, 2, 3]
             ),
             Step::Ask(1, Approach::Join),
-            "a block moving the branch at a height the turn had reached renewed it"
+            "a block moving the branch no higher than the turn had taken it renewed it"
         );
     }
 }
