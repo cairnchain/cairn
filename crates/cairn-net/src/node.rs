@@ -16616,54 +16616,66 @@ mod peers_and_loops {
     }
 
     /// The half a tie kept in place of this node's dial is never let go of
-    /// to make room for a visitor.
+    /// to make room for a visitor, and nor is a dial of its own not yet
+    /// answered.
     ///
-    /// It is the peer that dial reached, the one connection left to say so,
-    /// and the room made for a visitor is taken from connections somebody
-    /// else chose. The pool read `dialled`, which is about the socket, and
-    /// the kept half is the peer's own: here the youngest of the crowd, the
-    /// one a visitor would have been given.
+    /// The first is the peer that dial reached, the one connection left to
+    /// say so, and the room made for a visitor is taken from connections
+    /// somebody else chose. The pool read `dialled`, which is about the
+    /// socket, and the kept half is the peer's own. The second has not been
+    /// reached yet, and a pool that read `reached()` alone would offer it.
+    /// Each in turn is the youngest of the crowd, the one a visitor would be
+    /// given.
     #[test]
     fn the_half_a_tie_kept_for_a_dial_is_not_let_go_of_for_a_visitor() {
-        let node = quiet();
-        let (socket, _far) = a_socket();
         let crowd = |at: usize| IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1]);
-        let kept: PeerId = 1_000_000;
-        {
-            let mut peers = node.shared.peers();
-            for at in 0..MOST_FROM_OUTSIDE {
-                peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, crowd(at)));
+        let kept = |socket: &TcpStream| Peer {
+            dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944))),
+            greeted: true,
+            ..from_outside(socket, crowd(200))
+        };
+        let unanswered = |socket: &TcpStream| Peer {
+            host: Some(crowd(201)),
+            dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 19_944))),
+            ..stand_in(socket, true)
+        };
+        let cases: [(&dyn Fn(&TcpStream) -> Peer, &str); 2] = [
+            (&kept, "the half a tie kept in place of this node's dial"),
+            (&unanswered, "a dial of this node's not yet answered"),
+        ];
+        for (chosen, what) in cases {
+            let node = quiet();
+            let (socket, _far) = a_socket();
+            let youngest: PeerId = 1_000_000;
+            {
+                let mut peers = node.shared.peers();
+                for at in 0..MOST_FROM_OUTSIDE {
+                    peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, crowd(at)));
+                }
+                for at in 1..TARGET_PEERS {
+                    peers.insert(1_000 + u64::try_from(at).unwrap(), stand_in(&socket, true));
+                }
+                peers.insert(youngest, chosen(&socket));
             }
-            for at in 1..TARGET_PEERS {
-                peers.insert(1_000 + u64::try_from(at).unwrap(), stand_in(&socket, true));
-            }
-            peers.insert(
-                kept,
-                Peer {
-                    dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944))),
-                    greeted: true,
-                    ..from_outside(&socket, crowd(200))
-                },
+            let visitor = IpAddr::from([192, 0, 2, 1]);
+            assert!(
+                node.shared.make_room_for(visitor),
+                "fixture: a full table made no room"
+            );
+            let let_go: Vec<PeerId> = node
+                .shared
+                .peers()
+                .iter()
+                .filter(|(_, peer)| peer.leaving)
+                .map(|(id, _)| *id)
+                .collect();
+            stop_all(&node);
+            assert_eq!(let_go.len(), 1, "fixture: room was made by other than one");
+            assert!(
+                !let_go.contains(&youngest),
+                "{what} was let go of for a visitor"
             );
         }
-        let visitor = IpAddr::from([192, 0, 2, 1]);
-        assert!(
-            node.shared.make_room_for(visitor),
-            "fixture: a full table made no room"
-        );
-        let let_go: Vec<PeerId> = node
-            .shared
-            .peers()
-            .iter()
-            .filter(|(_, peer)| peer.leaving)
-            .map(|(id, _)| *id)
-            .collect();
-        stop_all(&node);
-        assert_eq!(let_go.len(), 1, "fixture: room was made by other than one");
-        assert!(
-            !let_go.contains(&kept),
-            "the half a tie kept in place of this node's dial was let go of for a visitor"
-        );
     }
 
     /// A full node lets go of exactly one connection to make room for a
