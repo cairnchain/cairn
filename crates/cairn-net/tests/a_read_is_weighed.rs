@@ -485,3 +485,50 @@ fn a_visitor_that_goes_quiet_at_the_depth_holds_a_newcomer_off_for_one_answering
          bound of {bound:?}: one answering window, a round of upkeep and the honest read"
     );
 }
+
+/// **A young network where everybody reads still syncs at once.**
+///
+/// Two honest seeds holding the same chain, longer than the depth a node
+/// undoes and far shorter than one it is handed: the newcomer reads it. The
+/// first seed asked has its block past the depth held off by the claim of the
+/// second, which states the whole chain's work; it is ranked by what it sent,
+/// the second is asked, and its block past the depth carries more than that.
+/// One turn more than before, a round of upkeep, and no waiting on anybody.
+#[test]
+fn a_newcomer_between_two_honest_seeds_that_are_read_takes_the_chain_at_once() {
+    let (honest_chain, _) = the_two_chains();
+    let seeds: Vec<Node> = (0..2)
+        .map(|_| {
+            let seed = Node::bind(rules(), loopback()).unwrap();
+            for block in &honest_chain {
+                seed.submit_block(block.clone()).unwrap();
+            }
+            seed
+        })
+        .collect();
+    let honest_tip = seeds[0].with_chain(ChainStore::tip).unwrap();
+    let newcomer = Node::bind(rules(), loopback()).unwrap();
+    let started = Instant::now();
+    for seed in &seeds {
+        newcomer.connect(seed.address()).unwrap();
+    }
+    let took_it = wait_until(PATIENCE, || {
+        newcomer.with_chain(ChainStore::tip) == Some(honest_tip)
+    });
+    let took = started.elapsed();
+    let height = newcomer.height();
+    newcomer.shutdown();
+    for seed in &seeds {
+        seed.shutdown();
+    }
+    assert!(
+        took_it,
+        "a newcomer between two honest seeds was at {height:?} after {PATIENCE:?}"
+    );
+    let bound = Duration::from_secs(10);
+    assert!(
+        took <= bound,
+        "a newcomer between two honest seeds took {took:?} to read their chain, past {bound:?}: \
+         a settling of two seconds, two turns a round of upkeep apart, and the read"
+    );
+}

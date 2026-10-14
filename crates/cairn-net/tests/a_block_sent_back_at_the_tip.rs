@@ -1,14 +1,14 @@
-//! AUDIT 01-sync-choice, finding 01-F2: the cursor #300 widened.
+//! A block of the branch a node follows, sent back by a peer, does not move
+//! where the next round is asked from.
 //!
-//! `PeerState::aside` used to hold the last block a peer delivered OFF the
-//! branch this node follows. #300 made it hold the last block it delivered
-//! that this node holds at all, on the branch or beside it, so that a peer
-//! agreeing far below the tip could be walked up a batch a round. The cursor
-//! is read at the next `Chain` whatever branch that `Chain` is about, so a
-//! block of this node's own branch written into it pushes the next round's
-//! first height to just past the tip: exactly the T8-7 F1 shape #300 closed,
-//! and a peer can put one there for nothing by sending back a block this node
-//! already holds.
+//! #300 made the cursor a peer's deliveries leave count a block on the branch
+//! followed as well as one beside it, so a peer agreeing far below the tip
+//! could be walked up a batch a round. The cursor was read at the next `Chain`
+//! whatever branch that `Chain` was about, so a block of the node's own branch
+//! pushed the next round to just past the tip, the shape #300 closed, and a
+//! peer could put one there for nothing by sending back a block the node
+//! already held. A block on the branch now counts only for a round it was
+//! asked for, and only for a `Chain` answered from the same place.
 
 #![allow(
     clippy::unwrap_used,
@@ -120,7 +120,7 @@ fn a_block_of_the_branch_followed_does_not_push_the_next_round_above_the_tip() {
     // The peer sends back a block this node already holds, at its tip. It
     // costs the peer one block and buys it nothing on its face: the block is
     // a duplicate. It writes the cursor all the same.
-    let tip = blocks[(MINE - 1) as usize].clone();
+    let tip = blocks[usize::try_from(MINE - 1).unwrap()].clone();
     let mut local = Local {
         keeps: KEEPS,
         nonce: 1,
