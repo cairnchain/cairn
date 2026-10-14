@@ -10927,16 +10927,32 @@ fn read_loop(
         // The chain is held for the decision and for writing the log, and let
         // go before anything is sent, so a slow peer never stalls the chain.
         let asked = outbound.take_the_question_asked_from_outside();
-        peer.chosen = shared.choosing().has_chosen(id);
+        (peer.chosen, peer.must_carry) = {
+            let choosing = shared.choosing();
+            (choosing.has_chosen(id), choosing.must_carry(id, last_heard))
+        };
         let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message, asked);
         // What the choice is told about this peer's blocks: one of the asked
-        // peer's that moved the branch is its read moving, and one past what
-        // this peer claimed is what it sent in place of what it said.
+        // peer's that moved the branch is its read moving, one past what this
+        // peer claimed is what it sent in place of what it said, and one that
+        // would have ended the choice on less than another claim states is
+        // what it sent too, and the end of its turn.
         if reaction.applied.is_some() {
-            shared.choosing().delivered(id, last_heard);
+            let height = shared.chain().height().unwrap_or(0);
+            shared.choosing().delivered(id, height, last_heard);
         }
         if let Some((height, work)) = reaction.outgrew {
             shared.choosing().outgrew(
+                id,
+                peer.remote,
+                height,
+                work,
+                peer.keeps.headers,
+                last_heard,
+            );
+        }
+        if let Some((height, work)) = reaction.fell_short {
+            shared.choosing().fell_short(
                 id,
                 peer.remote,
                 height,

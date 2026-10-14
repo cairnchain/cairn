@@ -189,9 +189,8 @@ pub struct PeerState {
     /// decides. Whoever wants a rule about a quiet peer wants the one in the
     /// loop.
     pub asked_at: u64,
-    /// The last block this peer delivered that this node holds, on the branch
-    /// it follows or beside it, until the next `Chain` this peer sends takes
-    /// it.
+    /// The last block this peer delivered that this node holds beside the
+    /// branch it follows, until the next `Chain` this peer sends takes it.
     ///
     /// What lets a branch that parts below the tip arrive a window at a
     /// time. A peer serves a batch only as far as the asker's window pays
@@ -203,17 +202,37 @@ pub struct PeerState {
     /// It is asked from past this block instead, while everything below it
     /// down to the branch followed is still held. See [`past_what_arrived`].
     ///
-    /// And what lets a branch be asked for at all where the peer agrees a
-    /// batch or more below where it parts, which a locator makes it do for
-    /// every branch parting more than seventy two below the tip: the batch
-    /// asked from there is blocks this node already follows, and written only
-    /// for a block beside the branch, this was never set by them.
-    ///
     /// Taken rather than read, so a block that is not on the branch the peer
     /// now offers steers one round at most. A round asked past it that
     /// brings nothing to hold leaves nothing here, and the next is asked
     /// from where the branches part.
+    ///
+    /// Beside the branch only. A block of the branch followed is written down
+    /// in [`Self::walk`] instead, with the round it answered: written here,
+    /// one sent back at the tip, which costs a peer nothing since it is a
+    /// block this node already holds, had the next round asked from past the
+    /// tip whatever branch that round was about.
     pub aside: Option<Located>,
+    /// The `from` of the last `Chain` this node asked a stretch of, and the
+    /// last block it asked for in that round that landed on the branch it
+    /// follows, until the next `Chain` this peer sends takes them.
+    ///
+    /// What lets a branch be asked for at all where the peer agrees a batch
+    /// or more below where it parts, which a locator makes it do for every
+    /// branch parting more than seventy two below the tip: the batch asked
+    /// from there is blocks this node already follows, and the next round is
+    /// asked from past the last of them, a batch a round up to where the
+    /// branches part. See [`past_what_arrived`].
+    ///
+    /// Read only by a `Chain` naming the same `from`, which is how every
+    /// round of such a walk is answered, since the peer is shown the same
+    /// locator and agrees at the same place. A `Chain` naming another `from`
+    /// is about another branch, or the same one seen from another tip, and
+    /// a block of the branch this node follows says nothing about where that
+    /// one parts. Only a block this node asked for and the peer did not
+    /// offer counts, so a block sent back unasked, or one announced, steers
+    /// nothing.
+    pub walk: Option<(u64, Option<Located>)>,
     /// When the outstanding batch last came in part: the moment a block of
     /// it arrived and left some of it still awaited, or the moment what was
     /// left was last asked for again.
@@ -270,6 +289,27 @@ pub struct PeerState {
     /// [`on_block`] that asks it. False until the node says otherwise, so this
     /// layer on its own holds every peer to it.
     pub chosen: bool,
+    /// The work a branch this peer offers must carry for the block that takes
+    /// this node past the depth it undoes to be taken from it while the choice
+    /// is open: the most that any other claim standing in front of the choice
+    /// stands for at that block's height. Written by the node beside
+    /// [`Self::chosen`], from the chooser (`Chooser::must_carry`).
+    ///
+    /// The choice falling on a peer was all it took, and the choice falls
+    /// first on the peer claiming the most work, which is a number in its
+    /// greeting that nothing checks. A peer saying it keeps no headers is
+    /// read rather than weighed, so a read was the one way past the depth
+    /// with nothing ever set against what the peer claimed: one claiming more
+    /// than the honest chain beside it pushed a branch from the first block,
+    /// mined at the lowest difficulty there is, one block past the depth, and
+    /// the node held for good a chain carrying next to no work that the
+    /// network's real chain could never replace. That block is weighed now,
+    /// and one carrying less than this is not taken: see
+    /// [`Reaction::fell_short`].
+    ///
+    /// Nought until the node says otherwise, which holds no peer to anything
+    /// beyond what [`Self::chosen`] already does.
+    pub must_carry: u128,
     /// Where the connection came from, filled in by whoever opened it.
     pub remote: Option<IpAddr>,
     /// Whether this node went out and reached this peer: opened this
@@ -1160,6 +1200,17 @@ pub struct Reaction {
     /// number, and would have been the heaviest claim in front of the choice
     /// on the strength of the second.
     pub outgrew: Option<(u64, u128)>,
+    /// The height of a block the peer the choice fell on sent past the depth
+    /// this node undoes, while it could still undo everything it held, that
+    /// was not taken because the branch it would have ended the choice on
+    /// carries less work than [`PeerState::must_carry`], with the work of the
+    /// block beneath it, which is the most of that branch this node holds.
+    ///
+    /// Named for the node to tell its chooser, which ranks the peer by that
+    /// rather than by what it said and hands the next turn to somebody else
+    /// (`Chooser::fell_short`): the claim standing in front of it is one the
+    /// choice has not looked at yet.
+    pub fell_short: Option<(u64, u128)>,
 }
 
 impl Reaction {
@@ -1449,8 +1500,9 @@ pub const MAX_AWAITING: usize = MAX_REQUESTED * 4;
 /// recognises nothing it was shown answers from nought, which a locator always
 /// shows, and was the reason: asking from there was the same batch of blocks
 /// this node already follows, every round. It is a round for each batch of
-/// them now, once, each past the last, because [`PeerState::aside`] counts a
-/// block on the branch followed as arrived too.
+/// them now, once, each past the last, because [`PeerState::walk`] counts a
+/// block on the branch followed as arrived too, when it was asked for in a
+/// round answered from the same place.
 ///
 /// Past `arrived`, then, when it is on the branch followed: everything from
 /// `from` up to it is a block both hold, and asking for it again buys nothing.
@@ -1823,6 +1875,22 @@ fn held_to_its_word(
     }
 }
 
+/// What a block at `height`, hanging on `parent`, says about the peer the
+/// choice fell on when it would have ended the choice on less work than
+/// another claim standing stands for there: see [`Reaction::fell_short`].
+///
+/// The work of `parent` when this node holds it and nought when it does not,
+/// as in [`held_to_its_word`], and for the same reason.
+fn fell_short(chain: &ChainStore, height: u64, parent: Hash32) -> Reaction {
+    let work = chain
+        .block(&parent)
+        .map_or(0, |block| block.header.total_work);
+    Reaction {
+        fell_short: Some((height, work)),
+        ..Reaction::idle()
+    }
+}
+
 /// Takes a block `peer` sent at `height`, `work` being as much of the work
 /// behind it as this node can vouch for, as what the peer holds, when it
 /// stands above the height the peer claimed. Says so, for the node to tell its
@@ -1872,8 +1940,18 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
     // choice made, and made by whichever peer got there first. See
     // [`PeerState::chosen`].
     let choosing = holds_nothing_it_cannot_undo(chain);
-    if choosing && !peer.chosen && height > chain.undo_limit() {
-        return held_to_its_word(chain, peer, height, parent);
+    if choosing && height > chain.undo_limit() {
+        if !peer.chosen {
+            return held_to_its_word(chain, peer, height, parent);
+        }
+        // And from the peer it has fallen on, only one that ends the choice
+        // on as much work as any other claim standing stands for there. The work in
+        // the header is the peer's word until the block is judged, and it is
+        // judged next: taken, the header's work is the branch's. See
+        // [`PeerState::must_carry`].
+        if claimed < peer.must_carry {
+            return fell_short(chain, height, parent);
+        }
     }
 
     match chain.add_block(block, now) {
@@ -2298,7 +2376,7 @@ fn cost_of(message: &Message, peer: &PeerState) -> u32 {
 /// Takes a block a peer was `charged` for, and hands the price back down to
 /// one unit if it was an answer this node asked for and is now on the branch
 /// this node follows. Either way, one this node holds is written down as the
-/// last this peer delivered: see [`PeerState::aside`].
+/// last this peer delivered: see [`PeerState::aside`] and [`PeerState::walk`].
 ///
 /// Handed back only for a block on that branch, which it cannot be without the
 /// work its header claims at the difficulty this chain demands. Everything
@@ -2326,11 +2404,17 @@ fn on_block_charged(
     // already held from this peer or from another. Not a block hanging on a
     // parent nobody has sent yet, which is not held at all, and would
     // otherwise put what did arrive out of reach of the next round. One on the
-    // branch counts as much as one beside it, see [`PeerState::aside`], and
-    // is asked of the branch rather than of the bodies held: a node with a
-    // disk lets go of those more than `WARM_BODIES` below its tip.
-    if chain.id_at(at) == Some(id) || chain.held_header(&id).is_some() {
-        peer.aside = Some(Located::new(at, id));
+    // branch is asked of the branch rather than of the bodies held, since a
+    // node with a disk lets go of those more than `WARM_BODIES` below its tip,
+    // and is written down with the round it answered, and only when it did:
+    // see [`PeerState::walk`].
+    let located = Located::new(at, id);
+    if chain.id_at(at) == Some(id) {
+        if let Some((_, last)) = peer.walk.as_mut().filter(|_| asked) {
+            *last = Some(located);
+        }
+    } else if chain.held_header(&id).is_some() {
+        peer.aside = Some(located);
     }
     reaction
 }
@@ -2430,8 +2514,14 @@ fn answer(
             ..Reaction::idle()
         },
         Message::Chain { from, count } => {
-            // Taken whatever this answer comes to: see [`PeerState::aside`].
-            let arrived = peer.aside.take();
+            // Both taken whatever this answer comes to: see
+            // [`PeerState::aside`] and [`PeerState::walk`].
+            let walked = peer
+                .walk
+                .take()
+                .filter(|(asked_from, _)| *asked_from == from)
+                .and_then(|(_, last)| last);
+            let arrived = peer.aside.take().or(walked);
             let lowest = from.max(lowest_worth_asking(local.chain));
             let start = past_what_arrived(local.chain, lowest, arrived);
             let end = from.saturating_add(count);
@@ -2459,6 +2549,7 @@ fn answer(
             if start >= end {
                 follow_up(local.chain, peer, now)
             } else {
+                peer.walk = Some((from, None));
                 request_range(
                     local.chain,
                     peer,
