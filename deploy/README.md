@@ -99,11 +99,15 @@ and the node will mine to it:
 MINE="<address>" sh /usr/local/src/cairn/deploy/install.sh
 ```
 
-A node set to mine waits until it has a peer it reached itself, and until the
-chain has stopped arriving, before it builds a block, and says so in the
-journal. A block mined
-with nobody to hand it to starts a chain of that machine's own, and past the
-depth a node will undo, that machine could never follow the network again.
+A node set to mine waits until it has a peer it reached itself, until the
+chain has stopped arriving, and, while a peer it reached says its chain is
+more than two blocks heavier than this node's, until it holds that chain,
+before it builds a block, and says so in the journal. The last wait lasts two
+block times at most (two minutes on testnet-8), in total over the life of the
+process, so a peer that claims a chain it never hands over costs that much
+mining and no more. A block mined with nobody to hand it to, or on a tip the
+network has left, starts a chain of that machine's own, and past the depth a
+node will undo, that machine could never follow the network again.
 
 On a test network at least one machine has to keep mining, or the chain
 stands still and nobody can try anything. On a real network this would be a
