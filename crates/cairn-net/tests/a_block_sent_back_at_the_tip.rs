@@ -149,13 +149,17 @@ fn a_block_of_the_branch_followed_does_not_push_the_next_round_above_the_tip() {
     );
     let heights = asked_for(&out);
     assert_eq!(
-        heights.as_ref().and_then(|heights| heights.first().copied()),
+        heights
+            .as_ref()
+            .and_then(|heights| heights.first().copied()),
         Some(FORK),
         "the round was asked from {:?} rather than from {FORK}, where the \
          branches part. The peer had sent one block of this node's own branch, \
          at its tip, and PeerState::aside took it: past_what_arrived then \
          started the round one past the tip, which is the T8-7 F1 shape #300 \
          closed, reached through the cursor instead of through first_wanted",
-        heights.as_ref().and_then(|heights| heights.first().copied())
+        heights
+            .as_ref()
+            .and_then(|heights| heights.first().copied())
     );
 }

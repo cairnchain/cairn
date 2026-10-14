@@ -407,6 +407,9 @@ pub struct Chooser {
     /// a rotation or two, so the branch carrying the most work is taken
     /// within that.
     first_short_at: Option<u64>,
+    /// The highest a block delivered by the peer asked has taken the branch
+    /// this node follows in this turn: see [`Self::delivered`].
+    reached: Option<u64>,
     /// The height from which a claim is long enough to be final: the depth
     /// a node on this network undoes, past which a node that followed the
     /// claim from nothing can never back out of it.
@@ -434,6 +437,7 @@ impl Default for Chooser {
             done: false,
             chains_held_off: HashMap::new(),
             first_short_at: None,
+            reached: None,
             final_from: JOIN_RATHER_THAN_READ,
         }
     }
@@ -586,9 +590,19 @@ impl Chooser {
     /// of the choice. A block held beside the branch does neither, and renewed
     /// by those a peer the choice asked could keep it asked for ever, a block
     /// of the lowest difficulty there is a window.
-    pub fn delivered(&mut self, peer: u64, now: u64) {
+    ///
+    /// And only one that takes the branch to `height`, higher than any block
+    /// of this turn took it. A peer whose branch is held off at the depth
+    /// cannot take it higher, but it could still move it, onto a branch of
+    /// its own beside it at the same height carrying a little more work, and
+    /// near the lowest difficulty there is each of those costs a handful of
+    /// hashes: renewed by them, one connection kept a newcomer choosing for as
+    /// long as it cared to. Counted by height, a turn is renewed at most once
+    /// for each block up to the depth a node undoes.
+    pub fn delivered(&mut self, peer: u64, height: u64, now: u64) {
         if let Some((asked, _, at)) = self.asked.as_mut() {
-            if *asked == peer {
+            if *asked == peer && self.reached.is_none_or(|top| height > top) {
+                self.reached = Some(height);
                 *at = now;
             }
         }
@@ -1010,6 +1024,7 @@ impl Chooser {
         }
         self.turned = true;
         self.asked = Some((peer, approach, now));
+        self.reached = None;
         Step::Ask(peer, approach)
     }
 
@@ -2361,7 +2376,7 @@ mod tests {
             Step::Ask(1, Approach::Read)
         );
         let delivered = 200 + FIRST_ANSWER_PATIENCE - 1;
-        chooser.delivered(1, delivered);
+        chooser.delivered(1, 1, delivered);
         assert_eq!(
             chooser.step(
                 200 + FIRST_ANSWER_PATIENCE,
@@ -2373,7 +2388,7 @@ mod tests {
             Step::Quiet,
             "a read that delivered a block was given up on a window after it was asked"
         );
-        chooser.delivered(2, delivered + FIRST_ANSWER_PATIENCE - 1);
+        chooser.delivered(2, 1, delivered + FIRST_ANSWER_PATIENCE - 1);
         assert_eq!(
             chooser.step(
                 delivered + FIRST_ANSWER_PATIENCE,
@@ -2694,6 +2709,134 @@ mod tests {
             chooser.step(210, false, 500, JoinProgress::NothingYet, &[1, 2]),
             Step::Quiet,
             "a peer claiming no more than the chain carries was nudged"
+        );
+    }
+
+    /// A chain held off does not take back what a weighing raised a claim to.
+    ///
+    /// A weighing writes the work it proved into the claim and nothing into
+    /// the connection's figures, so the figures a chain held off afterwards
+    /// carries are the greeting's. Put in place of the claim, they named the
+    /// peer with less work than it had shown, or not at all.
+    #[test]
+    fn a_chain_held_off_does_not_lower_a_claim_a_weighing_raised() {
+        let mut chooser = contested();
+        chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]);
+        chooser.shown(2, 800, 201);
+        chooser.held_off_a_chain(2, LONG, 500);
+        assert_eq!(
+            chooser.step(210, false, 600, JoinProgress::NothingYet, &[1, 2]),
+            Step::Nudge(vec![
+                Claimed {
+                    peer: 1,
+                    height: LONG,
+                    work: 900
+                },
+                Claimed {
+                    peer: 2,
+                    height: LONG,
+                    work: 800
+                }
+            ]),
+            "peer 2 showed 800 and greeted with 500, and the chain taken carries 600"
+        );
+    }
+
+    /// The block that would end the choice is weighed against every other
+    /// claim worth a turn, and not against the asked peer's own.
+    ///
+    /// Its own claim is of its tip, which a branch taken one block past the
+    /// depth never reaches; the claims beside it are what a lighter branch
+    /// must not be taken over. One that failed is not, nor one the choice has
+    /// stopped chasing, and once the choice is made nothing is.
+    #[test]
+    fn a_branch_must_carry_what_every_other_claim_worth_a_turn_states() {
+        let mut chooser = contested();
+        chooser.noted(3, Some(host(3)), 2_000, LONG, false, 100);
+        assert_eq!(
+            chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2, 3]),
+            Step::Ask(3, Approach::Read)
+        );
+        assert_eq!(chooser.must_carry(3, 200), 900, "the heaviest other claim");
+        assert_eq!(chooser.must_carry(1, 200), 2_000, "peer 3's own claim");
+        chooser.failed(1, 201);
+        assert_eq!(
+            chooser.must_carry(3, 201),
+            500,
+            "a claim that failed still held a branch off"
+        );
+        chooser.step(202, false, 600, JoinProgress::NothingYet, &[1, 2, 3]);
+        assert_eq!(chooser.must_carry(3, 202), 0, "the choice is made");
+    }
+
+    /// Once a branch has fallen short, a claim heard afterwards holds no
+    /// branch off, so the claims that can are a set that only shrinks.
+    ///
+    /// Without it, a stranger connecting again with a fresh claim of more work
+    /// than anybody holds before each turn held off every branch, and the
+    /// choice never ended.
+    #[test]
+    fn a_claim_heard_after_a_branch_fell_short_holds_no_branch_off() {
+        let mut chooser = contested();
+        assert_eq!(
+            chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join)
+        );
+        assert_eq!(
+            chooser.must_carry(1, 205),
+            500,
+            "fixture: the claim standing beside it"
+        );
+        chooser.noted(3, Some(host(3)), u128::MAX, LONG, false, 205);
+        assert_eq!(
+            chooser.must_carry(1, 205),
+            u128::MAX,
+            "before any branch fell short, every claim standing holds one off"
+        );
+        chooser.fell_short(1, Some(host(1)), LONG, 400, true, 206);
+        assert!(!chooser.has_chosen(1), "the turn is over");
+        chooser.noted(4, Some(host(4)), u128::MAX, LONG, false, 207);
+        assert_eq!(
+            chooser.must_carry(2, 207),
+            u128::MAX,
+            "peer 3 was heard before the branch fell short, and still stands"
+        );
+        chooser.failed(3, 208);
+        assert_eq!(
+            chooser.must_carry(2, 208),
+            400,
+            "peer 4, heard after the branch fell short, held a branch off; peer 1 is ranked \
+             by what it sent"
+        );
+    }
+
+    /// A read is renewed only by a block that takes the branch higher than the
+    /// turn had taken it.
+    ///
+    /// Held off at the depth, a peer can still move the branch, onto one of
+    /// its own beside it at the same height and a little heavier, for a
+    /// handful of hashes near the lowest difficulty there is. Renewed by
+    /// those, it kept the choice on itself for as long as it cared to.
+    #[test]
+    fn a_read_is_renewed_only_by_a_block_that_takes_the_branch_higher() {
+        let mut chooser = contested();
+        chooser.noted(3, Some(host(3)), 2_000, LONG, false, 100);
+        assert_eq!(
+            chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2, 3]),
+            Step::Ask(3, Approach::Read)
+        );
+        chooser.delivered(3, 8, 210);
+        chooser.delivered(3, 8, 200 + FIRST_ANSWER_PATIENCE + 5);
+        assert_eq!(
+            chooser.step(
+                210 + FIRST_ANSWER_PATIENCE,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2, 3]
+            ),
+            Step::Ask(1, Approach::Join),
+            "a block moving the branch at a height the turn had reached renewed it"
         );
     }
 }

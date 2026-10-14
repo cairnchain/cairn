@@ -10929,10 +10929,7 @@ fn read_loop(
         let asked = outbound.take_the_question_asked_from_outside();
         (peer.chosen, peer.must_carry) = {
             let choosing = shared.choosing();
-            (
-                choosing.has_chosen(id),
-                choosing.must_carry(id, last_heard),
-            )
+            (choosing.has_chosen(id), choosing.must_carry(id, last_heard))
         };
         let (mut reaction, passing, blamed) = decide(shared, id, &mut peer, message, asked);
         // What the choice is told about this peer's blocks: one of the asked
@@ -10941,7 +10938,8 @@ fn read_loop(
         // would have ended the choice on less than another claim states is
         // what it sent too, and the end of its turn.
         if reaction.applied.is_some() {
-            shared.choosing().delivered(id, last_heard);
+            let height = shared.chain().height().unwrap_or(0);
+            shared.choosing().delivered(id, height, last_heard);
         }
         if let Some((height, work)) = reaction.outgrew {
             shared.choosing().outgrew(

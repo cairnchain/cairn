@@ -2937,6 +2937,21 @@ of every other chain. The first block a node takes no longer ends its choice:
 only a ledger handed over, or a block past the depth it undoes from the peer
 the choice settled on, does.
 
+**Nor MAY it take that block from the peer its choice settled on when the
+branch the block ends on carries less work than another claim still standing
+in front of the choice states.** The choice settles first on the heaviest
+claim, which is the peer's word, and a peer that keeps no headers is read
+rather than weighed, so without this a peer claiming more than the honest
+chain beside it ended the choice on a branch from the first block mined at the
+lowest difficulty there is. The work the block's header states is the
+branch's once the block is judged, and the block is judged before it is taken.
+A peer whose block is not taken is ranked from then on by what it sent, the
+block's height and the work of the block beneath it, its turn ends, and the
+next turn goes to the heaviest claim left. Only claims heard by the first time
+a block was not taken this way can hold one off afterwards, so the claims that
+can do so only grow fewer. A turn of a read is renewed by a block only when the
+block takes the branch higher than the turn had taken it.
+
 Turns in the choice go round the connections: each claim standing when a round
 begins is asked once in it, heaviest first, and a claim heard during a round
 waits for the next, so a claim is asked within two rounds of a full peer table

@@ -182,7 +182,11 @@ fn the_heaviest_unchecked_claim_read_first_is_held_to_the_claims_beside_it() {
     chooser.noted(2, Some(host(2)), u128::MAX, UNDO + 50, false, 100);
 
     let step = chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]);
-    assert_eq!(step, Step::Ask(2, Approach::Read), "fixture: the first turn");
+    assert_eq!(
+        step,
+        Step::Ask(2, Approach::Read),
+        "fixture: the first turn"
+    );
     assert!(chooser.has_chosen(2), "fixture: the choice fell on peer 2");
     assert_eq!(
         chooser.must_carry(2, 200),
