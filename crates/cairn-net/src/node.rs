@@ -29,7 +29,7 @@ use cairn_ledger::block::{Block, BlockHeader, BLOCK_VERSION};
 use cairn_ledger::genesis;
 use cairn_ledger::handover::{accept, Handover, HandoverError};
 use cairn_ledger::note::{Address, NetworkId};
-use cairn_ledger::pow::RECENT_HEADERS;
+use cairn_ledger::pow::{work_of, RECENT_HEADERS};
 use cairn_ledger::sampling::{check_start, open_start, SampledStart, StartError, Weighed, SAMPLES};
 use cairn_ledger::state::header_leaf;
 use cairn_ledger::transaction::Transfer;
@@ -59,7 +59,16 @@ use crate::sync::{
 };
 use crate::wire::{most_from, read_frame, write_message, Framed, WireError};
 
-/// Connections a node dials for itself.
+/// Peers a node chooses for itself: the connections it dials, counted as the
+/// peers it chose and reached rather than as the sockets it opened.
+///
+/// The half a tie keeps in place of one of this node's dials fills one of
+/// these: it is the peer this node went out and found, and a stranger cannot
+/// stand in for it, since the dial is carried over only to a half that drew
+/// the same number at start. Counted as sockets opened, a node restarted
+/// while its peers still held connections to it lost every tie, held eight
+/// peers it had reached, counted none, and went out for eight more. A dial
+/// not yet answered fills one too, until it is: see `Peer::chosen`.
 pub const TARGET_PEERS: usize = 8;
 
 /// Connections a node holds at once, dialled and accepted together.
@@ -1605,8 +1614,8 @@ impl Peer {
     }
 
     /// Whether this node went out and reached this peer itself: dialled it,
-    /// was answered with an introduction, and is not about to let it go as a
-    /// feeler.
+    /// was answered with an introduction, is not about to let it go as a
+    /// feeler, and has not already let it go to make room for a visitor.
     ///
     /// Read off the address dialled and not off [`Peer::dialled`], which is
     /// about this connection: the half a tie keeps in place of this node's
@@ -1615,8 +1624,28 @@ impl Peer {
     /// peers still held connections to it dialled each of them, lost each
     /// tie, and waited for a peer for twenty five minutes. See
     /// [`Shared::carry_the_dial`].
+    ///
+    /// Not one marked as leaving: the miner's wait, the claims it reads and
+    /// the anchors written down all ask this, and a connection already let go
+    /// of answered for the first two and not for the third while its threads
+    /// wound down.
     const fn reached(&self) -> bool {
-        self.dialled_to.is_some() && self.greeted && !self.feeler
+        self.dialled_to.is_some() && self.greeted && !self.feeler && !self.leaving
+    }
+
+    /// Whether this connection is one this node chose for itself: one it
+    /// dialled, or the half a tie kept in place of a dial of its own to the
+    /// same peer, which [`Self::reached`] counts and [`Peer::dialled`] does
+    /// not.
+    ///
+    /// What [`TARGET_PEERS`] counts, with the feelers left out, and what is
+    /// never let go of to make room for a visitor. Both read `dialled` alone,
+    /// so a node whose dials had all lost their ties held eight peers it had
+    /// reached, counted none, and went out for eight more, and the one
+    /// connection left to a peer it had found could be let go of for a
+    /// stranger.
+    const fn chosen(&self) -> bool {
+        self.dialled || self.reached()
     }
 
     /// Ends this connection from outside its own loop.
@@ -1655,14 +1684,19 @@ impl Peer {
     ///
     /// It is the far end's dial, and the far end works the same tie out, and
     /// counts the half kept in its place as a peer it reached, only from this
-    /// node's introduction on it. The connection's own loop queues that
-    /// introduction as it writes itself down, which is before the other half
-    /// can find it, but not always before the writer has sent it. Let go of
-    /// as [`Self::let_go`] does, the introduction went to a socket already
-    /// shut and the far end's dial ended on nothing: two nodes that dialled
-    /// each other at the same moment met that eight times in fourteen hundred
-    /// on a laptop, and on the Windows runner, and the one whose dial lost
-    /// counted no peer it had reached.
+    /// node's introduction on it. The connection's own loop writes itself
+    /// down and queues that introduction a few lines later, so the other half
+    /// can find it, and mark it, in between. What makes that safe is that
+    /// nothing in that stretch looks at the mark: the loop queues the
+    /// introduction before its next read, which is where it first does. An
+    /// early way out added there would end the half with nothing queued, and
+    /// two nodes that dialled each other at once would be back to one of
+    /// them counting no peer it had reached. Queued is not sent, though: let
+    /// go of as [`Self::let_go`] does, the introduction went to a socket
+    /// already shut and the far end's dial ended on nothing: two nodes that
+    /// dialled each other at the same moment met that eight times in
+    /// fourteen hundred on a laptop, and on the Windows runner, and the one
+    /// whose dial lost counted no peer it had reached.
     ///
     /// Marked and not shut. The loop leaves at its next read, which is the
     /// far end ending its dial once the introduction has reached it, or
@@ -2621,12 +2655,12 @@ fn room_in(peers: &HashMap<PeerId, Peer>, host: Option<IpAddr>, visiting: bool) 
 /// What the table holds as a visitor sees it: the connections holding a
 /// place, and the places still kept back for this node's own dials.
 fn held_against_visitors(peers: &HashMap<PeerId, Peer>) -> usize {
-    let dialled = peers.values().filter(|peer| peer.dialled).count();
+    let chosen = peers.values().filter(|peer| peer.chosen()).count();
     peers
         .values()
         .filter(|peer| !peer.leaving && !peer.waiting)
         .count()
-        .saturating_add(TARGET_PEERS.saturating_sub(dialled))
+        .saturating_add(TARGET_PEERS.saturating_sub(chosen))
 }
 
 /// Whether one more connection somebody else opened is welcome.
@@ -2709,7 +2743,7 @@ fn make_room_in(peers: &mut HashMap<PeerId, Peer>, visitor: IpAddr, salt: u64) -
     }
     let inbound: Vec<Standing> = peers
         .iter()
-        .filter(|(_, peer)| !peer.dialled && !peer.waiting)
+        .filter(|(_, peer)| !peer.chosen() && !peer.waiting)
         .map(|(id, peer)| Standing {
             id: *id,
             host: peer.host,
@@ -3601,7 +3635,7 @@ impl Shared {
     fn went_out_to(&self) -> Vec<SocketAddr> {
         self.peers()
             .values()
-            .filter(|peer| peer.reached() && !peer.leaving)
+            .filter(|peer| peer.reached())
             .filter_map(|peer| peer.dialled_to)
             .collect()
     }
@@ -5421,7 +5455,7 @@ impl Node {
                 because: "this node already holds as many connections as it takes",
             });
         }
-        if !attach_peer(&self.shared, stream, Some(address)) {
+        if attach_peer(&self.shared, stream, Some(address)).is_none() {
             return Err(NodeError::NotKept {
                 address,
                 because: "this node filled its table while it dialled, is stopping, or \
@@ -6101,20 +6135,24 @@ impl Node {
 
     /// Whether a peer this node reached itself said, when it introduced
     /// itself, that its chain has work this node's fork choice would take
-    /// over the branch it follows: [`Self::claim_ahead`] among
-    /// [`Self::peers_reached`].
+    /// over the branch it follows, and would still take with `by_blocks`
+    /// blocks' work at the difficulty of this node's tip taken off it:
+    /// [`Self::claim_ahead`] among [`Self::peers_reached`], past a margin.
     ///
-    /// For a miner that has just started, deciding whether to take a chain
-    /// before it builds on its own tip. Only peers this node reached, because
-    /// a claim is written by whoever makes it, and a stranger that dials in
-    /// and claims a lot must not be able to stop a miner.
+    /// For a miner, deciding whether to take a chain before it builds on its
+    /// own tip. Only peers this node reached, because a claim is written by
+    /// whoever makes it, and a stranger that dials in and claims a lot must
+    /// not be able to stop a miner. Past a margin, because a peer reached a
+    /// moment after it found a block, or one on the other side of a race for
+    /// the next, honestly claims a block more than this node holds, and that
+    /// is the network working rather than this node being behind it.
     ///
     /// A peer reached whose claim is not written down yet counts as claiming
     /// more. The introduction that makes it reached is the one that carries
     /// the claim, and the two are written a moment apart: read in between,
     /// the peer is reached and has said nothing, and a miner looking then
     /// would build on the tip it is about to leave.
-    pub fn a_peer_reached_claims_more(&self) -> bool {
+    pub fn a_peer_reached_claims_more(&self, by_blocks: u64) -> bool {
         let claims: Vec<Option<(u64, u128)>> = self
             .shared
             .peers()
@@ -6123,9 +6161,17 @@ impl Node {
             .map(|peer| peer.claims)
             .collect();
         self.with_chain(|chain| {
-            claims
-                .into_iter()
-                .any(|claim| claim.is_none_or(|(height, work)| chain.outweighed_by(height, work)))
+            let margin = chain
+                .state()
+                .recent_headers()
+                .last()
+                .map_or(0, |tip| work_of(tip.difficulty))
+                .saturating_mul(u128::from(by_blocks));
+            claims.into_iter().any(|claim| {
+                claim.is_none_or(|(height, work)| {
+                    chain.outweighed_by(height, work.saturating_sub(margin))
+                })
+            })
         })
     }
 
@@ -10003,9 +10049,10 @@ where
             .flat_map(|peer| [peer.advertised, peer.dialled_to])
             .flatten()
             .collect();
-        // Only the ones this node went out and opened. A connection somebody
+        // Only the ones this node went out and found. A connection somebody
         // else opened does not tell this node anything about the network: the
-        // stranger chose it. Counting those was enough to stop a node dialling
+        // stranger chose it. The half a tie kept in place of a dial is the one
+        // exception, being the peer that dial found. Counting those was enough to stop a node dialling
         // at all: hold eight connections open and it never looks for anybody
         // again, and then sees the world through whoever is holding them.
         // The neighbourhoods this node already went out to.
@@ -10024,7 +10071,7 @@ where
             connected,
             peers
                 .values()
-                .filter(|peer| peer.dialled && !peer.feeler)
+                .filter(|peer| peer.chosen() && !peer.feeler)
                 .count(),
             held,
             felt,
@@ -10216,12 +10263,10 @@ fn feel(shared: &Arc<Shared>, connected: &HashSet<SocketAddr>, now: u64) {
     }
     match TcpStream::connect_timeout(&address, DIAL_TIMEOUT) {
         Ok(stream) => {
-            if attach_peer(shared, stream, Some(address)) {
-                if let Some(peer) = shared
-                    .peers()
-                    .values_mut()
-                    .find(|peer| peer.dialled_to == Some(address))
-                {
+            // By the entry the dial made, and not by the address it went to,
+            // which the half a tie keeps in place of a dial carries as well.
+            if let Some(id) = attach_peer(shared, stream, Some(address)) {
+                if let Some(peer) = shared.peers().get_mut(&id) {
                     peer.feeler = true;
                 }
             }
@@ -10382,19 +10427,24 @@ fn start_writing(
 /// only by the caller before: a dial for [`room_in`], a visitor for
 /// [`admit_a_visitor`].
 ///
-/// False means the connection was let go of and this node holds no peer for
-/// it. Nobody read that before, because there was nothing to read: the ways
-/// out below all looked like the way through, and [`Node::connect`] reported
-/// every one of them to the operator as a peer reached.
+/// Gives back the entry it made in the table. `None` means the connection was
+/// let go of and this node holds no peer for it. Nobody read that before,
+/// because there was nothing to read: the ways out below all looked like the
+/// way through, and [`Node::connect`] reported every one of them to the
+/// operator as a peer reached.
 #[allow(clippy::too_many_lines)]
-fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAddr>) -> bool {
+fn attach_peer(
+    shared: &Arc<Shared>,
+    stream: TcpStream,
+    dialled: Option<SocketAddr>,
+) -> Option<PeerId> {
     let initiator = dialled.is_some();
     // Nothing is attached to a node that has stopped. Checked here and again
     // under the thread table below, because between the two a shutdown can
     // take that table and this thread would then never be joined.
     if !shared.running.load(Ordering::SeqCst) {
         let _ = stream.shutdown(Shutdown::Both);
-        return false;
+        return None;
     }
     // Counted here as well as in `accept_loop`. A machine out of descriptors
     // runs out at whichever call asks next, and that is the accept on one run
@@ -10413,7 +10463,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     };
     let (Some(writing_end), Some(shutdown_end), Some(closing_end)) = (clone(), clone(), clone())
     else {
-        return false;
+        return None;
     };
     // Without the IPv6 hat, as in the accept loop: this is where the address
     // a peer is written down at comes from.
@@ -10491,7 +10541,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
     };
     let Some(place) = place else {
         let _ = closing_end.shutdown(Shutdown::Both);
-        return false;
+        return None;
     };
 
     let network = shared.network();
@@ -10505,7 +10555,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         shared.peers().remove(&id);
         shared.could_not_take_a_visitor("this machine would not start a thread to write to it");
         let _ = closing_end.shutdown(Shutdown::Both);
-        return false;
+        return None;
     };
 
     // Held where both this thread and the reader can reach it. The reader
@@ -10557,7 +10607,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         if let Some(writer) = writer.lock().unwrap_or_else(PoisonError::into_inner).take() {
             let _ = writer.join();
         }
-        return false;
+        return None;
     };
     // Under the thread table, so a connection taken while a shutdown is
     // emptying it is not left with a thread nobody joins. A shutdown that got
@@ -10569,7 +10619,7 @@ fn attach_peer(shared: &Arc<Shared>, stream: TcpStream, dialled: Option<SocketAd
         let _ = closing_end.shutdown(Shutdown::Both);
     }
     threads.push(handle);
-    true
+    Some(id)
 }
 
 /// Writes down the three blocks a node refuses without blaming anybody, and
@@ -13914,6 +13964,51 @@ mod peers_and_loops {
         );
     }
 
+    /// **A node whose dials all lost their ties to its peers' own
+    /// connections does not go out for as many more.**
+    ///
+    /// The eight a node goes out for are peers it chose and reached, and the
+    /// half a tie keeps in place of a dial is one. The round counted the
+    /// connections it had opened, so a node restarted while its peers still
+    /// held connections to it, which loses every tie, held eight peers it had
+    /// reached, counted none, and dialled eight more.
+    #[test]
+    fn a_node_whose_dials_lost_their_ties_does_not_go_out_for_more() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        {
+            let mut peers = node.shared.peers();
+            for id in 0..TARGET_PEERS {
+                let port = 19_000 + u16::try_from(id).unwrap();
+                peers.insert(
+                    u64::try_from(id).unwrap(),
+                    Peer {
+                        dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+                        greeted: true,
+                        ..stand_in(&socket, false)
+                    },
+                );
+            }
+        }
+        let door = a_door();
+        node.shared.book().insert(door.local_addr().unwrap());
+        // No feeler this round: what is counted is the dials the round makes.
+        node.shared.felt_at.store(1_000, Ordering::Relaxed);
+        node.shared.running.store(true, Ordering::SeqCst);
+        let dials = AtomicUsize::new(0);
+        dial_from_book_with(&node.shared, 1_000, &|address: &SocketAddr| {
+            dials.fetch_add(1, Ordering::SeqCst);
+            TcpStream::connect_timeout(address, DIAL_TIMEOUT)
+        });
+        stop_all(&node);
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            0,
+            "a node holding as many peers it reached as it goes out for, each kept in place \
+             of a dial that lost its tie, went out for more"
+        );
+    }
+
     /// A round dials what the node is short of and no more.
     ///
     /// Nothing held the count: a round that went on dialling past what it
@@ -14493,6 +14588,105 @@ mod peers_and_loops {
                 }
             }
         }
+    }
+
+    /// **Of two dials of this node's to one peer, at two addresses, the one
+    /// the tie keeps stays at the address it dialled.**
+    ///
+    /// The tie hands the address dialled to the half it keeps only when that
+    /// half has none, which is the half the peer opened. Here both halves are
+    /// dials, so the kept one has its own: handed the other's, it would
+    /// write down as an anchor the address just hung up on, and the round
+    /// would dial the live address again, for ever. Whichever half the tie
+    /// keeps.
+    #[test]
+    fn a_dial_the_tie_keeps_keeps_the_address_it_dialled() {
+        let listens = SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944));
+        let at = [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 19_944)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 29_944)),
+        ];
+        // Drawing nought, the peer keeps whichever connection it opened, so
+        // both dials of this node's lose and the second ends itself; drawing
+        // the most, it keeps this node's, so neither loses and the second
+        // ends the first.
+        for (theirs, kept) in [(0, 0), (u64::MAX, 1)] {
+            let node = quiet();
+            let (socket, _far) = a_socket();
+            for (id, address) in [(1, at[0]), (2, at[1])] {
+                node.shared.peers().insert(
+                    id,
+                    Peer {
+                        dialled_to: Some(address),
+                        greeted: true,
+                        ..stand_in(&socket, true)
+                    },
+                );
+            }
+            let mut introduced = PeerState::new(Some(listens.ip()));
+            introduced.greeted = true;
+            introduced.advertised = Some(listens);
+            introduced.nonce = theirs;
+            assert_eq!(
+                what_it_said_it_was(&node.shared, 1, &introduced, Some(at[0]), 1_000),
+                Ending::Keep,
+                "fixture: the first dial was ended on its own"
+            );
+            let second = what_it_said_it_was(&node.shared, 2, &introduced, Some(at[1]), 1_000);
+            let ended = 2 - kept;
+            assert_eq!(
+                second == Ending::HangUp,
+                ended == 2,
+                "fixture: the tie did not end the dial expected"
+            );
+            node.shared.peers().remove(&ended);
+            let anchors = node.shared.went_out_to();
+            stop_all(&node);
+            assert_eq!(
+                anchors,
+                vec![at[usize::try_from(kept).unwrap()]],
+                "the dial the tie kept was written down at the address of the one it ended"
+            );
+        }
+    }
+
+    /// **A connection let go of to make room for a visitor is no peer this
+    /// node reached, for the miner or for the anchors.**
+    ///
+    /// The anchors asked this, and the miner's wait for a peer and its wait
+    /// for a peer's chain did not, so a connection already let go of went on
+    /// answering for both while its threads wound down.
+    #[test]
+    fn a_peer_let_go_of_is_no_longer_reached() {
+        let node = quiet();
+        let (socket, _far) = a_socket();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944));
+        node.shared.peers().insert(
+            1,
+            Peer {
+                dialled_to: Some(address),
+                greeted: true,
+                ..stand_in(&socket, false)
+            },
+        );
+        assert_eq!(node.peers_reached(), 1, "fixture: the peer is reached");
+        assert!(
+            node.a_peer_reached_claims_more(0),
+            "fixture: a peer reached whose claim is on its way holds a miner"
+        );
+        node.shared.peers().get_mut(&1).unwrap().leaving = true;
+        let (reached, claims_more, anchors) = (
+            node.peers_reached(),
+            node.a_peer_reached_claims_more(0),
+            node.shared.went_out_to(),
+        );
+        stop_all(&node);
+        assert_eq!(
+            reached, 0,
+            "a connection let go of for a visitor counted as a peer this node reached"
+        );
+        assert!(!claims_more, "and a miner was held by a claim made on it");
+        assert!(anchors.is_empty(), "and it was written down as an anchor");
     }
 
     /// A round does not dial again an address whose dial lost the tie to a
@@ -15396,7 +15590,10 @@ mod peers_and_loops {
             drop(chain);
             attaching
         };
-        assert!(attaching.join().unwrap(), "the connection was not kept");
+        assert!(
+            attaching.join().unwrap().is_some(),
+            "the connection was not kept"
+        );
         far.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let first = read_message(
             &mut far,
@@ -16434,6 +16631,75 @@ mod peers_and_loops {
         }
     }
 
+    /// The half a tie kept in place of this node's dial is never let go of
+    /// to make room for a visitor, and nor is a dial of its own not yet
+    /// answered.
+    ///
+    /// The first is the peer that dial reached, the one connection left to
+    /// say so, and the room made for a visitor is taken from connections
+    /// somebody else chose. The pool read `dialled`, which is about the
+    /// socket, and the kept half is the peer's own. The second has not been
+    /// reached yet, and a pool that read `reached()` alone would offer it.
+    /// Each in turn is the youngest of the crowd, the one a visitor would be
+    /// given.
+    #[test]
+    fn the_half_a_tie_kept_for_a_dial_is_not_let_go_of_for_a_visitor() {
+        let crowd = |at: usize| IpAddr::from([203, 0, u8::try_from(at).unwrap(), 1]);
+        for unanswered in [false, true] {
+            let node = quiet();
+            let (socket, _far) = a_socket();
+            let youngest: PeerId = 1_000_000;
+            {
+                let mut peers = node.shared.peers();
+                for at in 0..MOST_FROM_OUTSIDE {
+                    peers.insert(u64::try_from(at).unwrap(), from_outside(&socket, crowd(at)));
+                }
+                for at in 1..TARGET_PEERS {
+                    peers.insert(1_000 + u64::try_from(at).unwrap(), stand_in(&socket, true));
+                }
+                // The half a tie kept, or a dial of this node's not yet
+                // answered.
+                let chosen = if unanswered {
+                    Peer {
+                        host: Some(crowd(201)),
+                        dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 19_944))),
+                        ..stand_in(&socket, true)
+                    }
+                } else {
+                    Peer {
+                        dialled_to: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9_944))),
+                        greeted: true,
+                        ..from_outside(&socket, crowd(200))
+                    }
+                };
+                peers.insert(youngest, chosen);
+            }
+            let visitor = IpAddr::from([192, 0, 2, 1]);
+            assert!(
+                node.shared.make_room_for(visitor),
+                "fixture: a full table made no room"
+            );
+            let let_go: Vec<PeerId> = node
+                .shared
+                .peers()
+                .iter()
+                .filter(|(_, peer)| peer.leaving)
+                .map(|(id, _)| *id)
+                .collect();
+            stop_all(&node);
+            assert_eq!(let_go.len(), 1, "fixture: room was made by other than one");
+            assert!(
+                !let_go.contains(&youngest),
+                "{} was let go of for a visitor",
+                if unanswered {
+                    "a dial of this node's not yet answered"
+                } else {
+                    "the half a tie kept in place of this node's dial"
+                }
+            );
+        }
+    }
+
     /// A full node lets go of exactly one connection to make room for a
     /// visitor, and of nobody while that one is still leaving, and a
     /// connection on its way out holds no slot.
@@ -17343,16 +17609,8 @@ mod peers_and_loops {
         assert_eq!(past_the_ceiling, 0, "a feeler dialled out of a full table");
     }
 
-    /// **A wallet's node is behind a peer only when it would take the chain
-    /// that peer claims.**
-    ///
-    /// A chain at difficulty sixteen, so two tips of its height are a tie
-    /// within eight units. A peer claiming eight more at that height, and one
-    /// claiming less a block lower, are nothing it would take; a peer
-    /// claiming one unit more a block higher is the claim ahead, though the
-    /// tie claims more work.
-    #[test]
-    fn a_claim_is_ahead_only_when_the_fork_choice_would_take_it() {
+    /// A stopped node holding four blocks at difficulty sixteen.
+    fn four_blocks_at_sixteen() -> Node {
         let params = ConsensusParams {
             genesis_difficulty: 16,
             ..ConsensusParams::testnet()
@@ -17382,6 +17640,20 @@ mod peers_and_loops {
                 .unwrap();
             node.submit_block(block).unwrap();
         }
+        node
+    }
+
+    /// **A wallet's node is behind a peer only when it would take the chain
+    /// that peer claims.**
+    ///
+    /// A chain at difficulty sixteen, so two tips of its height are a tie
+    /// within eight units. A peer claiming eight more at that height, and one
+    /// claiming less a block lower, are nothing it would take; a peer
+    /// claiming one unit more a block higher is the claim ahead, though the
+    /// tie claims more work.
+    #[test]
+    fn a_claim_is_ahead_only_when_the_fork_choice_would_take_it() {
+        let node = four_blocks_at_sixteen();
         let (height, work) = (node.height().unwrap(), node.total_work());
         assert_eq!(
             node.with_chain(|chain| chain.state().recent_headers().last().unwrap().difficulty),
@@ -17416,17 +17688,20 @@ mod peers_and_loops {
         stop_all(&node);
     }
 
-    /// **What holds a miner that has just started is the claim of a peer
-    /// this node reached, and never a stranger's.**
+    /// **What holds a miner is the claim of a peer this node reached, past
+    /// the margin it is asked about, and never a stranger's.**
     ///
     /// A stranger that dialled in and claims a heavier chain is not read, a
-    /// peer reached that claims nothing more is no reason to wait, and one
-    /// that claims more, or whose claim is still on its way, is.
+    /// peer reached that claims nothing more, or no more than the margin, is
+    /// no reason to wait, and one that claims more, or whose claim is still
+    /// on its way, is.
     #[test]
     fn only_a_peer_reached_holds_a_miner_with_its_claim() {
-        let node = quiet();
+        let node = four_blocks_at_sixteen();
         let (near, _far) = a_socket();
-        let ahead = (5, 100);
+        let (height, work) = (node.height().unwrap(), node.total_work());
+        let block = work_of(16);
+        let ahead = (height + 5, work + 100 * block);
         let reached = |claims: Option<(u64, u128)>| Peer {
             dialled_to: Some(near.peer_addr().unwrap()),
             greeted: true,
@@ -17443,16 +17718,40 @@ mod peers_and_loops {
         );
         node.shared.peers().insert(2, reached(Some((0, 0))));
         assert!(
-            !node.a_peer_reached_claims_more(),
+            !node.a_peer_reached_claims_more(0),
             "a stranger that dialled in and claimed a heavier chain held a miner"
+        );
+        node.shared
+            .peers()
+            .insert(3, reached(Some((height + 2, work + 2 * block))));
+        assert!(
+            node.a_peer_reached_claims_more(0),
+            "fixture: two blocks more is more"
+        );
+        assert!(
+            !node.a_peer_reached_claims_more(2),
+            "a peer reached two blocks ahead, which a race leaves honest peers, held a miner \
+             asked to look past two"
+        );
+        node.shared
+            .peers()
+            .insert(3, reached(Some((height + 3, work + 3 * block))));
+        assert!(
+            node.a_peer_reached_claims_more(2),
+            "a peer reached three blocks ahead did not hold a miner that looks past two"
         );
         node.shared.peers().insert(3, reached(None));
         assert!(
-            node.a_peer_reached_claims_more(),
+            node.a_peer_reached_claims_more(2),
             "a peer reached whose claim had not been written down let a miner build"
         );
         node.shared.peers().insert(3, reached(Some(ahead)));
-        assert!(node.a_peer_reached_claims_more());
+        assert!(node.a_peer_reached_claims_more(2));
+        node.shared.peers().get_mut(&3).unwrap().leaving = true;
+        assert!(
+            !node.a_peer_reached_claims_more(2),
+            "a peer already let go of to make room for a visitor held a miner with its claim"
+        );
         stop_all(&node);
     }
 }
