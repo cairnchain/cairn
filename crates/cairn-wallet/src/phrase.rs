@@ -222,13 +222,19 @@ pub fn positions_to_check() -> Result<[usize; 3], String> {
     Ok(chosen)
 }
 
+/// The string SLIP-0010 keys its first HMAC with, for Ed25519.
+///
+/// Published in the standard and the same in every implementation: it names
+/// the curve and is no secret. The secret is the seed it is applied to.
+const CURVE: &[u8] = b"ed25519 seed";
+
 /// SLIP-0010 for Ed25519: the private key at `path`, every level hardened.
 ///
 /// Written here rather than taken from a crate, because it is a dozen lines
 /// over the HMAC this module already uses, and the crates that do it bring
 /// older versions of the same HMAC with them.
 fn derive(seed: &[u8], path: &[u32]) -> Option<Zeroizing<[u8; 32]>> {
-    let mut node = hmac_sha512(b"ed25519 seed", &[seed])?;
+    let mut node = hmac_sha512(CURVE, &[seed])?;
     for index in path {
         let (key, chain) = node.split_first_chunk::<32>()?;
         let hardened = (index | HARDENED).to_be_bytes();
@@ -411,7 +417,7 @@ mod tests {
     /// The node at `path`, key and chain code, by the same steps [`derive`]
     /// takes, so the chain codes the vectors give are held as well.
     fn node_at(seed: &[u8], path: &[u32]) -> [u8; 64] {
-        let mut node = hmac_sha512(b"ed25519 seed", &[seed]).unwrap();
+        let mut node = hmac_sha512(CURVE, &[seed]).unwrap();
         for index in path {
             let (key, chain) = node.split_first_chunk::<32>().unwrap();
             let hardened = (index | HARDENED).to_be_bytes();
