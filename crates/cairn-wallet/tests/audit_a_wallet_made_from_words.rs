@@ -169,6 +169,7 @@ fn new_writes_the_key_only_once_three_words_come_back() {
     let mut seen = String::new();
     let mut words: Option<Vec<String>> = None;
     let mut answered = 0;
+    let mut asked_for = Vec::new();
     let mut byte = [0u8; 1];
     while stdout.read(&mut byte).unwrap() == 1 {
         seen.push(char::from(byte[0]));
@@ -190,11 +191,18 @@ fn new_writes_the_key_only_once_three_words_come_back() {
         // In capitals the first time, as somebody might type it.
         writeln!(stdin, "{}", shown[at - 1].to_uppercase()).unwrap();
         answered += 1;
+        asked_for.push(at);
         seen.push('\n');
     }
     let status = child.wait().unwrap();
     assert!(status.success(), "{seen}");
     assert_eq!(answered, 3, "three words are asked back: {seen}");
+    asked_for.dedup();
+    assert_eq!(
+        asked_for.len(),
+        3,
+        "three different words, or the check proves one word was copied: {seen}"
+    );
     assert!(key.exists(), "and then the key file is written");
     assert!(seen.contains("key written to"), "{seen}");
     let _ = std::fs::remove_dir_all(&home);
