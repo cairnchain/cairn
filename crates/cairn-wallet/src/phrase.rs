@@ -199,11 +199,20 @@ impl Phrase {
 /// Positions to ask a person to type back, three of them, distinct, drawn at
 /// random and in order.
 pub fn positions_to_check() -> Result<[usize; 3], String> {
+    positions_from(|| {
+        cairn_crypto::random_bytes::<16>().map_err(|error| format!("no entropy available: {error}"))
+    })
+}
+
+/// The same, from bytes `draw` hands out sixteen at a time, so a test can say
+/// which bytes are taken and which are passed over.
+fn positions_from(
+    mut draw: impl FnMut() -> Result<[u8; 16], String>,
+) -> Result<[usize; 3], String> {
     let mut chosen = [0usize; 3];
     let mut found = 0usize;
     while found < chosen.len() {
-        let drawn = cairn_crypto::random_bytes::<16>()
-            .map_err(|error| format!("no entropy available: {error}"))?;
+        let drawn = draw()?;
         // Below the largest multiple of twenty four a byte reaches, so that
         // every position is as likely as every other.
         for byte in drawn.into_iter().filter(|byte| *byte < 240) {
@@ -229,6 +238,10 @@ pub fn positions_to_check() -> Result<[usize; 3], String> {
 const CURVE: &[u8] = b"ed25519 seed";
 
 /// SLIP-0010 for Ed25519: the private key at `path`, every level hardened.
+///
+/// An index may come with the hardened bit set, as the standard writes paths,
+/// or without it, as [`path`] does: the bit is set either way, and never
+/// cleared.
 ///
 /// Written here rather than taken from a crate, because it is a dozen lines
 /// over the HMAC this module already uses, and the crates that do it bring
@@ -328,7 +341,13 @@ mod tests {
 
     /// Test vectors 1 and 2 for Ed25519, every chain in them, verbatim from
     /// SLIP-0010, <https://github.com/satoshilabs/slips/blob/master/slip-0010.md>.
-    /// The paths are written without the hardened bit, which every level has.
+    /// The paths are written as the standard writes them, every level with
+    /// the hardened bit set, so a derivation that cleared it would be seen.
+    /// An index as the standard writes it, with the hardened bit set.
+    const fn h(index: u32) -> u32 {
+        index | HARDENED
+    }
+
     const SLIP10_ED25519: [Slip10; 2] = [
         Slip10 {
             seed: "000102030405060708090a0b0c0d0e0f",
@@ -340,31 +359,31 @@ mod tests {
                     "00a4b2856bfec510abab89753fac1ac0e1112364e7d250545963f135f2a33188ed",
                 ),
                 (
-                    &[0],
+                    &[h(0)],
                     "8b59aa11380b624e81507a27fedda59fea6d0b779a778918a2fd3590e16e9c69",
                     "68e0fe46dfb67e368c75379acec591dad19df3cde26e63b93a8e704f1dade7a3",
                     "008c8a13df77a28f3445213a0f432fde644acaa215fc72dcdf300d5efaa85d350c",
                 ),
                 (
-                    &[0, 1],
+                    &[h(0), h(1)],
                     "a320425f77d1b5c2505a6b1b27382b37368ee640e3557c315416801243552f14",
                     "b1d0bad404bf35da785a64ca1ac54b2617211d2777696fbffaf208f746ae84f2",
                     "001932a5270f335bed617d5b935c80aedb1a35bd9fc1e31acafd5372c30f5c1187",
                 ),
                 (
-                    &[0, 1, 2],
+                    &[h(0), h(1), h(2)],
                     "2e69929e00b5ab250f49c3fb1c12f252de4fed2c1db88387094a0f8c4c9ccd6c",
                     "92a5b23c0b8a99e37d07df3fb9966917f5d06e02ddbd909c7e184371463e9fc9",
                     "00ae98736566d30ed0e9d2f4486a64bc95740d89c7db33f52121f8ea8f76ff0fc1",
                 ),
                 (
-                    &[0, 1, 2, 2],
+                    &[h(0), h(1), h(2), h(2)],
                     "8f6d87f93d750e0efccda017d662a1b31a266e4a6f5993b15f5c1f07f74dd5cc",
                     "30d1dc7e5fc04c31219ab25a27ae00b50f6fd66622f6e9c913253d6511d1e662",
                     "008abae2d66361c879b900d204ad2cc4984fa2aa344dd7ddc46007329ac76c429c",
                 ),
                 (
-                    &[0, 1, 2, 2, 1_000_000_000],
+                    &[h(0), h(1), h(2), h(2), h(1_000_000_000)],
                     "68789923a0cac2cd5a29172a475fe9e0fb14cd6adb5ad98a3fa70333e7afa230",
                     "8f94d394a8e8fd6b1bc2f3f49f5c47e385281d5c17e65324b0f62483e37e8793",
                     "003c24da049451555d51a7014a37337aa4e12d41e485abccfa46b47dfb2af54b7a",
@@ -381,31 +400,31 @@ mod tests {
                     "008fe9693f8fa62a4305a140b9764c5ee01e455963744fe18204b4fb948249308a",
                 ),
                 (
-                    &[0],
+                    &[h(0)],
                     "0b78a3226f915c082bf118f83618a618ab6dec793752624cbeb622acb562862d",
                     "1559eb2bbec5790b0c65d8693e4d0875b1747f4970ae8b650486ed7470845635",
                     "0086fab68dcb57aa196c77c5f264f215a112c22a912c10d123b0d03c3c28ef1037",
                 ),
                 (
-                    &[0, 2_147_483_647],
+                    &[h(0), h(2_147_483_647)],
                     "138f0b2551bcafeca6ff2aa88ba8ed0ed8de070841f0c4ef0165df8181eaad7f",
                     "ea4f5bfe8694d8bb74b7b59404632fd5968b774ed545e810de9c32a4fb4192f4",
                     "005ba3b9ac6e90e83effcd25ac4e58a1365a9e35a3d3ae5eb07b9e4d90bcf7506d",
                 ),
                 (
-                    &[0, 2_147_483_647, 1],
+                    &[h(0), h(2_147_483_647), h(1)],
                     "73bd9fff1cfbde33a1b846c27085f711c0fe2d66fd32e139d3ebc28e5a4a6b90",
                     "3757c7577170179c7868353ada796c839135b3d30554bbb74a4b1e4a5a58505c",
                     "002e66aa57069c86cc18249aecf5cb5a9cebbfd6fadeab056254763874a9352b45",
                 ),
                 (
-                    &[0, 2_147_483_647, 1, 2_147_483_646],
+                    &[h(0), h(2_147_483_647), h(1), h(2_147_483_646)],
                     "0902fe8a29f9140480a00ef244bd183e8a13288e4412d8389d140aac1794825a",
                     "5837736c89570de861ebc173b1086da4f505d4adb387c6a1b1342d5e4ac9ec72",
                     "00e33c0f7d81d843c572275f287498e8d408654fdf0d1e065b84e2e6f157aab09b",
                 ),
                 (
-                    &[0, 2_147_483_647, 1, 2_147_483_646, 2],
+                    &[h(0), h(2_147_483_647), h(1), h(2_147_483_646), h(2)],
                     "5d70af781f3a37b829f0d060924d5e960bdc02e85423494afc0b1a41bbe196d4",
                     "551d333177df541ad876a60ea71f00447931c0a9da16f227c11ea080d7391b8d",
                     "0047150c75db263559a70d5778bf36abbab30fb061ad69f69ece61a72b0cfa4fc0",
@@ -550,10 +569,72 @@ mod tests {
         assert!(WORDS * longest + WORDS - 1 <= SENTENCE_BYTES);
     }
 
+    /// Bytes handed out one run at a time, and then no more: a draw that keeps
+    /// asking past what a test meant to give fails rather than spins.
+    fn these(runs: Vec<[u8; 16]>) -> impl FnMut() -> Result<[u8; 16], String> {
+        let mut runs = runs.into_iter();
+        move || {
+            runs.next()
+                .ok_or_else(|| "asked for more than was given".to_owned())
+        }
+    }
+
+    /// Which bytes are taken: those below 240, by their remainder after
+    /// twenty four, counted from one, each position once.
+    #[test]
+    fn a_position_is_a_byte_below_240_by_its_remainder_and_each_comes_once() {
+        let mut run = [255u8; 16];
+        // 240 and 255 are passed over, where taken they would be positions 1
+        // and 16; 1 is position 2, and the second 1 the same position again;
+        // 239 is position 24; 26 is position 3.
+        run[..6].copy_from_slice(&[240, 255, 1, 1, 239, 26]);
+        assert_eq!(positions_from(these(vec![run])).unwrap(), [2, 3, 24]);
+
+        // 47 is position 24, 48 is position 1, 71 is position 24 again: two
+        // found, so a second run is asked for, and the third comes from it.
+        let mut first = [255u8; 16];
+        first[..3].copy_from_slice(&[47, 48, 71]);
+        let mut second = [255u8; 16];
+        second[0] = 100;
+        assert_eq!(
+            positions_from(these(vec![first, second])).unwrap(),
+            [1, 5, 24]
+        );
+        assert!(
+            positions_from(these(vec![first])).is_err(),
+            "with two found and nothing more to draw, it asks again"
+        );
+    }
+
+    /// Random bytes, as `positions_to_check` draws them, but a bounded number
+    /// of runs: three positions take one run almost always, and a rule that
+    /// could never find three fails here instead of spinning.
+    fn random_runs() -> impl FnMut() -> Result<[u8; 16], String> {
+        let mut left = 64u32;
+        move || {
+            left = left
+                .checked_sub(1)
+                .ok_or("sixty four runs and no three positions")?;
+            cairn_crypto::random_bytes::<16>().map_err(|error| error.to_string())
+        }
+    }
+
+    /// Every word can be asked for, the first and the last among them.
+    #[test]
+    fn every_position_comes_up_over_many_draws() {
+        let mut seen = [false; WORDS];
+        for _ in 0..2_000 {
+            for at in positions_from(random_runs()).unwrap() {
+                seen[at - 1] = true;
+            }
+        }
+        assert!(seen.iter().all(|seen| *seen), "{seen:?}");
+    }
+
     #[test]
     fn the_positions_to_check_are_three_distinct_words_of_the_phrase() {
         for _ in 0..200 {
-            let positions = positions_to_check().unwrap();
+            let positions = positions_from(random_runs()).unwrap();
             assert!(
                 positions.iter().all(|at| (1..=WORDS).contains(at)),
                 "{positions:?}"

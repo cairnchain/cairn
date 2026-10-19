@@ -1504,6 +1504,7 @@ fn how_the_wait_ended(waited: Waited, patience: u64) -> Vec<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
+    use super::read_the_words;
     use super::what_was_taken_back;
     use super::when_nobody_took_it;
     use super::{about_to_pay, answered_yes, ask, how_the_wait_ended, must_ask};
@@ -2226,6 +2227,24 @@ mod tests {
         assert!(
             out_of_reach.contains("14 blocks from a chain it cannot switch to"),
             "{out_of_reach}"
+        );
+    }
+
+    /// Twenty four words end the reading, without waiting for the input to
+    /// end: at a terminal it does not end until the person says so, and a
+    /// restore that waited for that would sit there with the words typed.
+    #[test]
+    fn twenty_four_words_end_the_reading_without_waiting_for_more() {
+        let words = vec!["abandon"; 24].join(" ");
+        let mut input = std::io::Cursor::new(format!("{words}\nnot read\n"));
+        let typed = read_the_words(&mut input).unwrap();
+        assert_eq!(typed.trim(), words, "it read past the twenty fourth word");
+
+        let mut short = std::io::Cursor::new("abandon abandon\n".to_owned());
+        assert_eq!(
+            read_the_words(&mut short).unwrap().trim(),
+            "abandon abandon",
+            "and input that ends early is handed on as it is, for the count to refuse"
         );
     }
 }
