@@ -117,6 +117,8 @@ fn spelled_lower(count: usize) -> &'static str {
         5 => "five",
         6 => "six",
         7 => "seven",
+        8 => "eight",
+        9 => "nine",
         other => panic!("{other} dependencies, and this test has no word for that"),
     }
 }
@@ -469,6 +471,8 @@ fn the_site_counts_the_dependencies_a_build_actually_pulls() {
         5 => "Five",
         6 => "Six",
         7 => "Seven",
+        8 => "Eight",
+        9 => "Nine",
         other => panic!("{other} dependencies, and this test has no word for that"),
     };
     for (language, text, said) in [
@@ -482,7 +486,9 @@ fn the_site_counts_the_dependencies_a_build_actually_pulls() {
                     4 => "Quatre",
                     5 => "Cinq",
                     6 => "Six",
-                    _ => "Sept",
+                    7 => "Sept",
+                    8 => "Huit",
+                    _ => "Neuf",
                 }
             ),
         ),
