@@ -250,7 +250,9 @@ explorer binary, so what is served is what was written.
 cargo build --release
 ```
 
-Make a key, and start a node that mines to it on a throwaway network:
+Make a key, and start a node that mines to it on a throwaway network. `new`
+shows the twenty four words the key is made from, once, asks for three of them
+back, and only then writes the key file:
 
 ```
 ./target/release/cairn-wallet new alice.key
@@ -296,25 +298,43 @@ Everything that touches money lives in the library, and both of those are faces
 on top of it. That is what makes a native application on a phone a matter of
 writing a face rather than writing spending a second time.
 
-A wallet is its key file and what its `--data` directory keeps beside the
-chain, and a backup is all of it. The key file spends the money. It is plain
-text with no passphrase, so anyone who can read it, or any copy of it, holds
-the money. `history.dat` in the data directory is the wallet's own account of
-what the key was paid, and the only record of where each note that has fallen
-out of the set every node holds now sits. That set carries no owner, so a
-restore from the key alone finds what is still in the set every node holds and
-nothing of what has fallen out of it, and no peer can supply it. Once the
-wallet has paid anybody, `pending.dat` beside it holds the payments no block has
-settled yet; a restore without it counts their notes as spendable and nothing
-hands them over again. Copy them together, and again after the wallet has run:
+A wallet is its key, written in its key file, and what its `--data` directory
+keeps beside the chain, and a backup is all of it. The key spends the money.
+The twenty four words `new` showed are the key's backup: they are BIP-39
+words, and the key is derived from them by SLIP-0010 along `m/44'/1'/0'/0'/0'`
+on every test network, so they make the same key again on any machine:
+
+```
+./target/release/cairn-wallet restore alice.key
+```
+
+`restore` reads the words from its input, never from its command line, where
+the shell would keep them, and says which word is not in the list or that the
+words do not fit together. Neither command writes over a file that is already
+there. Keep the words on paper, never in a photo or a cloud note: anyone who
+has them has the money, and nobody can give them back. A key made before
+`new` showed words has none, and cannot be given any; its key file is the only
+copy of it. The key file is plain text with no passphrase, so anyone who can
+read it, or any copy of it, holds the money too.
+
+`history.dat` in the data directory is the wallet's own account of what the key
+was paid, and the only record of where each note that has fallen out of the
+set every node holds now sits. That set carries no owner, so a restore from the
+words or the key alone, on a new machine, finds what is still in the set every
+node holds and what fell out of it in the last few blocks, and nothing older,
+and no peer can supply it. Once the wallet has paid anybody, `pending.dat`
+beside it holds the payments no block has settled yet; a restore without it
+counts their notes as spendable and nothing hands them over again. Copy them
+together, and again after the wallet has run:
 
 ```
 ./target/release/cairn-wallet backup alice.key --data wallet --into /media/stick/cairn
 ```
 
 Every copy is readable only by its owner, and it never writes over a file. To
-restore, put the key file back, and put `history.dat` and `pending.dat` back in
-the data directory before the wallet starts.
+restore, put the key file back, or make it again from the words, and put
+`history.dat` and `pending.dat` back in the data directory before the wallet
+starts.
 
 Watch the same network in a browser, with the explorer alongside the node:
 

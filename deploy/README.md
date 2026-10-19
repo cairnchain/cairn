@@ -92,7 +92,9 @@ worth taking.
 
 Mining does not break this rule, because a miner is told the address rewards
 are paid to and nothing more. The key that spends them stays wherever you keep
-it. Set `MINE` to an address, as `cairn-wallet address <key file>` prints it,
+it: make it on your own machine with `cairn-wallet new`, which shows the
+twenty four words it is made from, and keep those on paper, which is how the
+key comes back if that machine is lost (`cairn-wallet restore`). Set `MINE` to an address, as `cairn-wallet address <key file>` prints it,
 and the node will mine to it:
 
 ```
