@@ -228,6 +228,21 @@ pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses a name a key file is already at, before anything is done that the
+/// refusal would waste.
+///
+/// [`write`] refuses the same name, in the one call that creates the file,
+/// and that stays the refusal that counts. This is the earlier word for a
+/// command that shows twenty four words before it writes: words copied onto
+/// paper for a key the write then refuses are words for nothing, and a person
+/// holding them has no way to tell.
+pub fn refuse_if_there(path: &Path) -> Result<(), String> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(already_there(path));
+    }
+    Ok(())
+}
+
 /// Where a backup put the files a wallet is made of.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackedUp {

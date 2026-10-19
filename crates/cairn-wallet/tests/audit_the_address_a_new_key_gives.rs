@@ -47,7 +47,7 @@ fn address_line(output: &Output) -> String {
 #[test]
 fn new_prints_the_address_that_address_prints() {
     let key = scratch("default").join("key");
-    let made = wallet(&["new", key.to_str().unwrap()]);
+    let made = wallet(&["new", key.to_str().unwrap(), "--unsafe-skip-word-check"]);
     assert!(made.status.success(), "{}", said(&made));
     let shown = wallet(&["address", key.to_str().unwrap()]);
     assert!(shown.status.success(), "{}", said(&shown));
@@ -63,7 +63,13 @@ fn new_prints_the_address_that_address_prints() {
 #[test]
 fn new_writes_the_address_for_the_network_it_is_given() {
     let key = scratch("devnet").join("key");
-    let made = wallet(&["new", key.to_str().unwrap(), "--network", "devnet"]);
+    let made = wallet(&[
+        "new",
+        key.to_str().unwrap(),
+        "--network",
+        "devnet",
+        "--unsafe-skip-word-check",
+    ]);
     assert!(made.status.success(), "{}", said(&made));
     let shown = wallet(&["address", key.to_str().unwrap(), "--network", "devnet"]);
     assert!(shown.status.success(), "{}", said(&shown));
@@ -76,7 +82,13 @@ fn new_writes_the_address_for_the_network_it_is_given() {
 #[test]
 fn a_network_new_does_not_know_leaves_no_key_behind() {
     let key = scratch("nowhere").join("key");
-    let made = wallet(&["new", key.to_str().unwrap(), "--network", "nowhere"]);
+    let made = wallet(&[
+        "new",
+        key.to_str().unwrap(),
+        "--network",
+        "nowhere",
+        "--unsafe-skip-word-check",
+    ]);
     assert!(!made.status.success(), "{}", said(&made));
     assert!(
         !key.exists(),

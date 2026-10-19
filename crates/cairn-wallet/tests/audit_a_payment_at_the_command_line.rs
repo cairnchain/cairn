@@ -37,7 +37,7 @@ fn catching_up_is_said_when_the_wait_begins_and_not_when_it_ends() {
     let home = scratch("catching-up");
     let key = home.join("key");
     let made = Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
-        .args(["new", key.to_str().unwrap()])
+        .args(["new", key.to_str().unwrap(), "--unsafe-skip-word-check"])
         .output()
         .expect("the wallet runs");
     assert!(made.status.success(), "fixture: a key was made");
@@ -120,7 +120,7 @@ fn a_script_can_answer_yes_in_advance() {
     let home = scratch("answer-yes");
     let key = home.join("key");
     let made = Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
-        .args(["new", key.to_str().unwrap()])
+        .args(["new", key.to_str().unwrap(), "--unsafe-skip-word-check"])
         .output()
         .expect("the wallet runs");
     assert!(made.status.success(), "fixture: a key was made");
@@ -179,7 +179,7 @@ fn send_says_what_is_wrong_with_the_money_before_anything_about_the_payment() {
     let home = scratch("warning");
     let key = home.join("key");
     let made = Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
-        .args(["new", key.to_str().unwrap()])
+        .args(["new", key.to_str().unwrap(), "--unsafe-skip-word-check"])
         .output()
         .expect("the wallet runs");
     assert!(made.status.success(), "fixture: a key was made");
@@ -248,7 +248,7 @@ fn the_page_open_serves_says_what_became_of_the_payments() {
     let key = home.join("key");
     let data = home.join("data");
     let made = Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
-        .args(["new", key.to_str().unwrap()])
+        .args(["new", key.to_str().unwrap(), "--unsafe-skip-word-check"])
         .output()
         .expect("the wallet runs");
     assert!(made.status.success(), "fixture: a key was made");
