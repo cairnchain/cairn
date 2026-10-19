@@ -48,6 +48,14 @@ getrandom = "0.3"
 thiserror = "2"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 hex = "0.4"
+# The recovery phrase. BIP-39 for the words and their checksum, English only
+# and without the normalisation tables, since every English word is plain
+# ASCII; PBKDF2 and HMAC-SHA512 for the seed and for SLIP-0010, from the same
+# RustCrypto family `ed25519-dalek` already brings `sha2` from.
+bip39 = { version = "2", default-features = false, features = ["zeroize"] }
+hmac = { version = "0.13", features = ["zeroize"] }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+sha2 = { version = "0.11", default-features = false }
 # The documents, and nothing anybody downloads: `cairn-docs` renders `docs/`
 # and no program depends on it. Default features off, because they bring the
 # HTML writer and a command line parser, and this crate writes its own HTML.

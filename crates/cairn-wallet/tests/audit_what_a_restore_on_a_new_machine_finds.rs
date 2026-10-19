@@ -24,7 +24,8 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
 )]
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -203,8 +204,7 @@ fn a_restore_on_a_new_machine_finds_the_hot_set_and_the_window_and_nothing_older
     );
 
     // Somebody who kept every block and every leaf of the cold set.
-    let (keeper, _) =
-        Node::open_archiving(params(), loopback(), directory.join("keeper")).unwrap();
+    let (keeper, _) = Node::open_archiving(params(), loopback(), directory.join("keeper")).unwrap();
     for block in &blocks {
         keeper.submit_block(block.clone()).unwrap();
     }
