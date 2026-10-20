@@ -192,8 +192,9 @@ In scope: every crate a program we ship is built from, which is
 `crates/cairn-store`, `crates/cairn-node`, `crates/cairn-wallet`,
 `crates/cairn-http` and `crates/cairn-explorer`; the installer and the units it
 writes, `deploy/install.sh`, `deploy/explorer.sh`, `deploy/cairnd.service` and
-`deploy/cairn-explorer.service`; and the workflow that builds and attests the
-releases, `.github/workflows/release.yml`. The node mines and trims its own
+`deploy/cairn-explorer.service`; and what builds and attests the releases,
+`.github/workflows/release.yml`, `.github/workflows/build.yml`,
+`deploy/release-build.sh` and `deploy/rebuild.sh`. The node mines and trims its own
 chain, the wallet's page spends through `cairn-http`, the installer decides
 what a server runs after an upgrade, and the explorer hands out the download
 and the instructions for checking it, so a flaw in any of them reaches money or
@@ -208,6 +209,21 @@ the network is expected to be reset.
 What the project defends, against whom, and what it knowingly does not is
 written down in `docs/cairn-threat-model.md`, which a node serves at
 `/threat-model`. A report that a row there is wrong is a report worth sending.
+
+## Checking a release without trusting us
+
+The Linux archives of a release can be built again from its tag by anyone,
+and come out the same to the byte:
+
+```
+bash deploy/rebuild.sh <version>
+```
+
+It needs git, curl and Docker and nothing of ours, and says whether what it
+built is the archive listed in the release's `SHA256SUMS`. An archive that is
+not, built from a tag that should give it, is worth a report. macOS and
+Windows archives are not yet reproducible outside GitHub's machines;
+`deploy/README.md`, "Building a release again to check it", says why.
 
 ## Supported versions
 

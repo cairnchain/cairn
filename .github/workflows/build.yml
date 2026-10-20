@@ -1,0 +1,161 @@
+# Builds every archive a release publishes, twice, on two machines that share
+# nothing, and compares the two.
+#
+# The attestation release.yml signs says which commit and which workflow
+# produced a file, and it is GitHub saying so. What lets somebody check a
+# download without GitHub's word is building it again from the tag and getting
+# the same bytes, which `deploy/rebuild.sh` does. That only works while the
+# build gives the same bytes every time, and nothing would notice the day it
+# stopped: a new dependency that writes the time into the program, or a path
+# that leaks in, and every rebuild anybody tried would differ from then on.
+# So every release is made twice, here, and the Linux archives are published
+# only when their two copies agree to the byte.
+#
+# Linux only, because Linux is what can be built the same way anywhere: in
+# one container image named by its digest (`deploy/release-build.sh`). The
+# macOS and Windows archives are built twice as well and their comparison is
+# written in the summary, but a difference there does not stop a release:
+# their linkers and system libraries come with GitHub's machines, which change
+# under us, and a release of all five should not wait on a toolchain nobody
+# here can pin.
+#
+# Called by release.yml for the archives it publishes, and run on its own for
+# a pull request that changes how they are built, so a change that breaks this
+# is found before it is merged rather than on the morning of a release.
+
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version written into the archives.
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - crates/*/Cargo.toml
+      - "**/build.rs"
+      - deploy/release-build.sh
+      - deploy/release-zip.py
+      - deploy/rebuild.sh
+      - .github/workflows/build.yml
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  archive:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macos-apple-silicon
+            os: macos-latest
+          - name: macos-intel
+            os: macos-latest
+          # musl rather than glibc: a binary linked against the glibc of the
+          # machine that built it refuses to start on an older one, which is
+          # exactly the machine a cheap server is. Each built on a machine of
+          # its own architecture, in the container `release-build.sh` names.
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+          - name: windows-x86_64
+            os: windows-latest
+        copy: [first, second]
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      # A release has to be one commit built ten times, and it is the commit
+      # this run was started for: the one release.yml's `verify` checked, the
+      # one the attestation will name, and the one the tag goes on. The
+      # default ref, and nothing else (release.yml says why).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The Linux archives bring their own toolchain, in the container.
+      - name: Install the toolchain this repository pins
+        if: ${{ !startsWith(matrix.platform.name, 'linux') }}
+        run: rustup show
+
+      - name: Build
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version=$VERSION
+          if [ -z "$version" ]; then
+            version=$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && /^version[[:space:]]*=/{split($0,a,"\"");print a[2];exit}' Cargo.toml)
+          fi
+          deploy/release-build.sh "${{ matrix.platform.name }}" "$version" out
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.platform.name }}-${{ matrix.copy }}
+          path: out/*
+          if-no-files-found: error
+
+  # The two copies of each archive, side by side. What is handed on to be
+  # published is the first copy of each, and for Linux only once the second
+  # has come out the same.
+  compare:
+    needs: archive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: copies
+
+      - name: Compare the two builds of every archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          differ=0
+          {
+            echo "| Archive | First build | Second build | |"
+            echo "| --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for name in linux-x86_64 linux-arm64 macos-apple-silicon macos-intel windows-x86_64; do
+            file=$(cd "copies/$name-first" && ls)
+            first=$(sha256sum "copies/$name-first/$file" | cut -d' ' -f1)
+            second=$(sha256sum "copies/$name-second/$file" | cut -d' ' -f1)
+            echo "$file"
+            echo "  first  $first"
+            echo "  second $second"
+            if [ "$first" = "$second" ]; then
+              said="the same"
+            else
+              said="different"
+              case "$name" in
+                linux-*)
+                  echo "::error::the two builds of $file differ, so it is not published"
+                  differ=1
+                  ;;
+                *)
+                  echo "::notice::the two builds of $file differ; it is published from the first, as macOS and Windows are not yet reproducible"
+                  ;;
+              esac
+            fi
+            echo "| \`$file\` | \`$first\` | \`$second\` | $said |" >> "$GITHUB_STEP_SUMMARY"
+            cp "copies/$name-first/$file" release/
+          done
+          if [ "$differ" -ne 0 ]; then
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release
+          path: release/*
+          if-no-files-found: error
