@@ -42,6 +42,9 @@ Using the wallet
 
   ./cairn-wallet new mine.key         make a key, once, from 24 words
   ./cairn-wallet restore mine.key     make it again from the words
+  ./cairn-wallet recover mine.key --data recovered
+                                      on a new machine, find all of its
+                                      money by reading the chain once
   ./cairn-wallet address mine.key     the address people pay you at
   ./cairn-wallet balance mine.key     what it holds
   ./cairn-wallet open mine.key        open it as a page in your browser

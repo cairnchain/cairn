@@ -321,8 +321,21 @@ read it, or any copy of it, holds the money too.
 was paid, and the only record of where each note that has fallen out of the
 set every node holds now sits. That set carries no owner, so a restore from the
 words or the key alone, on a new machine, finds what is still in the set every
-node holds and what fell out of it in the last few blocks, and nothing older,
-and no peer can supply it. Once the wallet has paid anybody, `pending.dat`
+node holds and what fell out of it in the last few blocks, and nothing older.
+No peer can say where the older money sits; it is found again by reading the
+whole chain once, from the first block, as the lost machine did:
+
+```
+./target/release/cairn-wallet recover alice.key --data recovered
+```
+
+`recover` wants an empty directory of its own, asks peers started with
+`--archive` first because only they are sure to keep every block, checks every
+block it reads, and stops and says so if none of them sends the blocks. Run
+again with the same `--data`, it carries on where it stopped. It costs the
+chain read once: an hour and a half for a year of near empty blocks at one a
+minute. Then it prints the balance, and that directory is the wallet's
+`--data` from then on. Once the wallet has paid anybody, `pending.dat`
 beside it holds the payments no block has settled yet; a restore without it
 counts their notes as spendable and nothing hands them over again. Copy them
 together, and again after the wallet has run:

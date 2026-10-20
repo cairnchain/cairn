@@ -261,8 +261,10 @@ that has lost its records, needs someone who kept the cold set.
 Archivists are optional nodes that do. Nobody pays them, and the network
 does not depend on them: joining a chain takes the headers, which every
 node keeps at 182 bytes each, and a wallet that kept its own proofs asks
-no one. What an archivist offers is recovery for a wallet that lost
-theirs.
+no one. What an archivist offers a wallet that lost its proofs is the
+path to a note whose place the wallet still knows, and to one that lost
+the record of those places too, every block from the first, so that it
+reads the chain again and learns where its notes fell as they fall.
 
 They were in the design from the first day, for an intuition. Section 8
 explains why they turn out to be structural rather than convenient.
@@ -324,13 +326,21 @@ of it. The wallet therefore asks only nodes that say they keep the cold
 set, and a node that does not keep it answers nobody out of the paths it
 keeps for its own owner, which would tell a stranger whose node it is.
 
-What is left of it is narrower and is still a real hole. A path is asked
-for by where the note sits, and where a note sits is learned as it falls.
-A wallet that was not running when its note fell, and kept no record of
-it, has nothing to ask about: the question is asked by place, and no
-message asks for a note by its owner. That wallet's money is on the chain
-and is its own, and nothing here can reach it. Compensating archivists remains open
-as well, and is the lesser of the two.
+What is left of it is narrower. A path is asked for by where the note
+sits, and where a note sits is learned as it falls. A wallet that was not
+running when its note fell, and kept no record of it, has nothing to ask
+about: the question is asked by place, and no message asks for a note by
+its owner. What it can do is be there when the note falls after all, by
+reading the whole chain again from the first block, from an archivist,
+which keeps every block. Every block is checked as it arrives, so the
+archivist is trusted for nothing but having them, and it learns that this
+address read the chain, not which notes are its. The price is the chain
+read once: on a test chain of 1 186 near empty blocks it was sixteen
+seconds and 294 kB over the loopback, and a year of a main network at one
+block a minute is 525 600 blocks, about 130 MB and an hour and a half
+near empty and up to 67 GB full. It rests on somebody having kept every
+block, which nobody is paid for. Compensating archivists remains open,
+and is what this hole now comes down to.
 
 ## Consensus
 
@@ -924,8 +934,9 @@ rebuilding the proof of a note whose owner lost theirs, which it can. The
 first was separated out and made small enough that every node performs
 it (182 bytes a header and 64 for its place in the forest, 129 MB a
 year), so nothing in the protocol now depends on a party being paid. What
-is left is recovery for a wallet that kept no records, and a wallet that
-keeps its own needs no one.
+is left is recovery for a wallet that kept no records, which reads the
+chain again from an archivist, and a wallet that keeps its own needs no
+one.
 
 ## What this borrows, stated plainly
 
