@@ -35,6 +35,7 @@ use cairn_crypto::{random_bytes, SecretKey};
 use cairn_ledger::note::{Address, NetworkId, Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::{ConsensusParams, TransferError};
+use cairn_net::node::READING_FROM_THE_FIRST;
 use cairn_net::node::{
     Behind, Opening, Probation, Refused, Stranded, Unjudged, Unread, Unweighable, Unwritten,
 };
@@ -1483,6 +1484,17 @@ pub const BOOK_PATIENCE: Duration = Duration::from_secs(5);
 /// How often the wait for the book looks at who has arrived.
 const BOOK_POLL: Duration = Duration::from_millis(50);
 
+/// How long a read of the chain from the first block may stand still before
+/// it stops and says why.
+///
+/// Three of the node's patience for a batch of blocks
+/// (`cairn_net::sync::BATCH_PATIENCE`), because that is how long a peer that
+/// stopped sending is given before the blocks are asked of somebody else, and
+/// the read should outlast that twice over before it says nobody is sending
+/// them. A read moving at all is never stopped: the wait starts again with
+/// every block. Public for the reason [`CATCH_UP_BATCH`] is.
+pub const READ_PATIENCE: Duration = Duration::from_secs(180);
+
 /// How far above what the network asks a fee may go before the wallet stops
 /// and makes sure it was meant.
 ///
@@ -1660,13 +1672,62 @@ impl Wallet {
         params: ConsensusParams,
         data: &Path,
     ) -> Result<(Self, usize), WalletError> {
+        Self::open_with(path, params, data, false)
+    }
+
+    /// Opens the key at `path` over an empty data directory, with a node that
+    /// reads the chain from the first block rather than being handed a
+    /// ledger: see `Node::open_recovering`. Read it to the tip with
+    /// [`Self::read_from_the_first_block`].
+    ///
+    /// For a key made again from its words on a machine that never ran it.
+    /// Opened as [`Self::open`] opens it, the wallet finds the money still in
+    /// the set every node holds and what fell out of it in the last few
+    /// blocks, and nothing older, because the only record of where older
+    /// money sits was the account on the lost disk. Read from the first
+    /// block, its node writes down where every note of this key's fell, as
+    /// the node of a wallet that was there all along did.
+    ///
+    /// Refused over a directory that already holds this wallet's account or
+    /// a chain, unless what it holds is a read like this one left
+    /// unfinished, which it carries on.
+    pub fn recover(
+        path: &Path,
+        params: ConsensusParams,
+        data: &Path,
+    ) -> Result<(Self, usize), WalletError> {
+        // Asked before the node is opened, which would write down that this
+        // directory is being read from the first block.
+        let history_file = data.join(HISTORY_FILE);
+        if history_file.exists() && !data.join(READING_FROM_THE_FIRST).exists() {
+            return Err(WalletError::CouldNotStart(format!(
+                "{} is a wallet's account already, so reading the chain from the first block \
+                 into that directory would read into an account that did not start there. \
+                 Nothing has been changed. Give recover an empty directory of its own.",
+                history_file.display()
+            )));
+        }
+        Self::open_with(path, params, data, true)
+    }
+
+    fn open_with(
+        path: &Path,
+        params: ConsensusParams,
+        data: &Path,
+        recovering: bool,
+    ) -> Result<(Self, usize), WalletError> {
         let secret = keyfile::read(path).map_err(WalletError::CouldNotStart)?;
         let mine = Address::from(secret.public_key());
         let listen: SocketAddr = "0.0.0.0:0"
             .parse()
             .map_err(|_| WalletError::CouldNotStart("bad listen address".to_owned()))?;
-        let (node, restored) = Node::open_watching(params, listen, data, &[mine])
-            .map_err(|error| WalletError::CouldNotStart(error.to_string()))?;
+        let opened = if recovering {
+            Node::open_recovering(params, listen, data, &[mine])
+        } else {
+            Node::open_watching(params, listen, data, &[mine])
+        };
+        let (node, restored) =
+            opened.map_err(|error| WalletError::CouldNotStart(error.to_string()))?;
         let history_file = data.join(HISTORY_FILE);
         let (history, discarded) = History::load(&history_file);
         // Before anything can save, since a save renames a new account over
@@ -2250,6 +2311,55 @@ impl Wallet {
             taken = taken.saturating_add(read);
         }
         taken
+    }
+
+    /// Reads the chain from the first block to the tip, for a wallet opened
+    /// by [`Self::recover`], copying into the account where each of this
+    /// key's notes fell as the node learns it.
+    ///
+    /// Done when the chain has held still at a tip no peer claims more work
+    /// than, as [`Self::catch_up`] judges it, and then the node is told so,
+    /// and a start over this directory is an ordinary one from then on.
+    ///
+    /// Stopped when the chain stands still for `patience`, which a read never
+    /// does while anybody is sending it blocks: the most likely reason is that
+    /// no peer keeping every block, an archivist, is reachable, and what is
+    /// handed back says how many were. What was read is kept, and the read is
+    /// carried on by opening the same directory again.
+    ///
+    /// The places are copied every round rather than every block. The node's
+    /// list of this key's fallen notes lets one go only when more than
+    /// `cairn_ledger::state::WATCHED_NOTES` of them, each worth more, are
+    /// fallen and unspent at once, so however far the node reads between two
+    /// copies, a note is lost to the account only to that many notes paid to
+    /// this one key and left unspent, which is a flood aimed at it.
+    pub fn read_from_the_first_block(&self, patience: Duration) -> ReadFromTheFirst {
+        let mut last = self.node.height();
+        let mut still_since = Instant::now();
+        loop {
+            self.follow();
+            let look = self.look();
+            if look.height != last {
+                last = look.height;
+                still_since = Instant::now();
+            }
+            let still = still_since.elapsed();
+            if settled(&look, still) {
+                // A directory that could not be told is read from the first
+                // block again at its next start, which on a node holding its
+                // own chain is what it does anyway: nothing rests on this.
+                let _ = self.node.finished_reading();
+                self.follow_to_the_tip();
+                return ReadFromTheFirst::Reached;
+            }
+            if still >= patience {
+                return ReadFromTheFirst::Stopped {
+                    archivists: self.node.archiving_peers(),
+                    height: look.height,
+                };
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     /// Writes down where this key's fallen notes landed, while the node can
@@ -3641,6 +3751,21 @@ impl Wallet {
     pub fn shutdown(&self) {
         self.node.shutdown();
     }
+}
+
+/// What reading the chain from the first block came to: see
+/// [`Wallet::read_from_the_first_block`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadFromTheFirst {
+    /// The chain was read to a tip no peer claims more work than, and the
+    /// account holds where every note of this key's fell.
+    Reached,
+    /// The chain stood still before that. `archivists` is how many connected
+    /// peers said they keep every block, and `height` where the read stopped.
+    Stopped {
+        archivists: usize,
+        height: Option<u64>,
+    },
 }
 
 /// What waiting for the chain came to.

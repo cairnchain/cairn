@@ -19,8 +19,8 @@ use cairn_primitives::Amount;
 use cairn_wallet::history::{Direction, Movement};
 use cairn_wallet::phrase::{self, Phrase};
 use cairn_wallet::{
-    keyfile, serve, Covered, Holdings, NotCarried, PerhapsCarried, Sent, Waited, Waiting, Wallet,
-    WalletError, BOOK_PATIENCE,
+    keyfile, serve, Covered, Holdings, NotCarried, PerhapsCarried, ReadFromTheFirst, Sent, Waited,
+    Waiting, Wallet, WalletError, BOOK_PATIENCE, READ_PATIENCE,
 };
 
 const HELP: &str = "\
@@ -36,6 +36,15 @@ cairn-wallet, a Cairn wallet that is itself a node
       read the twenty four words from standard input, never from the
       command line, and write the key file they make. Neither command
       ever writes over a file that is already there
+
+  cairn-wallet recover <key file> --data <empty directory> [network options]
+      read the whole chain once, from the first block, into a directory of
+      its own, and find all of this key's money, the oldest included: what
+      a key made again from its words needs on a machine that never ran it.
+      It asks peers started with --archive first, since only they are sure
+      to keep every block, and stops and says so if none sends them. An
+      interrupted recover carries on when run again with the same --data.
+      Then it prints the balance, and that directory is this wallet's
 
   cairn-wallet address <key file> [--network <name>]
       print the address to be paid at, on that network: the hash of the
@@ -137,7 +146,8 @@ Backing up
   fallen out of the set every node holds now sits. A restore from the
   words or the key alone finds what is still in that set and what fell
   out of it in the last few blocks, and nothing older: that money is found
-  with history.dat, and nothing on the network can find it.
+  with history.dat, or by `recover`, which reads the whole chain again
+  from a peer that keeps every block and costs as long as that takes.
   pending.dat, beside it once this wallet has paid anybody, is its record
   of the payments no block has settled yet: without it a restore counts
   their notes as spendable and nothing hands them over again. `backup`
@@ -182,6 +192,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
         }
         "new" => make_key(rest),
         "restore" => restore(rest),
+        "recover" => recover(rest),
         "address" => show_address(rest),
         "balance" => show_balance(rest),
         "send" => spend(rest),
@@ -577,16 +588,117 @@ fn say_what_the_words_do_not_carry(path: &std::path::Path) {
         "The words bring back the key, and not this wallet's account of where its money sits. \
          A wallet started from the words alone, on a machine that never ran it, finds the money \
          still in the set every node holds and what fell out of it in the last few blocks; \
-         money that fell out before that is found only with history.dat, the account the \
-         wallet keeps in its --data directory. So back that up as well, after the wallet has \
-         run, and put it back in the --data directory before a restored wallet starts. This \
-         copies it, with the key file, given the same --data as the wallet if it runs with one:",
+         money that fell out before that is found with history.dat, the account the wallet \
+         keeps in its --data directory, if it was backed up: put it back in the --data \
+         directory before a restored wallet starts. Without it, this reads the whole chain \
+         once, from a peer that keeps every block, into an empty directory, and finds all of \
+         it, which takes as long as reading the chain does:",
+    );
+    println!();
+    println!(
+        "  cairn-wallet recover {} --data <empty directory>",
+        path.display()
+    );
+    say(
+        "And back history.dat up from now on, after the wallet has run. This copies it, with \
+         the key file, given the same --data as the wallet if it runs with one:",
     );
     println!();
     println!(
         "  cairn-wallet backup {} --into <directory>",
         path.display()
     );
+}
+
+/// Reads the chain from the first block into a directory of its own, for a
+/// key made again from its words on a machine that never ran it: see
+/// `Wallet::recover`.
+///
+/// A command of its own rather than a part of `restore`, which gives the key
+/// back at once: this takes as long as the chain takes to read.
+fn recover(arguments: &[String]) -> Result<(), String> {
+    let flags = Flags::parse(arguments)?;
+    let data = flags
+        .value("data")
+        .map(PathBuf::from)
+        .ok_or_else(|| RECOVER_NEEDS_A_DIRECTORY.to_owned())?;
+    let params = rules_of(&flags)?;
+    let (wallet, blocks) =
+        Wallet::recover(&flags.key_file()?, params, &data).map_err(|error| error.to_string())?;
+    if let Some(note) = keyfile::what_was_not_checked() {
+        say(note);
+    }
+    let started = start_reaching(&wallet, &flags, params)?;
+    say_who_was_reached(&wallet, blocks, started);
+    print!("reading the chain from the first block");
+    let _ = std::io::stdout().flush();
+    let read = wallet.read_from_the_first_block(READ_PATIENCE);
+    println!();
+    if let ReadFromTheFirst::Stopped { archivists, height } = read {
+        wallet.shutdown();
+        return Err(why_the_read_stopped(archivists, height, &data));
+    }
+
+    let holdings = wallet.holdings();
+    let covered = wallet.history_covers();
+    println!();
+    println!("address   {}", wallet.address_text());
+    println!(
+        "height    {}",
+        covered
+            .tip
+            .map_or_else(|| "-".to_owned(), |h| h.to_string())
+    );
+    println!("balance   {}", holdings.spendable);
+    println!(
+        "account   from block {}",
+        covered
+            .from
+            .map_or_else(|| "-".to_owned(), |from| from.to_string())
+    );
+    for line in beside_the_balance(&holdings, None, &covered) {
+        println!("{line}");
+    }
+    say(&format!(
+        "{} is this wallet's --data directory now: give it to balance, send and open, and \
+         back it up with backup after the wallet has run.",
+        data.display()
+    ));
+    wallet.shutdown();
+    Ok(())
+}
+
+/// What `recover` says without a --data.
+const RECOVER_NEEDS_A_DIRECTORY: &str = "recover reads the whole chain into a directory of its \
+     own: name an empty one with --data <directory>, and use it as this wallet's --data \
+     afterwards";
+
+/// What `recover` says when the read stood still for [`READ_PATIENCE`].
+fn why_the_read_stopped(archivists: usize, height: Option<u64>, data: &std::path::Path) -> String {
+    let at = height.map_or_else(
+        || "before the first block".to_owned(),
+        |h| format!("at block {h}"),
+    );
+    let who = if archivists == 0 {
+        "no peer it reached keeps every block. Only a peer started with --archive is sure to \
+         hold the oldest blocks, and none was reachable"
+            .to_owned()
+    } else {
+        format!(
+            "{archivists} peer(s) it reached say they keep every block, and none of them sent \
+             the next ones"
+        )
+    };
+    format!(
+        "reading the chain from the first block stopped {at}: nothing new arrived for {} \
+         seconds, and {who}. What was read is kept in {}. Run recover again with the same \
+         --data, and with --seed naming a peer that keeps every block if you know one, and it \
+         carries on from where it stopped. The money still in the set every node holds, and \
+         what fell out of it in the last few blocks, is found as usual meanwhile by balance, \
+         send and open with their own --data.",
+        READ_PATIENCE.as_secs(),
+        data.display()
+    )
 }
 
 /// Copies the key file and the account beside the chain into one directory.
@@ -1393,6 +1505,49 @@ fn joined(flags: &Flags) -> Result<(Wallet, Waited), String> {
         say(note);
     }
 
+    let started = start_reaching(&wallet, flags, params)?;
+
+    let patience: u64 = match flags.value("wait") {
+        None => 30,
+        Some(text) => text
+            .parse()
+            .map_err(|_| format!("`{text}` is not seconds"))?,
+    };
+
+    say_who_was_reached(&wallet, blocks, started);
+    print!("catching up");
+    // Flushed, because a standard output holds a line until it ends, and this
+    // one ends when the wait does: the word meant to say the wallet is working
+    // arrived once there was nothing left to wait for.
+    let _ = std::io::stdout().flush();
+    let waited = wallet.catch_up(Duration::from_secs(patience));
+    println!();
+
+    for line in how_the_wait_ended(waited, patience) {
+        println!("{line}");
+    }
+    Ok((wallet, waited))
+}
+
+/// The line saying what this wallet's node holds and whom it reached.
+fn say_who_was_reached(wallet: &Wallet, blocks: usize, started: Option<usize>) {
+    match started {
+        Some(reached) => println!("wallet    {blocks} blocks on disk, {reached} seed(s) reached"),
+        None => println!(
+            "wallet    {blocks} blocks on disk, {} peers from its own address book, no seed asked",
+            wallet.node().peers_introduced()
+        ),
+    }
+}
+
+/// Starts this wallet's node towards its peers: the --seed addresses named,
+/// or its own book and then the seeds written into the program. `None` when
+/// the book was enough, and otherwise how many seeds were reached.
+fn start_reaching(
+    wallet: &Wallet,
+    flags: &Flags,
+    params: ConsensusParams,
+) -> Result<Option<usize>, String> {
     // As a node does: the names are kept, so a wallet opened on a machine
     // whose name server is not answering yet still joins once it is.
     let asked = flags.values("seed");
@@ -1419,33 +1574,7 @@ fn joined(flags: &Flags) -> Result<(Wallet, Waited), String> {
         }
         Some(reached)
     };
-
-    let patience: u64 = match flags.value("wait") {
-        None => 30,
-        Some(text) => text
-            .parse()
-            .map_err(|_| format!("`{text}` is not seconds"))?,
-    };
-
-    match started {
-        Some(reached) => println!("wallet    {blocks} blocks on disk, {reached} seed(s) reached"),
-        None => println!(
-            "wallet    {blocks} blocks on disk, {} peers from its own address book, no seed asked",
-            wallet.node().peers_introduced()
-        ),
-    }
-    print!("catching up");
-    // Flushed, because a standard output holds a line until it ends, and this
-    // one ends when the wait does: the word meant to say the wallet is working
-    // arrived once there was nothing left to wait for.
-    let _ = std::io::stdout().flush();
-    let waited = wallet.catch_up(Duration::from_secs(patience));
-    println!();
-
-    for line in how_the_wait_ended(waited, patience) {
-        println!("{line}");
-    }
-    Ok((wallet, waited))
+    Ok(started)
 }
 
 /// What is said when the wait for the chain did not end with the chain

@@ -261,6 +261,19 @@ pub const NAME_LOOKUP_PERIOD: u64 = 30;
 /// chain running at the limit.
 pub const KEEP_BLOCK_BYTES: u64 = 1_000_000_000;
 
+/// The file that says a node is reading the chain from the first block, and
+/// is not to be handed a ledger, until whoever opened it says it reached the
+/// tip: see [`Node::open_recovering`].
+///
+/// On the disk rather than in memory because a recovery is the read of a
+/// whole chain, which is an hour and more on a year of it, and the machine it
+/// runs on can stop at any moment of that hour. A node started again over a
+/// directory holding nothing of its own chain would otherwise be an ordinary
+/// newcomer, handed a ledger on a long chain, and every note of its owner's
+/// that fell before the window the ledger carries would be skipped for good.
+/// Its presence is the whole of what it says.
+pub const READING_FROM_THE_FIRST: &str = "reading-from-the-first-block";
+
 /// Seconds a join may go without a piece arriving before it is given up on.
 ///
 /// Being handed a ledger is the one exchange a node cannot finish on its own,
@@ -607,6 +620,18 @@ pub enum NodeError {
          network"
     )]
     OtherRules { file: &'static str, because: String },
+    /// A node asked to read the chain from the first block, over a directory
+    /// that already holds a chain and was not left by such a read.
+    ///
+    /// A read from the first block learns where the owner's notes fell as it
+    /// applies the blocks, and a chain already on the disk is blocks applied
+    /// before anybody was watching for them, or a ledger that skipped them.
+    #[error(
+        "{directory} already holds a chain, so reading the chain from the first block there \
+         would not learn where this key's notes fell in the blocks it already holds. Nothing \
+         has been changed. Give it an empty directory of its own"
+    )]
+    HoldsAChain { directory: String },
     /// A node asked to keep the whole cold set, over blocks that do not begin
     /// at the first one.
     ///
@@ -1725,6 +1750,10 @@ struct Shared {
     /// A node that names no port is one the protocol already has a place for:
     /// its peers answer it and write nothing down.
     offers_its_address: bool,
+    /// Whether this node reads the chain from the first block rather than
+    /// being handed a ledger, until [`Node::finished_reading`] says it reached
+    /// the tip: see [`READING_FROM_THE_FIRST`].
+    reads_from_the_first: AtomicBool,
     /// Drawn once at start. A node behind a router cannot recognise its own
     /// address coming back from a peer, but it can recognise this.
     nonce: u64,
@@ -4796,6 +4825,7 @@ impl Node {
             None,
             None,
             true,
+            false,
         )
     }
 
@@ -4810,7 +4840,7 @@ impl Node {
         address: SocketAddr,
         directory: impl Into<PathBuf>,
     ) -> Result<(Self, Restored), NodeError> {
-        Self::open_with(params, address, directory, false, &[])
+        Self::open_with(params, address, directory, false, &[], false)
     }
 
     /// The same, keeping track of where these owners' notes go when they fall
@@ -4829,7 +4859,34 @@ impl Node {
         directory: impl Into<PathBuf>,
         owners: &[Address],
     ) -> Result<(Self, Restored), NodeError> {
-        Self::open_with(params, address, directory, false, owners)
+        Self::open_with(params, address, directory, false, owners, false)
+    }
+
+    /// The same, reading the chain from the first block rather than being
+    /// handed a ledger, so that where every note of these owners' fell is
+    /// learned as it falls, the oldest included.
+    ///
+    /// For a wallet made again from its key alone, on a machine whose account
+    /// of where its notes fell is gone. A ledger carries the cold set as sixty
+    /// four roots with no owner attached, so a node handed one learns where
+    /// its owner's notes sit only for those that fell in the window the
+    /// ledger carries and after. Reading every block from the first is the
+    /// read of a node that was there all along, and it costs the whole chain
+    /// once: the blocks are asked first of peers that keep every one of them
+    /// (see [`Chooser::reading_from_the_first`]), and every one is checked, so
+    /// those peers are trusted for nothing but having the blocks.
+    ///
+    /// Only over a directory holding no chain, or one such a read left behind
+    /// unfinished, which it carries on: see [`READING_FROM_THE_FIRST`], which
+    /// this writes before anything else is. Past that the node is an ordinary
+    /// one, and [`Self::finished_reading`] makes it one on the disk as well.
+    pub fn open_recovering(
+        params: ConsensusParams,
+        address: SocketAddr,
+        directory: impl Into<PathBuf>,
+        owners: &[Address],
+    ) -> Result<(Self, Restored), NodeError> {
+        Self::open_with(params, address, directory, false, owners, true)
     }
 
     /// The same, keeping the cold set so it can answer with proofs.
@@ -4838,7 +4895,7 @@ impl Node {
         address: SocketAddr,
         directory: impl Into<PathBuf>,
     ) -> Result<(Self, Restored), NodeError> {
-        Self::open_with(params, address, directory, true, &[])
+        Self::open_with(params, address, directory, true, &[], false)
     }
 
     // Every step here is a decision about a file already on the disk, and each
@@ -4853,9 +4910,26 @@ impl Node {
         directory: impl Into<PathBuf>,
         archiving: bool,
         owners: &[Address],
+        recovering: bool,
     ) -> Result<(Self, Restored), NodeError> {
         let directory = directory.into();
         let lock = DirectoryLock::acquire(&directory)?;
+        // Before the log is opened, which creates it. A read from the first
+        // block already under way is carried on whichever way this node was
+        // opened, so a wallet started again over it by any command does not
+        // take a ledger halfway.
+        let marker = directory.join(READING_FROM_THE_FIRST);
+        if recovering && !marker.exists() {
+            if holds_a_chain(&directory) {
+                return Err(NodeError::HoldsAChain {
+                    directory: directory.display().to_string(),
+                });
+            }
+            std::fs::File::create(&marker)
+                .and_then(|file| file.sync_all())
+                .map_err(NodeError::Io)?;
+        }
+        let reads_from_the_first = marker.exists();
         let (mut log, recovered) = BlockLog::open(&directory).map_err(in_file(BLOCK_LOG))?;
 
         let mut chain = if archiving {
@@ -5193,6 +5267,7 @@ impl Node {
             probation,
             unread,
             offers_its_address,
+            reads_from_the_first,
         )?;
         Ok((node, restored))
     }
@@ -5209,6 +5284,7 @@ impl Node {
         probation: Option<Undertaking>,
         unread: Option<Unread>,
         offers_its_address: bool,
+        reads_from_the_first: bool,
     ) -> Result<Self, NodeError> {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
@@ -5223,12 +5299,17 @@ impl Node {
         };
         // The anchors a book was read back with are the ones on the disk.
         let anchors_written_at = book.anchor_changes();
-        let choosing = Chooser::reaching(chain.undo_limit());
+        let choosing = if reads_from_the_first {
+            Chooser::reaching(chain.undo_limit()).reading_from_the_first()
+        } else {
+            Chooser::reaching(chain.undo_limit())
+        };
 
         let shared = Arc::new(Shared {
             params,
             address,
             offers_its_address,
+            reads_from_the_first: AtomicBool::new(reads_from_the_first),
             nonce: fresh_nonce(),
             neighbourhood_salt: fresh_nonce(),
             chain: Mutex::new(chain),
@@ -6086,6 +6167,35 @@ impl Node {
     /// Whether this node can rebuild a proof for someone who lost theirs.
     pub fn is_archiving(&self) -> bool {
         self.with_chain(ChainStore::is_archiving)
+    }
+
+    /// Whether this node is reading the chain from the first block, as one
+    /// opened by [`Self::open_recovering`] does until it is told it reached
+    /// the tip.
+    pub fn reads_from_the_first_block(&self) -> bool {
+        self.shared.reads_from_the_first.load(Ordering::SeqCst)
+    }
+
+    /// Says the read from the first block reached the tip, so this directory
+    /// is an ordinary node's from now on: [`READING_FROM_THE_FIRST`] is taken
+    /// off the disk.
+    ///
+    /// Said by whoever opened the node, because only it knows what the tip is
+    /// worth waiting for. Nothing changes for the running node: by the time a
+    /// chain has a tip to reach, this node holds blocks of its own and is not
+    /// handed a ledger whatever it is asked.
+    pub fn finished_reading(&self) -> io::Result<()> {
+        if let Some(directory) = self.shared.directory.as_ref() {
+            match std::fs::remove_file(directory.join(READING_FROM_THE_FIRST)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.shared
+            .reads_from_the_first
+            .store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     /// The most work any connected peer said its chain had when it introduced
@@ -9673,7 +9783,8 @@ fn note_claim(shared: &Arc<Shared>, id: PeerId, peer: &PeerState) {
     if !choosing {
         return;
     }
-    shared.choosing().noted(
+    let mut chooser = shared.choosing();
+    chooser.noted(
         id,
         peer.remote,
         peer.total_work,
@@ -9681,6 +9792,9 @@ fn note_claim(shared: &Arc<Shared>, id: PeerId, peer: &PeerState) {
         peer.keeps.headers,
         unix_now(),
     );
+    if peer.keeps.cold_set {
+        chooser.archives(id);
+    }
 }
 
 /// One round of the choice a node with no chain makes about whom to follow.
@@ -9759,6 +9873,15 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
             }
         }
     }
+}
+
+/// Whether `directory` holds a chain a node wrote: a block in its log, or a
+/// ledger it was handed or wrote.
+///
+/// Asked before the log is opened, which creates it empty.
+fn holds_a_chain(directory: &Path) -> bool {
+    let logged = std::fs::metadata(directory.join(BLOCK_LOG)).is_ok_and(|meta| meta.len() > 0);
+    logged || directory.join(HANDED_LEDGER).exists()
 }
 
 /// Whether a turn the chooser hands out as a join is asked as a read instead.
