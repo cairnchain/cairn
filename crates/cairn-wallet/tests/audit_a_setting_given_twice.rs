@@ -78,7 +78,7 @@ fn said(output: &Output) -> String {
 /// A key file, so the refusal under test is the only reason to stop.
 fn a_key(name: &str) -> PathBuf {
     let path = scratch(name).join("key");
-    let made = wallet(&["new", path.to_str().unwrap()]);
+    let made = wallet(&["new", path.to_str().unwrap(), "--unsafe-skip-word-check"]);
     assert!(made.status.success(), "{}", said(&made));
     path
 }

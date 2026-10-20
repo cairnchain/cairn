@@ -40,7 +40,8 @@ On Windows, run cairnd.exe from a terminal the same way.
 Using the wallet
 ----------------
 
-  ./cairn-wallet new mine.key         make a key, once
+  ./cairn-wallet new mine.key         make a key, once, from 24 words
+  ./cairn-wallet restore mine.key     make it again from the words
   ./cairn-wallet address mine.key     the address people pay you at
   ./cairn-wallet balance mine.key     what it holds
   ./cairn-wallet open mine.key        open it as a page in your browser
@@ -48,8 +49,10 @@ Using the wallet
 The page is served on this machine only, at an address carrying a secret,
 and the wallet answers nothing without it.
 
-Back up mine.key. It is the only thing that can spend what it holds, and
-nobody, including us, can replace it or recover from its loss.
+Write the 24 words `new` shows on paper, never in a photo or a cloud note.
+They make the key again on any machine, anyone who has them has the money,
+and nobody, including us, can give them back. A key made before `new` showed
+words has none: back up mine.key itself, which is then the only copy.
 
 
 Your computer will warn you about these files

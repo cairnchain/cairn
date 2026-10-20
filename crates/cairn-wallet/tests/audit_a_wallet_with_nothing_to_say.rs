@@ -49,7 +49,7 @@ fn said(output: &Output) -> String {
 fn a_wallet_that_read_no_movements_still_gives_an_account_of_itself() {
     let home = scratch("empty");
     let key = home.join("key");
-    let made = wallet(&["new", key.to_str().unwrap()]);
+    let made = wallet(&["new", key.to_str().unwrap(), "--unsafe-skip-word-check"]);
     assert!(made.status.success(), "{}", said(&made));
 
     let shown = wallet(&[
@@ -100,10 +100,10 @@ fn a_wallet_that_read_no_movements_still_gives_an_account_of_itself() {
 fn a_payment_the_wallet_cannot_make_is_not_given_a_fee_of_nothing() {
     let home = scratch("short");
     let key = home.join("key");
-    let made = wallet(&["new", key.to_str().unwrap()]);
+    let made = wallet(&["new", key.to_str().unwrap(), "--unsafe-skip-word-check"]);
     assert!(made.status.success(), "{}", said(&made));
     let payee = home.join("payee");
-    let made = wallet(&["new", payee.to_str().unwrap()]);
+    let made = wallet(&["new", payee.to_str().unwrap(), "--unsafe-skip-word-check"]);
     assert!(made.status.success(), "{}", said(&made));
     let shown = wallet(&["address", payee.to_str().unwrap(), "--network", "devnet"]);
     let to = said(&shown)

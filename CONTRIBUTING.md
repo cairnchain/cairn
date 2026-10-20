@@ -17,8 +17,11 @@ spent twice, or frozen. Security flaws do not go in public issues.
 
 The toolchain is pinned in `rust-toolchain.toml`, so `rustup` picks it up on
 its own. Nothing else is needed: there is no build script and no code
-generator. The programs that ship pull in five crates from outside the
-workspace: `blake3`, `ed25519-dalek`, `getrandom`, `thiserror` and `zeroize`.
+generator. The programs that ship pull in nine crates from outside the
+workspace: `bip39`, `blake3`, `ed25519-dalek`, `getrandom`, `hmac`, `pbkdf2`,
+`sha2`, `thiserror` and `zeroize`. The four the wallet's recovery phrase
+brought are the standard ones for it: `bip39` from rust-bitcoin for the words,
+and RustCrypto's `hmac`, `pbkdf2` and `sha2` for the seed and the derivation.
 The tests add `curve25519-dalek` and `hex`, and the document renderer adds
 `pulldown-cmark`, and none of the three is in anything a person downloads.
 

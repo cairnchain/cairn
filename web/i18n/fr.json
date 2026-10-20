@@ -596,7 +596,7 @@
       "body": {
         "plain": ["Vous pouvez regarder les règles sur lesquelles le réseau tourne, voir les blocs arriver en direct, ou lancer un nœud vous-même. Lancer un nœud est la seule façon de vérifier tout cela sans croire quiconque sur parole, et c'est tout l'objet de cette conception."],
         "curious": ["Les paramètres de consensus sont lus en direct depuis le nœud. L'explorateur montre la chaîne telle que ce nœud la voit. Lancer le vôtre prend quelques minutes et retire entièrement cette page de vos hypothèses de confiance."],
-        "technical": ["Paramètres en direct depuis ConsensusParams, état de la chaîne depuis la branche suivie. Le code source est public et l'arbre de dépendances est volontairement réduit : blake3, ed25519-dalek, getrandom, thiserror, zeroize."]
+        "technical": ["Paramètres en direct depuis ConsensusParams, état de la chaîne depuis la branche suivie. Le code source est public et l'arbre de dépendances est volontairement réduit : bip39, blake3, ed25519-dalek, getrandom, hmac, pbkdf2, sha2, thiserror, zeroize."]
       }
     }
   },
@@ -699,7 +699,7 @@
       "title": "Ou le compiler vous-même",
       "body": {
         "plain": ["Il vous faut Rust, une chaîne d'outils de programmation gratuite. Ces trois commandes récupèrent le code source et le compilent, en deux ou trois minutes. Vous obtenez les trois mêmes programmes, compilés par vous."],
-        "curious": ["Rust 1.89, que le dépôt fixe pour que tout le monde compile avec la même version. Cinq dépendances directes et aucun moteur asynchrone."],
+        "curious": ["Rust 1.89, que le dépôt fixe pour que tout le monde compile avec la même version. Neuf dépendances directes et aucun moteur asynchrone."],
         "technical": ["Rust 1.89. Le workspace interdit le code non sûr et refuse les effets de bord arithmétiques, l'indexation, le découpage, unwrap, expect et panic. Le profil release garde les contrôles de débordement actifs."]
       }
     }

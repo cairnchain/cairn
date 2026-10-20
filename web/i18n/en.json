@@ -596,7 +596,7 @@
       "body": {
         "plain": ["You can look at the rules the network runs on, watch blocks arriving live, or run a node yourself. Running one is the only way to check any of this without taking someone else at their word, and it is the point of the whole design."],
         "curious": ["The consensus parameters are read live from the node. The explorer shows the chain as that node sees it. Running your own is a few minutes of work and removes this page from your trust assumptions entirely."],
-        "technical": ["Parameters live from ConsensusParams, chain state from the followed branch. The source is public and the dependency tree is deliberately small: blake3, ed25519-dalek, getrandom, thiserror, zeroize."]
+        "technical": ["Parameters live from ConsensusParams, chain state from the followed branch. The source is public and the dependency tree is deliberately small: bip39, blake3, ed25519-dalek, getrandom, hmac, pbkdf2, sha2, thiserror, zeroize."]
       }
     }
   },
@@ -699,7 +699,7 @@
       "title": "Or build it yourself",
       "body": {
         "plain": ["You need Rust, which is a free programming toolchain. These three commands fetch the source and build it, and take a couple of minutes. What you end up with is the same three programs, built by you."],
-        "curious": ["Rust 1.89, which the repository pins so that everybody builds with the same one. Five direct dependencies and no asynchronous runtime."],
+        "curious": ["Rust 1.89, which the repository pins so that everybody builds with the same one. Nine direct dependencies and no asynchronous runtime."],
         "technical": ["Rust 1.89. The workspace forbids unsafe code and denies arithmetic side effects, indexing, slicing, unwrap, expect and panic. The release profile keeps overflow checks on."]
       }
     }

@@ -12,12 +12,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cairn_crypto::SecretKey;
 use cairn_ledger::note::{Address, NetworkId};
 use cairn_ledger::validation::ConsensusParams;
 use cairn_net::seeds;
 use cairn_primitives::Amount;
 use cairn_wallet::history::{Direction, Movement};
+use cairn_wallet::phrase::{self, Phrase};
 use cairn_wallet::{
     keyfile, serve, Covered, Holdings, NotCarried, PerhapsCarried, Sent, Waited, Waiting, Wallet,
     WalletError, BOOK_PATIENCE,
@@ -27,8 +27,15 @@ const HELP: &str = "\
 cairn-wallet, a Cairn wallet that is itself a node
 
   cairn-wallet new <key file> [--network <name>]
-      make a key, write it down, and print the address to be paid at on
-      that network, as `address` does
+      make a key from twenty four new words: show the words once, to be
+      written on paper, ask for three of them back, then write the key
+      file and print the address to be paid at on that network, as
+      `address` does
+
+  cairn-wallet restore <key file> [--network <name>]
+      read the twenty four words from standard input, never from the
+      command line, and write the key file they make. Neither command
+      ever writes over a file that is already there
 
   cairn-wallet address <key file> [--network <name>]
       print the address to be paid at, on that network: the hash of the
@@ -83,6 +90,15 @@ Network options
                        before paying; where its input is not a terminal,
                        as in a script, it does not ask
 
+Options for `new`
+
+  --unsafe-skip-word-check
+                       write the key file without asking for three of the
+                       words back. For tests, and for scripts that keep the
+                       words themselves: a person who skips the check finds
+                       out that a word was miscopied on the day the words
+                       are needed, which is too late
+
 Options for `open`
 
   --port <number>      port to serve the page on (default: one the system
@@ -108,13 +124,20 @@ What the network learns
 
 Backing up
 
-  A wallet is its key file and what its --data directory keeps beside the
-  chain. The key file spends the money, and it is plain text with no
-  passphrase: anyone who can read it, or a copy of it, holds the money.
+  A wallet is its key, written in its key file, and what its --data
+  directory keeps beside the chain. The twenty four words `new` showed
+  make the key again on any machine (`restore`), so they are the backup of
+  the key: on paper, never in a photo or a cloud note, because anyone who
+  has them has the money and nobody can give them back. A key made before
+  `new` showed words has none, and cannot be given any: its key file is
+  the only copy of it. The key file is plain text with no passphrase:
+  anyone who can read it, or a copy of it, holds the money.
   history.dat, in the --data directory, is this wallet's own account of
   what the key was paid, and the only record of where money that has
-  fallen out of the set every node holds now sits. A restore from the key
-  alone does not find that money, and nothing on the network can.
+  fallen out of the set every node holds now sits. A restore from the
+  words or the key alone finds what is still in that set and what fell
+  out of it in the last few blocks, and nothing older: that money is found
+  with history.dat, and nothing on the network can find it.
   pending.dat, beside it once this wallet has paid anybody, is its record
   of the payments no block has settled yet: without it a restore counts
   their notes as spendable and nothing hands them over again. `backup`
@@ -158,6 +181,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
             Ok(())
         }
         "new" => make_key(rest),
+        "restore" => restore(rest),
         "address" => show_address(rest),
         "balance" => show_balance(rest),
         "send" => spend(rest),
@@ -173,7 +197,7 @@ fn run(arguments: &[String]) -> Result<(), String> {
 /// `cairnd` and the explorer. Taken and ignored, `--netwrok devnet` read a
 /// balance on the default network and printed it as the answer, and `--fees`
 /// paid the least the network carries instead of what its sender had priced.
-const KNOWN: [&str; 11] = [
+const KNOWN: [&str; 12] = [
     "data",
     "seed",
     "network",
@@ -185,10 +209,18 @@ const KNOWN: [&str; 11] = [
     "amount",
     "port",
     "into",
+    SKIP_THE_WORD_CHECK,
 ];
 
 /// Options that are the whole of what they say, with nothing after them.
-const BARE: [&str; 2] = ["fee-anyway", "yes"];
+const BARE: [&str; 3] = ["fee-anyway", "yes", SKIP_THE_WORD_CHECK];
+
+/// The option that writes a new key without asking for any of its words back.
+///
+/// Named so that nobody reaches for it by accident: tests and scripts need a
+/// way past a question only a person can answer, and a person who takes it
+/// learns that a word was miscopied on the day the words are needed.
+const SKIP_THE_WORD_CHECK: &str = "unsafe-skip-word-check";
 
 /// Options that are a list rather than a setting, where every value is used.
 const REPEATED: [&str; 1] = ["seed"];
@@ -314,10 +346,31 @@ fn make_key(arguments: &[String]) -> Result<(), String> {
     let path = flags.key_file()?;
     // Asked before the key exists, so a misspelt network leaves no file behind.
     let network = rules_of(&flags)?.network;
+    // And the name, before the words are shown: words copied onto paper for a
+    // key the write then refuses are words for nothing.
+    keyfile::refuse_if_there(&path)?;
 
-    let secret = SecretKey::generate().map_err(|error| format!("no entropy available: {error}"))?;
+    let phrase = Phrase::draw()?;
+    let secret = phrase.key(network)?;
+    for line in before_the_words() {
+        println!("{line}");
+    }
+    for line in the_words(&phrase) {
+        println!("{}", line.trim_end());
+    }
+    if !flags.given(SKIP_THE_WORD_CHECK) {
+        let positions = phrase::positions_to_check()?;
+        let stdin = std::io::stdin();
+        check_the_words(
+            &phrase,
+            positions,
+            &mut stdin.lock(),
+            &mut std::io::stdout(),
+        )?;
+    }
     keyfile::write(&path, &secret)?;
 
+    println!();
     println!("key written to {}", path.display());
     // It printed the key here, under this word, after addresses became its hash.
     println!(
@@ -325,29 +378,215 @@ fn make_key(arguments: &[String]) -> Result<(), String> {
         Address::from(secret.public_key()).to_text(network)
     );
     say(
-        "Anyone holding that file holds the money: it is plain text with no passphrase, \
-         so keep it where only you can read it.",
+        "The key file holds the key those words make, in plain text with no passphrase: \
+         anyone holding the file holds the money, so keep it where only you can read it. If it is lost, `cairn-wallet restore` \
+         makes it again from the words.",
     );
-    // It said "That file is the only copy", and a restore from it alone finds
-    // nothing of the money that has fallen out of the set every node holds.
+    say_what_the_words_do_not_carry(&path);
+    if let Some(note) = keyfile::what_was_not_checked() {
+        say(note);
+    }
+    Ok(())
+}
+
+/// Makes the key file again from the twenty four words, read from standard
+/// input.
+///
+/// Never from the command line: a shell keeps what was typed there, in a file,
+/// for as long as its history goes back, and the words are the money.
+fn restore(arguments: &[String]) -> Result<(), String> {
+    // A loose word past the key file is refused by the parser, which names it.
+    // Here the word would be one of the twenty four, so it is not repeated.
+    let flags = Flags::parse(arguments).map_err(|error| {
+        if error.starts_with("unexpected argument") {
+            WORDS_ON_THE_COMMAND_LINE.to_owned()
+        } else {
+            error
+        }
+    })?;
+    let path = flags.key_file()?;
+    let network = rules_of(&flags)?.network;
+    keyfile::refuse_if_there(&path)?;
+
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        say(&format!(
+            "Type the {} words, in order, and press Enter. They show on the screen as they \
+             are typed, so do this where nobody can see it.",
+            phrase::WORDS
+        ));
+    }
+    let typed = read_the_words(&mut stdin.lock())?;
+    let phrase = Phrase::read(&typed)?;
+    let secret = phrase.key(network)?;
+    keyfile::write(&path, &secret)?;
+
+    println!();
+    println!("key written to {}", path.display());
+    println!(
+        "address        {}",
+        Address::from(secret.public_key()).to_text(network)
+    );
     say(
-        "It is not all of this wallet. The first time the wallet runs it starts \
-         history.dat in its data directory, its own account of what this key is paid, \
-         and money that has fallen out of the set every node holds can only be found \
-         again with that file; once it has paid anybody, pending.dat beside it holds the \
-         payments no block has settled yet. So a backup is the key and those files, \
-         taken again after the wallet has run. This copies them together, given the \
-         same --data as the wallet if it runs with one:",
+        "If that is not the address this wallet was paid at, the words are not the ones it \
+         was made from: nothing was paid to this one. Check the paper.",
+    );
+    say_what_the_words_do_not_carry(&path);
+    Ok(())
+}
+
+/// What `restore` says to somebody who put the words on its command line.
+const WORDS_ON_THE_COMMAND_LINE: &str = "restore takes the key file and nothing else on its \
+     command line: it reads the words from its input, after it starts. Words typed on a command \
+     line stay in the shell's history file. If you typed them there, delete them from that \
+     history, then run `cairn-wallet restore <key file>` and type them when it asks.";
+
+/// What to do with the words, said before they are shown.
+fn before_the_words() -> Vec<String> {
+    let mut lines = vec![String::new()];
+    lines.extend(wrapped(&format!(
+        "These {} words are this wallet's key. Write them on paper, in order, with their \
+         numbers. Never in a photo, a screenshot, a cloud note or a message: anyone who has \
+         them has the money, and nobody can give them back to you if they are lost, not this \
+         program and not anybody. They are shown once.",
+        phrase::WORDS
+    )));
+    lines.push(String::new());
+    lines
+}
+
+/// The words, numbered as the paper should number them, down three columns.
+///
+/// Each line holds words, so each is wiped once it has been printed, as
+/// everything else here that has held the key is.
+fn the_words(phrase: &Phrase) -> Vec<zeroize::Zeroizing<String>> {
+    use std::fmt::Write as _;
+
+    let words: Vec<&str> = phrase.words().collect();
+    let rows = words.len().div_ceil(3);
+    (0..rows)
+        .map(|row| {
+            // Three columns of at most fifteen characters, so it never grows.
+            let mut line = zeroize::Zeroizing::new(String::with_capacity(48));
+            for column in 0..3usize {
+                let at = column.saturating_mul(rows).saturating_add(row);
+                if let Some(word) = words.get(at) {
+                    let _ = write!(line, "  {:>2}. {word:<9}", at.saturating_add(1));
+                }
+            }
+            line
+        })
+        .collect()
+}
+
+/// How many tries a person gets at each word asked back.
+const TRIES: usize = 3;
+
+/// Asks for the words at `positions` back, and refuses unless each comes back
+/// as it was shown.
+///
+/// What it guards against is a phrase that was never written down, or written
+/// down wrong: either is found out on the day the words are needed, with the
+/// computer they were made on already gone. Three words of twenty four cannot
+/// prove the other twenty one were copied, and they do prove the paper exists
+/// and is being read from.
+fn check_the_words(
+    phrase: &Phrase,
+    positions: [usize; 3],
+    input: &mut impl std::io::BufRead,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let _ = writeln!(output);
+    for line in
+        wrapped("To check they were written down, type back three of them, read from the paper.")
+    {
+        let _ = writeln!(output, "{line}");
+    }
+    for position in positions {
+        let Some(shown) = phrase.word(position) else {
+            return Err(format!("there is no word {position} to ask for"));
+        };
+        let mut matched = false;
+        for _ in 0..TRIES {
+            let _ = write!(output, "word {position}: ");
+            let _ = output.flush();
+            let mut answer = zeroize::Zeroizing::new(String::new());
+            let read = input
+                .read_line(&mut answer)
+                .map_err(|error| format!("could not read the answer: {error}"))?;
+            if read == 0 {
+                // The question is still on the line, unanswered.
+                let _ = writeln!(output);
+                return Err(NOTHING_WRITTEN_ON_EOF.to_owned());
+            }
+            if answer.trim().eq_ignore_ascii_case(shown) {
+                matched = true;
+                break;
+            }
+            let _ = writeln!(
+                output,
+                "That is not word {position}. Look at the paper again."
+            );
+        }
+        if !matched {
+            return Err(format!(
+                "word {position} did not come back as it was shown, {TRIES} times, so no key \
+                 file was written and nothing was paid to these words. They are void: cross \
+                 them out, and run `cairn-wallet new` again for new ones."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What `new` says when its input ends before the words came back.
+const NOTHING_WRITTEN_ON_EOF: &str = "the input ended before the words were typed back, so no \
+     key file was written and the words shown are void. Run `cairn-wallet new` at a terminal. \
+     A script that keeps the words itself can pass --unsafe-skip-word-check.";
+
+/// The most `restore` reads, far past twenty four words of any spelling.
+const MOST_TYPED: usize = 4_096;
+
+/// Reads lines until twenty four words have arrived or the input ends.
+///
+/// Words across several lines are what somebody copying four or six to a line
+/// off paper types, and one line is what a script pipes in. A count other than
+/// twenty four is left for the phrase to refuse, by its count.
+fn read_the_words(input: &mut impl std::io::BufRead) -> Result<zeroize::Zeroizing<String>, String> {
+    // Room made once, so the buffer the words arrive in never grows and leaves
+    // a copy behind.
+    let mut typed = zeroize::Zeroizing::new(String::with_capacity(MOST_TYPED));
+    let mut limited = std::io::Read::take(input, u64::try_from(MOST_TYPED).unwrap_or(u64::MAX));
+    loop {
+        let read = std::io::BufRead::read_line(&mut limited, &mut typed)
+            .map_err(|error| format!("could not read the words: {error}"))?;
+        if read == 0 || typed.split_whitespace().count() >= phrase::WORDS {
+            return Ok(typed);
+        }
+    }
+}
+
+/// What a restore from the words does not bring back, and where it is.
+///
+/// The finding of `audit_what_a_restore_on_a_new_machine_finds`: a wallet
+/// that starts from its key and an empty data directory finds the money in
+/// the set every node holds, and what fell out of it in the last few blocks,
+/// and nothing that fell out before that.
+fn say_what_the_words_do_not_carry(path: &std::path::Path) {
+    say(
+        "The words bring back the key, and not this wallet's account of where its money sits. \
+         A wallet started from the words alone, on a machine that never ran it, finds the money \
+         still in the set every node holds and what fell out of it in the last few blocks; \
+         money that fell out before that is found only with history.dat, the account the \
+         wallet keeps in its --data directory. So back that up as well, after the wallet has \
+         run, and put it back in the --data directory before a restored wallet starts. This \
+         copies it, with the key file, given the same --data as the wallet if it runs with one:",
     );
     println!();
     println!(
         "  cairn-wallet backup {} --into <directory>",
         path.display()
     );
-    if let Some(note) = keyfile::what_was_not_checked() {
-        say(note);
-    }
-    Ok(())
 }
 
 /// Copies the key file and the account beside the chain into one directory.
@@ -384,6 +623,12 @@ fn back_up(arguments: &[String]) -> Result<(), String> {
     say(
         "The key file is plain text with no passphrase. Anyone who can read either copy of \
          it holds the money, so keep the backup where only you can reach it.",
+    );
+    say(
+        "A key made from twenty four words is made again from them by `cairn-wallet restore`, \
+         and the words are the backup of the key. A key made before `new` showed words has \
+         none and cannot be given any: for it, the key file and its copies are the only ones \
+         there are.",
     );
     if let Some(note) = keyfile::what_was_not_checked() {
         say(note);
@@ -1259,6 +1504,7 @@ fn how_the_wait_ended(waited: Waited, patience: u64) -> Vec<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
+    use super::read_the_words;
     use super::what_was_taken_back;
     use super::when_nobody_took_it;
     use super::{about_to_pay, answered_yes, ask, how_the_wait_ended, must_ask};
@@ -1981,6 +2227,24 @@ mod tests {
         assert!(
             out_of_reach.contains("14 blocks from a chain it cannot switch to"),
             "{out_of_reach}"
+        );
+    }
+
+    /// Twenty four words end the reading, without waiting for the input to
+    /// end: at a terminal it does not end until the person says so, and a
+    /// restore that waited for that would sit there with the words typed.
+    #[test]
+    fn twenty_four_words_end_the_reading_without_waiting_for_more() {
+        let words = vec!["abandon"; 24].join(" ");
+        let mut input = std::io::Cursor::new(format!("{words}\nnot read\n"));
+        let typed = read_the_words(&mut input).unwrap();
+        assert_eq!(typed.trim(), words, "it read past the twenty fourth word");
+
+        let mut short = std::io::Cursor::new("abandon abandon\n".to_owned());
+        assert_eq!(
+            read_the_words(&mut short).unwrap().trim(),
+            "abandon abandon",
+            "and input that ends early is handed on as it is, for the count to refuse"
         );
     }
 }

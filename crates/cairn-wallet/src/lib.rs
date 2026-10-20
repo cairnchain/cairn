@@ -15,6 +15,7 @@ pub mod history;
 pub mod keyfile;
 mod page;
 pub mod pending;
+pub mod phrase;
 pub mod serve;
 
 use std::cell::Cell;

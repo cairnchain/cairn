@@ -54,7 +54,7 @@ fn text(path: &Path) -> &str {
 /// A key made by `new`, and a data directory holding an account for it.
 fn a_wallet_with_an_account(home: &Path) -> (PathBuf, PathBuf) {
     let key = home.join("mine.key");
-    let made = wallet(&["new", text(&key)]);
+    let made = wallet(&["new", text(&key), "--unsafe-skip-word-check"]);
     assert!(made.status.success(), "the key was not made");
     let data = home.join("data");
     std::fs::create_dir_all(&data).unwrap();
@@ -72,7 +72,7 @@ fn a_wallet_with_an_account(home: &Path) -> (PathBuf, PathBuf) {
 fn making_a_key_says_the_account_has_to_be_kept_with_it() {
     let home = scratch("new");
     let key = home.join("mine.key");
-    let made = wallet(&["new", text(&key)]);
+    let made = wallet(&["new", text(&key), "--unsafe-skip-word-check"]);
     // As a paragraph rather than as the lines a terminal is given.
     let told = said(&made).split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(made.status.success(), "the key was not made");
@@ -256,7 +256,9 @@ fn a_backup_never_writes_over_a_file() {
 fn a_key_without_its_account_is_not_called_a_backup() {
     let home = scratch("alone");
     let key = home.join("mine.key");
-    assert!(wallet(&["new", text(&key)]).status.success());
+    assert!(wallet(&["new", text(&key), "--unsafe-skip-word-check"])
+        .status
+        .success());
     let data = home.join("never-ran");
     let into = home.join("wallet-backup");
 
