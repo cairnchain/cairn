@@ -488,7 +488,7 @@ fn a_visitor_read_first_cannot_end_a_newcomer_s_choice_on_a_floor_difficulty_bra
 /// the seconds the honest chain takes over the loopback. A visitor that does
 /// send the block past the depth, as above, ends its turn at once. One that
 /// sends its blocks a window apart renews its turn once for each height it
-/// raises the branch to, which is at most the depth the node undoes.
+/// raises the branch to, up to the bound the last test measures.
 #[test]
 fn a_visitor_that_goes_quiet_at_the_depth_holds_a_newcomer_off_for_one_answering_window() {
     let took =

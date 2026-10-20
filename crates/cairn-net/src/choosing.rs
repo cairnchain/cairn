@@ -3136,6 +3136,38 @@ mod tests {
         );
     }
 
+    /// A read's bound is measured from a clock that stepped back as every
+    /// other moment here is: from the step. Without it the turn ran for the
+    /// step as well, an hour of a dripping read for an hour of correction.
+    #[test]
+    fn a_read_s_bound_is_measured_from_a_clock_that_went_back() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, false, 10_000);
+        chooser.noted(2, Some(host(2)), 500, LONG, false, 10_000);
+        assert_eq!(
+            chooser.step(10_002, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Read)
+        );
+        let stepped_at = 10_002 - 3_600;
+        let bound = read_at_most(JOIN_RATHER_THAN_READ);
+        let mut height = 0;
+        let mut now = stepped_at;
+        while now < stepped_at + bound {
+            chooser.delivered(1, height, u128::from(height) * 10, now);
+            height += 1;
+            assert_eq!(
+                chooser.step(now, true, 0, JoinProgress::NothingYet, &[1, 2]),
+                Step::Quiet
+            );
+            now += FIRST_ANSWER_PATIENCE - 1;
+        }
+        assert_eq!(
+            chooser.step(stepped_at + bound, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Read),
+            "a read's bound ran on past the clock's step back"
+        );
+    }
+
     /// **An honest read at the slowest rate a read is allowed, whose first
     /// block comes at the end of its answering window, is not cut off before
     /// it takes the node past the depth.**
