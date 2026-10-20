@@ -137,6 +137,13 @@ flags=(
   "--remap-path-prefix=$(native "$sysroot")=/rustc"
   "--remap-path-prefix=$(native "$root")=/cairn"
 )
+# Microsoft's linker writes the time it ran into every program's header and a
+# fresh identifier into the record that names its debug file. Those twenty
+# bytes were all that differed between two builds of one commit. /Brepro has
+# it write a hash of the program's contents in both places instead.
+case "$target" in
+  *windows-msvc) flags+=("-Clink-arg=/Brepro") ;;
+esac
 # Cargo splits this variable on one character no path contains, unlike
 # RUSTFLAGS, which it splits on spaces.
 CARGO_ENCODED_RUSTFLAGS=$(IFS=$'\x1f'; printf '%s' "${flags[*]}")
