@@ -224,7 +224,11 @@ jobs:
           # (`deploy/DOWNLOAD.txt`, as README.txt). A correction to those
           # waited here for an unrelated change to the code. The step that
           # gathers the archive copies exactly these three.
-          paths="$paths Cargo.lock rust-toolchain.toml Cargo.toml web docs/*.html docs/*.css LICENSE-MIT LICENSE-APACHE deploy/DOWNLOAD.txt"
+          #
+          # And the two files that make the archives, which name the container
+          # the Linux programs are compiled in and how each archive is packed:
+          # a change to either changes the bytes people download.
+          paths="$paths Cargo.lock rust-toolchain.toml Cargo.toml web docs/*.html docs/*.css LICENSE-MIT LICENSE-APACHE deploy/DOWNLOAD.txt deploy/release-build.sh deploy/release-zip.py"
           echo "built from:" $built
 
           # Unquoted on purpose: this is a list of paths and not one path.
@@ -471,6 +475,22 @@ jobs:
             -f ref=main
           echo "::notice::v$VERSION is written on main as $SHA, and the run that releases it has been started"
 
+  # Every archive, built twice on separate machines by build.yml, which also
+  # compares the two copies and hands on only Linux archives whose copies
+  # agree to the byte. That is what lets anybody rebuild a release from its
+  # tag and get the files published here (`deploy/rebuild.sh`), and so check
+  # them without taking GitHub's word or ours.
+  #
+  # Each copy is built from the commit this run was started for, the one
+  # `verify` checked, the attestation names and the tag goes on, and from no
+  # other. It was once the version commit a scheduled run had just made,
+  # checked out by name, one commit above the one this run was started for.
+  # The build vouched that the two differed in version numbers only, and they
+  # did, but the attestation is GitHub's account of the run and named the
+  # commit below: every scheduled release was attested as built from a tree
+  # whose Cargo.toml gives the version before. A version commit is released
+  # now by a run started for it (see `bump`), so there is no other commit to
+  # name there.
   build:
     needs: [decide, verify]
     # An ordinary push builds nothing here. The checks that run on every commit
@@ -479,103 +499,11 @@ jobs:
     if: needs.decide.outputs.release == 'true' || needs.decide.outputs.dry == 'true'
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macos-apple-silicon
-            os: macos-latest
-            target: aarch64-apple-darwin
-          - name: macos-intel
-            os: macos-latest
-            target: x86_64-apple-darwin
-          # musl rather than glibc: a binary linked against the glibc of the
-          # machine that built it refuses to start on an older one, which is
-          # exactly the machine a cheap server is.
-          - name: linux-x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - name: linux-arm64
-            os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-          - name: windows-x86_64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-    steps:
-      # A release has to be one commit built five times, and it is the commit
-      # this run was started for: the one `verify` checked, the one the
-      # attestation below will name, and the one the tag goes on. The default
-      # ref, and nothing else.
-      #
-      # It was the version commit a scheduled run had just made, checked out by
-      # name, one commit above the one this run was started for. The build
-      # vouched that the two differed in version numbers only, and they did,
-      # but the attestation is GitHub's account of the run and named the
-      # commit below: every scheduled release was attested as built from a
-      # tree whose Cargo.toml gives the version before. A version commit is
-      # released now by a run started for it (see `bump`), so there is no
-      # other commit to name here.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Install the toolchain this repository pins
-        run: rustup show
-
-      - run: rustup target add ${{ matrix.target }}
-
-      - name: Install the musl linker
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
-
-      # --locked so the release is built from the dependency versions in
-      # Cargo.lock and not from whatever resolved newest this morning.
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin cairnd --bin cairn-wallet --bin cairn-explorer
-
-      - name: Gather what goes in the archive
-        shell: bash
-        run: |
-          # A dispatch is a dry run only when it names a version: the one a
-          # scheduled run starts names none, and releases the version on main.
-          version="${{ needs.decide.outputs.version }}"
-          if [ "${{ needs.decide.outputs.dry }}" = "true" ]; then
-            version="${{ inputs.version }}"
-          fi
-          # The folder carries the version; the archive does not, so the
-          # link on the website never has to be edited again.
-          folder="cairn-${version}-${{ matrix.name }}"
-          echo "FOLDER=$folder" >> "$GITHUB_ENV"
-          echo "ARCHIVE=cairn-${{ matrix.name }}" >> "$GITHUB_ENV"
-          mkdir "$folder"
-          suffix=""
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            suffix=".exe"
-          fi
-          for program in cairnd cairn-wallet cairn-explorer; do
-            cp "target/${{ matrix.target }}/release/${program}${suffix}" "$folder/"
-          done
-          # Every file copied here from the repository is in the list of
-          # paths `decide` compares, or a change to it is never released.
-          cp LICENSE-MIT LICENSE-APACHE "$folder/"
-          cp deploy/DOWNLOAD.txt "$folder/README.txt"
-          printf '%s\n' "$version" > "$folder/VERSION"
-
-      - name: Archive
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "${ARCHIVE}.zip" "$FOLDER" > /dev/null
-          else
-            tar czf "${ARCHIVE}.tar.gz" "$FOLDER"
-          fi
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ matrix.name }}
-          path: |
-            *.tar.gz
-            *.zip
-          if-no-files-found: error
+    uses: ./.github/workflows/build.yml
+    with:
+      # A dispatch is a dry run only when it names a version: the one a
+      # scheduled run starts names none, and releases the version on main.
+      version: ${{ needs.decide.outputs.dry == 'true' && inputs.version || needs.decide.outputs.version }}
 
   publish:
     needs: [decide, build]
@@ -621,10 +549,12 @@ jobs:
           fi
           echo "releasing $here, which holds v$VERSION"
 
+      # The first copy of each archive, which build.yml hands on as `release`
+      # once it has compared it with the second.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          name: release
           path: downloads
-          merge-multiple: true
 
       # One file listing every archive and its hash, so a download can be
       # checked with a command every operating system already has.
