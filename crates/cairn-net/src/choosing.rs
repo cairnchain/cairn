@@ -3162,7 +3162,13 @@ mod tests {
             now += FIRST_ANSWER_PATIENCE - 1;
         }
         assert_eq!(
-            chooser.step(stepped_at + bound, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            chooser.step(
+                stepped_at + bound,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2]
+            ),
             Step::Ask(2, Approach::Read),
             "a read's bound ran on past the clock's step back"
         );
