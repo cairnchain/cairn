@@ -2334,16 +2334,11 @@ impl Wallet {
     /// copies, a note is lost to the account only to that many notes paid to
     /// this one key and left unspent, which is a flood aimed at it.
     pub fn read_from_the_first_block(&self, patience: Duration) -> ReadFromTheFirst {
-        let mut last = self.node.height();
-        let mut still_since = Instant::now();
+        let mut stillness = Stillness::from(self.node.height(), Instant::now());
         loop {
             self.follow();
             let look = self.look();
-            if look.height != last {
-                last = look.height;
-                still_since = Instant::now();
-            }
-            let still = still_since.elapsed();
+            let still = stillness.saw(look.height, Instant::now());
             if settled(&look, still) {
                 // A directory that could not be told is read from the first
                 // block again at its next start, which on a node holding its
@@ -2352,7 +2347,7 @@ impl Wallet {
                 self.follow_to_the_tip();
                 return ReadFromTheFirst::Reached;
             }
-            if still >= patience {
+            if read_stands_still(&look, still, patience) {
                 return ReadFromTheFirst::Stopped {
                     archivists: self.node.archiving_peers(),
                     height: look.height,
@@ -3828,6 +3823,44 @@ impl Look {
     }
 }
 
+/// How long the chain a wallet watches has stood still, from what each look
+/// at it saw.
+struct Stillness {
+    last: Option<u64>,
+    since: Instant,
+}
+
+impl Stillness {
+    fn from(height: Option<u64>, now: Instant) -> Self {
+        Self {
+            last: height,
+            since: now,
+        }
+    }
+
+    /// How long the chain has stood still, given that a look at `now` saw it
+    /// at `height`: nothing at all when that is a height it was not at.
+    fn saw(&mut self, height: Option<u64>, now: Instant) -> Duration {
+        if height != self.last {
+            self.last = height;
+            self.since = now;
+        }
+        now.saturating_duration_since(self.since)
+    }
+}
+
+/// Whether a read from the first block that has stood still for `still` stops
+/// there, handed `patience`.
+///
+/// Only one that is waiting on blocks: with nobody to ask, with no chain yet,
+/// or below a chain a peer claims. A chain standing still with somebody to ask
+/// and nobody claiming more is at the tip, and settles there in
+/// [`SETTLED_FOR`] however short the patience: stopped instead, a read handed
+/// a patience shorter than that could never finish.
+fn read_stands_still(look: &Look, still: Duration, patience: Duration) -> bool {
+    still >= patience && (look.peers == 0 || look.height.is_none() || look.behind().is_some())
+}
+
 /// Whether a wallet whose chain has held still for `still` can stop waiting.
 fn settled(look: &Look, still: Duration) -> bool {
     look.peers > 0
@@ -5284,6 +5317,76 @@ mod tests {
     /// block is in the program. Nothing asked what a ledger on its way or a
     /// peer ahead did to the wait, so a wallet that answered two seconds into
     /// a handover, from block nought, passed.
+    #[test]
+    fn a_read_from_the_first_block_stops_only_standing_still_short_of_the_chain() {
+        use super::read_stands_still;
+        let patience = Duration::from_secs(5);
+        let at_the_tip = super::Look {
+            height: Some(100),
+            peers: 1,
+            joining: Joined::No,
+            claim: None,
+            out_of_reach: 0,
+        };
+        let below = super::Look {
+            claim: Some((900, 11)),
+            ..at_the_tip
+        };
+        let alone = super::Look {
+            peers: 0,
+            ..at_the_tip
+        };
+        let nothing = super::Look {
+            height: None,
+            ..at_the_tip
+        };
+        for (look, why) in [
+            (below, "below a chain a peer claims"),
+            (alone, "with nobody to ask"),
+            (nothing, "with no chain at all"),
+        ] {
+            assert!(
+                read_stands_still(&look, patience, patience),
+                "a read standing still for its whole patience {why} went on waiting"
+            );
+            assert!(
+                !read_stands_still(&look, patience - Duration::from_millis(1), patience),
+                "a read standing still for less than its patience {why} stopped"
+            );
+        }
+        assert!(
+            !read_stands_still(&at_the_tip, patience * 10, patience),
+            "a read standing at a tip nobody claims more than stopped rather than settling"
+        );
+    }
+
+    #[test]
+    fn a_read_stands_still_from_the_last_look_that_saw_it_move() {
+        let start = Instant::now();
+        let mut stillness = super::Stillness::from(Some(4), start);
+        let later = start + Duration::from_secs(3);
+        assert_eq!(
+            stillness.saw(Some(4), later),
+            Duration::from_secs(3),
+            "a chain seen at the same height has stood still since the first look"
+        );
+        assert_eq!(
+            stillness.saw(Some(5), later),
+            Duration::ZERO,
+            "a chain seen at a new height has not stood still at all"
+        );
+        assert_eq!(
+            stillness.saw(Some(5), later + Duration::from_secs(1)),
+            Duration::from_secs(1),
+            "and stands still from the look that saw it move"
+        );
+        assert_eq!(
+            stillness.saw(None, later + Duration::from_secs(2)),
+            Duration::ZERO,
+            "a chain gone is a chain that moved"
+        );
+    }
+
     #[test]
     fn the_wait_for_the_chain_ends_only_when_nothing_says_it_is_on_its_way() {
         let long = SETTLED_FOR + Duration::from_secs(1);
