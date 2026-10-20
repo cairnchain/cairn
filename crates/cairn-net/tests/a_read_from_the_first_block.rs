@@ -512,3 +512,31 @@ fn a_read_from_the_first_block_starts_only_over_a_directory_holding_no_chain() {
         carried_on.err()
     );
 }
+
+/// **A marker that cannot be taken off the disk is said, and the node goes on
+/// reading from the first block.**
+///
+/// Only a marker already gone is no error: a directory standing where the
+/// marker is, which no file removal takes away, is a disk still saying the
+/// read is under way, and a node told otherwise would be opened at its next
+/// start as a newcomer to be handed a ledger.
+#[test]
+fn a_marker_that_will_not_go_is_said_and_the_read_goes_on() {
+    let directory = scratch("marker-stays");
+    std::fs::create_dir_all(directory.join(READING_FROM_THE_FIRST).join("held")).unwrap();
+    let (node, _) = Node::open_recovering(rules(), loopback(), &directory, &[]).unwrap();
+    let finished = node.finished_reading();
+    let still = node.reads_from_the_first_block();
+    node.shutdown();
+    drop(node);
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        finished.is_err(),
+        "a marker that could not be taken off the disk was said to be gone"
+    );
+    assert!(
+        still,
+        "and the node stopped reading from the first block while its disk still said it was"
+    );
+}
