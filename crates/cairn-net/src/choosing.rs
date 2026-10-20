@@ -503,12 +503,27 @@ impl Chooser {
     /// before the others. Nothing else changes. A read is weighed against the
     /// other claims before it ends the choice, as any read is
     /// ([`Self::must_carry`]), and the turns go round as they do for anyone.
+    ///
+    /// Only when `from_the_first`, so a node is started with one line whichever
+    /// it is.
     #[must_use]
-    pub fn reading_from_the_first(self) -> Self {
+    pub fn reading_from_the_first(self, from_the_first: bool) -> Self {
         Self {
-            from_the_first: true,
+            from_the_first,
             ..self
         }
+    }
+
+    /// Whether this chooser is a node's that reads from the first block.
+    #[must_use]
+    pub fn reads_from_the_first(&self) -> bool {
+        self.from_the_first
+    }
+
+    /// The read from the first block reached the tip, and the node is an
+    /// ordinary one from now on.
+    pub fn finished_reading(&mut self) {
+        self.from_the_first = false;
     }
 
     /// Notes that `peer` said it keeps the whole cold set, which an archivist
@@ -3000,7 +3015,7 @@ mod tests {
     #[test]
     fn a_read_from_the_first_block_asks_the_archivist_first() {
         let mut chooser =
-            an_archivist_beside_a_heavier_peer(Chooser::new().reading_from_the_first());
+            an_archivist_beside_a_heavier_peer(Chooser::new().reading_from_the_first(true));
         assert_eq!(
             chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
             Step::Ask(2, Approach::Read),
@@ -3041,7 +3056,7 @@ mod tests {
     #[test]
     fn the_last_resort_of_a_read_from_the_first_block_is_the_archivist() {
         let mut chooser =
-            an_archivist_beside_a_heavier_peer(Chooser::new().reading_from_the_first());
+            an_archivist_beside_a_heavier_peer(Chooser::new().reading_from_the_first(true));
         chooser.failed(1, 100);
         chooser.failed(2, 100);
         let later = 100 + RETRY_PAUSE;
@@ -3065,7 +3080,7 @@ mod tests {
     #[test]
     fn who_keeps_every_block_is_forgotten_with_the_connection_and_the_choice() {
         let mut chooser =
-            an_archivist_beside_a_heavier_peer(Chooser::new().reading_from_the_first());
+            an_archivist_beside_a_heavier_peer(Chooser::new().reading_from_the_first(true));
         assert_eq!(
             chooser.step(100, true, 0, JoinProgress::NothingYet, &[1]),
             Step::Quiet,

@@ -357,13 +357,6 @@ fn the_account_in(data: &Path) -> (usize, usize) {
 /// after a restart. And it spends: a payment of more than the two notes the
 /// finding found reaches for the oldest, and a miner holding its own copy of
 /// the chain carries it.
-///
-/// The places are copied by the wallet every round of its read, and the node
-/// it copies from lets go of one only when more than `WATCHED_NOTES` of this
-/// key's notes, each worth more, are fallen and unspent at once. The second
-/// half of this test is the copy cadence that bound is about: the whole chain
-/// is read by the node before the account copies anything, and nothing is
-/// lost by that.
 #[test]
 fn a_recovery_on_a_new_machine_finds_every_payment_and_spends_the_oldest() {
     let (directory, key_file) = a_key_on_a_new_machine("recovered");
@@ -400,21 +393,6 @@ fn a_recovery_on_a_new_machine_finds_every_payment_and_spends_the_oldest() {
     });
     wallet.shutdown();
     drop(wallet);
-
-    // The same read with the account copying nothing until the node is at
-    // the tip: the cadence of the copies costs nothing short of the ceiling.
-    let late = directory.join("late");
-    let (copied_late, _) = Wallet::recover(&key_file, params(), &late).unwrap();
-    assert!(copied_late.reach(keeper.address()));
-    wait_for("the node to read the whole chain", || {
-        copied_late.node().height() == Some(tip)
-    });
-    let nothing_copied_yet = !late.join("history.dat").exists();
-    let read_late = copied_late.read_from_the_first_block(STILL_FOR);
-    let late_total = copied_late.holdings().total();
-    let late_account = the_account_in(&late);
-    copied_late.shutdown();
-    drop(copied_late);
     keeper.shutdown();
     drop(keeper);
     let _ = std::fs::remove_dir_all(&directory);
@@ -463,15 +441,51 @@ fn a_recovery_on_a_new_machine_finds_every_payment_and_spends_the_oldest() {
         1,
         "a miner checking against its own copy of the chain carried the payment"
     );
+}
+
+/// **A recovery whose account copies nothing until the node has read the
+/// whole chain loses no place.**
+///
+/// The wallet copies the places out of its node every round of its read, and
+/// the node it copies from lets go of one only when more than `WATCHED_NOTES`
+/// of this key's notes, each worth more, are fallen and unspent at once. So
+/// how often the copies are made is no part of what can be lost, short of
+/// that many notes paid to this one key, which is a flood aimed at it. Here
+/// the copies are as rare as they can be: the node reads the whole chain
+/// before the account copies anything at all, and the account comes out the
+/// same as one copied all along.
+#[test]
+fn a_recovery_whose_account_copies_nothing_until_the_tip_loses_no_place() {
+    let (directory, key_file) = a_key_on_a_new_machine("copied-late");
+    let tip = (the_chain().len() - 1) as u64;
+    let keeper = an_archivist(&directory.join("keeper"));
+    let late = directory.join("late");
+    let (wallet, _) = Wallet::recover(&key_file, params(), &late).unwrap();
+    assert!(wallet.reach(keeper.address()));
+    wait_for("the node to read the whole chain", || {
+        wallet.node().height() == Some(tip)
+    });
+    let nothing_copied_yet = !late.join("history.dat").exists();
+    let read = wallet.read_from_the_first_block(STILL_FOR);
+    let total = wallet.holdings().total();
+    let account = the_account_in(&late);
+    wallet.shutdown();
+    drop(wallet);
+    keeper.shutdown();
+    drop(keeper);
+    let _ = std::fs::remove_dir_all(&directory);
 
     assert!(
         nothing_copied_yet,
         "fixture: the account copied nothing during the read"
     );
-    assert_eq!(read_late, ReadFromTheFirst::Reached);
+    assert_eq!(read, ReadFromTheFirst::Reached);
     assert_eq!(
-        (late_total, late_account),
-        (times(reward(), deep_payments() + 2), account),
+        (total, account),
+        (
+            times(reward(), deep_payments() + 2),
+            (12, deep_payments() as usize + 1)
+        ),
         "an account that copied the places only once the node had read the whole chain lost \
          some of them"
     );

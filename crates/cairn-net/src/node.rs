@@ -1750,10 +1750,6 @@ struct Shared {
     /// A node that names no port is one the protocol already has a place for:
     /// its peers answer it and write nothing down.
     offers_its_address: bool,
-    /// Whether this node reads the chain from the first block rather than
-    /// being handed a ledger, until [`Node::finished_reading`] says it reached
-    /// the tip: see [`READING_FROM_THE_FIRST`].
-    reads_from_the_first: AtomicBool,
     /// Drawn once at start. A node behind a router cannot recognise its own
     /// address coming back from a peer, but it can recognise this.
     nonce: u64,
@@ -5284,7 +5280,7 @@ impl Node {
         probation: Option<Undertaking>,
         unread: Option<Unread>,
         offers_its_address: bool,
-        reads_from_the_first: bool,
+        from_the_first: bool,
     ) -> Result<Self, NodeError> {
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
@@ -5299,17 +5295,12 @@ impl Node {
         };
         // The anchors a book was read back with are the ones on the disk.
         let anchors_written_at = book.anchor_changes();
-        let choosing = if reads_from_the_first {
-            Chooser::reaching(chain.undo_limit()).reading_from_the_first()
-        } else {
-            Chooser::reaching(chain.undo_limit())
-        };
+        let choosing = Chooser::reaching(chain.undo_limit()).reading_from_the_first(from_the_first);
 
         let shared = Arc::new(Shared {
             params,
             address,
             offers_its_address,
-            reads_from_the_first: AtomicBool::new(reads_from_the_first),
             nonce: fresh_nonce(),
             neighbourhood_salt: fresh_nonce(),
             chain: Mutex::new(chain),
@@ -6173,7 +6164,7 @@ impl Node {
     /// opened by [`Self::open_recovering`] does until it is told it reached
     /// the tip.
     pub fn reads_from_the_first_block(&self) -> bool {
-        self.shared.reads_from_the_first.load(Ordering::SeqCst)
+        self.shared.choosing().reads_from_the_first()
     }
 
     /// Says the read from the first block reached the tip, so this directory
@@ -6192,9 +6183,7 @@ impl Node {
                 Err(error) => return Err(error),
             }
         }
-        self.shared
-            .reads_from_the_first
-            .store(false, Ordering::SeqCst);
+        self.shared.choosing().finished_reading();
         Ok(())
     }
 

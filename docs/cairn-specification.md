@@ -2961,6 +2961,15 @@ waits for the next, so a claim is asked within two rounds of a full peer table
 however many addresses the claims beside it come from, or within three when
 its own machine's claims have been failing.
 
+A node MAY read the chain from the first block rather than be handed a ledger,
+which is how a wallet that lost its record of where its notes fell learns it
+again. Such a node SHOULD remember on its disk that it is reading, until it
+reaches the tip, so that a restart part way is not handed a ledger. Every turn
+of its choice is a read, and it MAY ask a peer whose introduction says it keeps
+the cold set before a heavier claim from one that does not, since only such a
+peer is sure to keep every block. That order is all the introduction buys: the
+read is held to the claims beside it as any read is.
+
 ### What a node MUST refuse
 
 Below the message set, a frame is a four byte network marker, a four byte
