@@ -43,6 +43,54 @@ const SETTLING: u64 = 2;
 /// lasting.
 const FIRST_ANSWER_PATIENCE: u64 = 30;
 
+/// Blocks a second that a read the choice asks for is allowed to arrive at,
+/// at the slowest: see [`read_at_most`].
+///
+/// Two, which is half of what a peer's allowance lets through of full blocks,
+/// about forty of them a ten second window, so it is the serving side's own
+/// pace on a link that carries half of it: about two megabits a second of
+/// full blocks, and a few hundred bytes a second of the near empty blocks a
+/// young network mines. A read over the loopback goes at about a hundred a
+/// second. Slower than this, an honest peer is not cut off from anything it
+/// sent: see [`read_at_most`].
+const SLOWEST_READ: u64 = 2;
+
+/// The longest, in seconds, one turn of a read the choice asks for lasts on a
+/// network whose nodes undo `undo_limit` blocks, however it keeps delivering.
+///
+/// An answering window for the first block, and then every block from the
+/// first to the one past the depth, `undo_limit + 2` of them, at
+/// [`SLOWEST_READ`]. The whole depth whatever the node already holds, because
+/// the branch read can part from the first block. Nine minutes and three seconds on a network
+/// undoing a thousand and twenty four, thirty five seconds on one undoing
+/// eight.
+///
+/// Each block that takes the branch higher renews a read's answering window
+/// (see [`Chooser::delivered`]), and that was all a read was held to: a peer
+/// sending one block a window, never the one past the depth that would have
+/// been weighed, kept the turn for as many windows as the depth, about eight
+/// and a half hours on a network undoing a thousand and twenty four, while
+/// the honest chain beside it waited. The window is still what ends a read
+/// that stops; this is what ends one that does not stop and does not finish.
+///
+/// A turn this ends is ended as one whose branch fell short is
+/// ([`Chooser::fell_short`]): the peer is ranked from then on by the branch
+/// it delivered, nothing is held against it, and the next turn goes to the
+/// heaviest claim left. So an honest peer slower than [`SLOWEST_READ`] loses
+/// none of what it sent, which the node holds, and is read on from there at
+/// its next turn.
+///
+/// One connection's turn. A stranger holding several connections is asked
+/// once for each in a rotation, as anybody is, so what it can hold a newcomer
+/// for grows with the connections it holds, up to the peer table: see
+/// [`ASKED_WITHIN`].
+///
+/// Public so a test names this number rather than restating it.
+#[must_use]
+pub const fn read_at_most(undo_limit: u64) -> u64 {
+    FIRST_ANSWER_PATIENCE.saturating_add(undo_limit.saturating_add(2).div_ceil(SLOWEST_READ))
+}
+
 /// Seconds a join attempt may run in total before the claim behind it stops
 /// counting.
 ///
@@ -157,8 +205,8 @@ const TURN: u64 = FIRST_ANSWER_PATIENCE.saturating_add(1);
 /// against it.
 ///
 /// What it does not cover, and must not be read as covering: a turn somebody
-/// answers slowly, which runs up to [`ATTEMPT_PATIENCE`] rather than a
-/// [`TURN`], and a claim from a machine waiting out a pause, which is passed
+/// answers slowly, which runs up to [`ATTEMPT_PATIENCE`] for a join and
+/// [`read_at_most`] for a read rather than a [`TURN`], and a claim from a machine waiting out a pause, which is passed
 /// over for one rotation more (see [`Chooser::held_off`]).
 pub const ASKED_WITHIN: u64 = (crate::node::MAX_PEERS as u64)
     .saturating_mul(2)
@@ -430,8 +478,12 @@ pub struct Chooser {
     /// within that.
     first_short_at: Option<u64>,
     /// The highest a block delivered by the peer asked has taken the branch
-    /// this node follows in this turn: see [`Self::delivered`].
-    reached: Option<u64>,
+    /// this node follows in this turn, with the work the branch carried
+    /// there: see [`Self::delivered`].
+    reached: Option<(u64, u128)>,
+    /// When the turn of the peer asked began, which the blocks renewing its
+    /// answering window do not move: see [`read_at_most`].
+    turn_began: u64,
     /// The height from which a claim is long enough to be final: the depth
     /// a node on this network undoes, past which a node that followed the
     /// claim from nothing can never back out of it.
@@ -467,6 +519,7 @@ impl Default for Chooser {
             chains_held_off: HashMap::new(),
             first_short_at: None,
             reached: None,
+            turn_began: 0,
             final_from: JOIN_RATHER_THAN_READ,
             from_the_first: false,
             archivists: HashSet::new(),
@@ -688,10 +741,15 @@ impl Chooser {
     /// hashes: renewed by them, one connection kept a newcomer choosing for as
     /// long as it cared to. Counted by height, a turn is renewed at most once
     /// for each block up to the depth a node undoes.
-    pub fn delivered(&mut self, peer: u64, height: u64, now: u64) {
+    ///
+    /// And never past [`read_at_most`] from the moment the turn began, which
+    /// is what a block a window apart, each one higher, bought: the depth's
+    /// worth of windows. `work` is what the branch carries at `height`, which
+    /// is what the peer is ranked by if that bound ends its turn.
+    pub fn delivered(&mut self, peer: u64, height: u64, work: u128, now: u64) {
         if let Some((asked, _, at)) = self.asked.as_mut() {
-            if *asked == peer && self.reached.is_none_or(|top| height > top) {
-                self.reached = Some(height);
+            if *asked == peer && self.reached.is_none_or(|(top, _)| height > top) {
+                self.reached = Some((height, work));
                 *at = now;
             }
         }
@@ -1090,10 +1148,15 @@ impl Chooser {
                 // See [`Self::delivered`].
                 Approach::Read => age >= FIRST_ANSWER_PATIENCE,
             };
-            if !stalled {
+            if stalled {
+                self.failed(peer, now);
+            } else if approach == Approach::Read
+                && now.saturating_sub(self.turn_began) >= read_at_most(self.final_from)
+            {
+                self.read_ran_out(peer, now);
+            } else {
                 return Step::Quiet;
             }
-            self.failed(peer, now);
         }
 
         // Once something has been proven and its patience has run out, only
@@ -1126,7 +1189,25 @@ impl Chooser {
         self.turned = true;
         self.asked = Some((peer, approach, now));
         self.reached = None;
+        self.turn_began = now;
         Step::Ask(peer, approach)
+    }
+
+    /// The read asked of `peer` is still delivering at [`read_at_most`] and
+    /// has not ended the choice: its turn is over, and it is ranked by the
+    /// branch it delivered, as one whose branch fell short is.
+    ///
+    /// What it delivered is held, and nothing it did is held against it: an
+    /// honest peer on a link slower than [`SLOWEST_READ`] is read on from
+    /// there at its next turn. A read that delivered nothing ran out its
+    /// answering window long before this.
+    fn read_ran_out(&mut self, peer: u64, now: u64) {
+        let (height, work) = self.reached.unwrap_or_default();
+        let (host, shows_the_chain) = self
+            .claims
+            .get(&peer)
+            .map_or((None, false), |claim| (claim.host, claim.shows_the_chain));
+        self.fell_short(peer, host, height, work, shows_the_chain, now);
     }
 
     /// The most work anybody has shown and when, once the patience after the
@@ -1208,6 +1289,7 @@ impl Chooser {
         if let Some((_, _, at)) = self.asked.as_mut() {
             *at = (*at).min(now);
         }
+        self.turn_began = self.turn_began.min(now);
         if let Some((_, at)) = self.proven.as_mut() {
             *at = (*at).min(now);
         }
@@ -2480,7 +2562,7 @@ mod tests {
             Step::Ask(1, Approach::Read)
         );
         let delivered = 200 + FIRST_ANSWER_PATIENCE - 1;
-        chooser.delivered(1, 1, delivered);
+        chooser.delivered(1, 1, 10, delivered);
         assert_eq!(
             chooser.step(
                 200 + FIRST_ANSWER_PATIENCE,
@@ -2492,7 +2574,7 @@ mod tests {
             Step::Quiet,
             "a read that delivered a block was given up on a window after it was asked"
         );
-        chooser.delivered(2, 1, delivered + FIRST_ANSWER_PATIENCE - 1);
+        chooser.delivered(2, 1, 10, delivered + FIRST_ANSWER_PATIENCE - 1);
         assert_eq!(
             chooser.step(
                 delivered + FIRST_ANSWER_PATIENCE,
@@ -2972,15 +3054,15 @@ mod tests {
             chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2, 3]),
             Step::Ask(3, Approach::Read)
         );
-        chooser.delivered(3, 8, 210);
-        chooser.delivered(3, 9, 230);
+        chooser.delivered(3, 8, 80, 210);
+        chooser.delivered(3, 9, 90, 230);
         assert_eq!(
             chooser.step(250, true, 0, JoinProgress::NothingYet, &[1, 2, 3]),
             Step::Quiet,
             "a block taking the branch higher did not renew the read"
         );
-        chooser.delivered(3, 9, 255);
-        chooser.delivered(3, 8, 256);
+        chooser.delivered(3, 9, 95, 255);
+        chooser.delivered(3, 8, 85, 256);
         assert_eq!(
             chooser.step(
                 230 + FIRST_ANSWER_PATIENCE,
@@ -2991,6 +3073,152 @@ mod tests {
             ),
             Step::Ask(1, Approach::Join),
             "a block moving the branch no higher than the turn had taken it renewed it"
+        );
+    }
+
+    /// What a read's turn is bounded by, in the numbers its note states: nine
+    /// minutes and three seconds on a network undoing a thousand and twenty
+    /// four, of the order of ten, and thirty five seconds on the fixture of
+    /// the node-level tests, which undoes eight.
+    #[test]
+    fn a_read_s_turn_is_bounded_as_its_note_says() {
+        assert_eq!(read_at_most(JOIN_RATHER_THAN_READ), 543);
+        assert_eq!(read_at_most(8), 35);
+    }
+
+    /// **A read that keeps delivering, a block a little inside its window
+    /// after the last, each one higher, has its turn ended at its bound, is
+    /// ranked by the branch it delivered, and the next claim is asked.**
+    ///
+    /// Each block renews the answering window, so before the bound such a
+    /// peer held the choice for as many windows as the depth: about eight and
+    /// a half hours here.
+    #[test]
+    fn a_read_that_keeps_delivering_ends_its_turn_at_its_bound() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, false, 100);
+        chooser.noted(2, Some(host(2)), 500, LONG, false, 100);
+        assert_eq!(
+            chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Read)
+        );
+        let bound = read_at_most(JOIN_RATHER_THAN_READ);
+        let every = FIRST_ANSWER_PATIENCE - 1;
+        let mut height = 0;
+        for now in 201..200 + bound {
+            if (now - 200) % every == 0 {
+                chooser.delivered(1, height, u128::from(height) * 10, now);
+                height += 1;
+            }
+            assert_eq!(
+                chooser.step(now, true, 0, JoinProgress::NothingYet, &[1, 2]),
+                Step::Quiet,
+                "a read still delivering was ended {} seconds into its turn, inside its bound \
+                 of {bound}",
+                now - 200
+            );
+        }
+        let reached = height - 1;
+        assert_eq!(
+            chooser.step(200 + bound, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Read),
+            "a read delivering a block a window was still the turn at its bound of {bound} \
+             seconds"
+        );
+        assert_eq!(
+            chooser.must_carry(2, 200 + bound),
+            u128::from(reached) * 10,
+            "the peer whose read ran out is ranked by the branch it delivered, not by its claim"
+        );
+        assert!(
+            chooser.claims.get(&1).is_some_and(|claim| !claim.unbacked),
+            "and nothing is held against it"
+        );
+    }
+
+    /// A read's bound is measured from a clock that stepped back as every
+    /// other moment here is: from the step. Without it the turn ran for the
+    /// step as well, an hour of a dripping read for an hour of correction.
+    #[test]
+    fn a_read_s_bound_is_measured_from_a_clock_that_went_back() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, false, 10_000);
+        chooser.noted(2, Some(host(2)), 500, LONG, false, 10_000);
+        assert_eq!(
+            chooser.step(10_002, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Read)
+        );
+        let stepped_at = 10_002 - 3_600;
+        let bound = read_at_most(JOIN_RATHER_THAN_READ);
+        let mut height = 0;
+        let mut now = stepped_at;
+        while now < stepped_at + bound {
+            chooser.delivered(1, height, u128::from(height) * 10, now);
+            height += 1;
+            assert_eq!(
+                chooser.step(now, true, 0, JoinProgress::NothingYet, &[1, 2]),
+                Step::Quiet
+            );
+            now += FIRST_ANSWER_PATIENCE - 1;
+        }
+        assert_eq!(
+            chooser.step(
+                stepped_at + bound,
+                true,
+                0,
+                JoinProgress::NothingYet,
+                &[1, 2]
+            ),
+            Step::Ask(2, Approach::Read),
+            "a read's bound ran on past the clock's step back"
+        );
+    }
+
+    /// **An honest read at the slowest rate a read is allowed, whose first
+    /// block comes at the end of its answering window, is not cut off before
+    /// it takes the node past the depth.**
+    ///
+    /// The other half of what the bound must do: two blocks a second from the
+    /// first block to the one past the depth a thousand and twenty four
+    /// undoes, and nothing else asked meanwhile.
+    #[test]
+    fn a_read_at_the_slowest_rate_allowed_ends_the_choice_inside_its_bound() {
+        let mut chooser = Chooser::new();
+        chooser.noted(1, Some(host(1)), 900, LONG, false, 100);
+        chooser.noted(2, Some(host(2)), 500, LONG, false, 100);
+        assert_eq!(
+            chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Read)
+        );
+        let first = 200 + FIRST_ANSWER_PATIENCE - 1;
+        let past_the_depth = JOIN_RATHER_THAN_READ + 1;
+        let mut height = 0;
+        let mut now = 201;
+        loop {
+            while now >= first && height <= past_the_depth && height < (now - first + 1) * 2 {
+                chooser.delivered(1, height, u128::from(height) * 10, now);
+                height += 1;
+            }
+            if height > past_the_depth {
+                break;
+            }
+            assert_eq!(
+                chooser.step(now, true, 0, JoinProgress::NothingYet, &[1, 2]),
+                Step::Quiet,
+                "a read delivering two blocks a second was ended {} seconds into its turn, at \
+                 height {height}",
+                now - 200
+            );
+            now += 1;
+        }
+        assert!(
+            now - 200 <= read_at_most(JOIN_RATHER_THAN_READ),
+            "fixture: the read ended the choice {} seconds into its turn",
+            now - 200
+        );
+        assert!(
+            chooser.has_chosen(1),
+            "the read delivered its block past the depth after its turn was over"
         );
     }
 

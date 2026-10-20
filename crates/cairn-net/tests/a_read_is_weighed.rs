@@ -29,9 +29,10 @@
     clippy::arithmetic_side_effects
 )]
 
+use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -45,7 +46,7 @@ use cairn_ledger::validation::{
     assemble_block, connect_block, expected_difficulty, mine_block, ConsensusParams,
 };
 use cairn_ledger::LedgerState;
-use cairn_net::choosing::{Approach, Chooser, JoinProgress, Step};
+use cairn_net::choosing::{read_at_most, Approach, Chooser, JoinProgress, Step};
 use cairn_net::message::{Handshake, Keeps, Message, PROTOCOL_VERSION};
 use cairn_net::sync::{holds_nothing_it_cannot_undo, on_message, Local, PeerState, Reaction};
 use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
@@ -403,6 +404,20 @@ fn visit(
 /// unless the newcomer ends on the honest chain, and says how long that took
 /// from the moment the visitor was first asked for a block.
 fn a_newcomer_between_the_seed_and_a_visitor_serving(served: usize) -> Duration {
+    a_newcomer_between_the_seed_and(PATIENCE, |newcomer, work, branch, asked| {
+        visit(newcomer, work, branch, served, asked)
+    })
+}
+
+/// A newcomer, an honest seed holding `HONEST_BLOCKS`, and a visitor dialled
+/// by `dial` into the newcomer, claiming `work` and offering the visitor's
+/// branch, both reached at once. Panics unless the newcomer ends on the
+/// honest chain within `patience` of the visitor first being asked for a
+/// block, and says how long that took.
+fn a_newcomer_between_the_seed_and(
+    patience: Duration,
+    dial: impl FnOnce(SocketAddr, u128, &[Block], &Arc<AtomicBool>) -> TcpStream,
+) -> Duration {
     let (honest_chain, visitor_chain) = the_two_chains();
     let seed = Node::bind(rules(), loopback()).unwrap();
     for block in &honest_chain {
@@ -419,11 +434,10 @@ fn a_newcomer_between_the_seed_and_a_visitor_serving(served: usize) -> Duration 
     // The visitor claims more than the honest chain, so it is the first claim
     // the choice asks, and the seed's is the claim standing beside it.
     let asked = Arc::new(AtomicBool::new(false));
-    let visitor = visit(
+    let visitor = dial(
         newcomer.address(),
         seed.total_work().saturating_mul(1_000),
         &visitor_chain,
-        served,
         &asked,
     );
     newcomer.connect(seed.address()).unwrap();
@@ -432,7 +446,7 @@ fn a_newcomer_between_the_seed_and_a_visitor_serving(served: usize) -> Duration 
         "fixture: the choice asked the visitor for its branch"
     );
     let first_asked = Instant::now();
-    let took_the_honest_chain = wait_until(PATIENCE, || {
+    let took_the_honest_chain = wait_until(patience, || {
         newcomer.with_chain(ChainStore::tip) == Some(honest_tip)
     });
     let took = first_asked.elapsed();
@@ -447,9 +461,9 @@ fn a_newcomer_between_the_seed_and_a_visitor_serving(served: usize) -> Duration 
     assert!(
         took_the_honest_chain,
         "a newcomer read a visitor claiming more than the honest chain and keeping no headers, \
-         serving {served} blocks of a branch at the difficulty floor, and {PATIENCE:?} later it \
-         was at height {height:?}, on the visitor's chain: {on_the_visitor}, rather than on \
-         the honest chain of {HONEST_BLOCKS} blocks its seed holds"
+         serving a branch at the difficulty floor, and {patience:?} after it was first asked \
+         the newcomer was at height {height:?}, on the visitor's chain: {on_the_visitor}, \
+         rather than on the honest chain of {HONEST_BLOCKS} blocks its seed holds"
     );
     took
 }
@@ -474,7 +488,7 @@ fn a_visitor_read_first_cannot_end_a_newcomer_s_choice_on_a_floor_difficulty_bra
 /// the seconds the honest chain takes over the loopback. A visitor that does
 /// send the block past the depth, as above, ends its turn at once. One that
 /// sends its blocks a window apart renews its turn once for each height it
-/// raises the branch to, which is at most the depth the node undoes.
+/// raises the branch to, up to the bound the last test measures.
 #[test]
 fn a_visitor_that_goes_quiet_at_the_depth_holds_a_newcomer_off_for_one_answering_window() {
     let took =
@@ -531,5 +545,129 @@ fn a_newcomer_between_two_honest_seeds_that_are_read_takes_the_chain_at_once() {
         took <= bound,
         "a newcomer between two honest seeds took {took:?} to read their chain, past {bound:?}: \
          a settling of two seconds, two turns a round of upkeep apart, and the read"
+    );
+}
+
+/// Dials `newcomer` as [`visit`] does, holding `blocks` and claiming `work`,
+/// and sends the blocks it is asked for one at a time, `every` apart, the
+/// first at once. Sets `asked` once it is first asked for a block.
+fn drip(
+    newcomer: SocketAddr,
+    work: u128,
+    blocks: &[Block],
+    every: Duration,
+    asked: &Arc<AtomicBool>,
+) -> TcpStream {
+    let network = rules().network;
+    let mut socket = TcpStream::connect(newcomer).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let hello = Message::Hello(Handshake {
+        version: PROTOCOL_VERSION,
+        network,
+        genesis: rules().genesis.unwrap_or(Hash32::ZERO),
+        height: 10_000,
+        total_work: work,
+        listen: 0,
+        nonce: 0x0F1F_0001,
+        keeps: NO_HEADERS,
+    });
+    write_message(&mut socket, network, &hello).unwrap();
+    let mut reading = socket.try_clone().unwrap();
+    let writing = Arc::new(Mutex::new(socket.try_clone().unwrap()));
+    let owed: Arc<Mutex<VecDeque<u64>>> = Arc::default();
+    let held: Vec<Block> = blocks.to_vec();
+    let count = u64::try_from(held.len()).unwrap();
+    {
+        let (writing, owed) = (Arc::clone(&writing), Arc::clone(&owed));
+        thread::spawn(move || loop {
+            let next = owed.lock().unwrap().pop_front();
+            let Some(at) = next else {
+                // The reader has gone, and with it the connection.
+                if Arc::strong_count(&owed) == 1 {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            let Some(block) = held.get(usize::try_from(at).unwrap()) else {
+                continue;
+            };
+            let sent = Message::Block(Box::new(block.clone()));
+            if write_message(&mut *writing.lock().unwrap(), network, &sent).is_err() {
+                return;
+            }
+            thread::sleep(every);
+        });
+    }
+    let asked = Arc::clone(asked);
+    let mut answered: Option<Instant> = None;
+    thread::spawn(move || loop {
+        let message = match read_message(&mut reading, network, MAX_FRAME_BYTES) {
+            Ok(Incoming::Message(message)) => message,
+            Ok(Incoming::Quiet) => continue,
+            Err(_) => return,
+        };
+        let answers = match message {
+            Message::GetPeers => vec![Message::Peers(Vec::new())],
+            Message::Ping(nonce) => vec![Message::Pong(nonce)],
+            Message::GetChain { .. }
+                if answered.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) =>
+            {
+                answered = Some(Instant::now());
+                vec![Message::Chain { from: 0, count }]
+            }
+            Message::GetBlocks(heights) => {
+                asked.store(true, Ordering::SeqCst);
+                let mut owed = owed.lock().unwrap();
+                for at in heights {
+                    if !owed.contains(&at) {
+                        owed.push_back(at);
+                    }
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        for answer in answers {
+            if write_message(&mut *writing.lock().unwrap(), network, &answer).is_err() {
+                return;
+            }
+        }
+    });
+    socket
+}
+
+/// **A visitor sending its branch a block at a time, each a little inside the
+/// answering window after the last, holds a newcomer off for one read's
+/// bound, and no longer.**
+///
+/// Each block takes the branch higher, so each renews the window, and the
+/// branch never reaches the block past the depth that would be weighed: such
+/// a visitor held the choice for as many windows as the depth, four minutes
+/// here and about eight and a half hours on a network undoing a thousand and
+/// twenty four. A read's turn has a total bound now, set from the depth and
+/// the slowest rate a read is allowed, [`read_at_most`]; the turn it ends
+/// ranks the visitor by what it delivered and the honest seed is read next.
+/// The bound here is the code's own, scaled to this network's depth, with
+/// ten seconds for a round of upkeep and the honest read over the loopback.
+#[test]
+fn a_visitor_dripping_its_branch_holds_a_newcomer_off_for_one_read_s_bound() {
+    let bound = Duration::from_secs(read_at_most(UNDO) + 10);
+    let every = Duration::from_secs(ANSWERING_WINDOW - 8);
+    let took = a_newcomer_between_the_seed_and(bound, |newcomer, work, branch, asked| {
+        drip(
+            newcomer,
+            work,
+            &branch[..=usize::try_from(UNDO).unwrap()],
+            every,
+            asked,
+        )
+    });
+    assert!(
+        took <= bound,
+        "the honest chain was taken {took:?} after the dripping visitor was first asked, past \
+         the bound of {bound:?}"
     );
 }

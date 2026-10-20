@@ -39,8 +39,9 @@ use cairn_ledger::validation::{
     assemble_block, connect_block, expected_difficulty, mine_block, ConsensusParams,
 };
 use cairn_ledger::LedgerState;
-use cairn_net::message::{Handshake, Keeps, Message, PROTOCOL_VERSION};
+use cairn_net::message::{Handshake, Keeps, Message, MAX_REQUESTED, PROTOCOL_VERSION};
 use cairn_net::node::{NodeError, READING_FROM_THE_FIRST};
+use cairn_net::sync::BATCH_PATIENCE;
 use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Node;
 use cairn_primitives::Hash32;
@@ -538,5 +539,146 @@ fn a_marker_that_will_not_go_is_said_and_the_read_goes_on() {
     assert!(
         still,
         "and the node stopped reading from the first block while its disk still said it was"
+    );
+}
+
+/// Dials `newcomer` as a peer saying it keeps every block and claiming `work`
+/// for a chain of `blocks`, which answers every request for its chain, no
+/// oftener than once a second, and never sends a block. Sets `asked` once it
+/// is first asked for one.
+fn an_archivist_that_never_sends(
+    newcomer: SocketAddr,
+    work: u128,
+    blocks: u64,
+    asked: &Arc<AtomicBool>,
+) -> TcpStream {
+    let network = rules().network;
+    let mut socket = TcpStream::connect(newcomer).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let hello = Message::Hello(Handshake {
+        version: PROTOCOL_VERSION,
+        network,
+        genesis: rules().genesis.unwrap_or(Hash32::ZERO),
+        height: blocks - 1,
+        total_work: work,
+        listen: 0,
+        nonce: 0x0F1F_0002,
+        keeps: Keeps {
+            headers: false,
+            cold_set: true,
+        },
+    });
+    write_message(&mut socket, network, &hello).unwrap();
+    let mut reading = socket.try_clone().unwrap();
+    let asked = Arc::clone(asked);
+    let mut answered: Option<Instant> = None;
+    thread::spawn(move || loop {
+        let message = match read_message(&mut reading, network, MAX_FRAME_BYTES) {
+            Ok(Incoming::Message(message)) => message,
+            Ok(Incoming::Quiet) => continue,
+            Err(_) => return,
+        };
+        let answers = match message {
+            Message::GetPeers => vec![Message::Peers(Vec::new())],
+            Message::Ping(nonce) => vec![Message::Pong(nonce)],
+            // Answered late rather than dropped, so every question is
+            // answered: see `an_archivist_that_stops_half_way` in the wallet.
+            Message::GetChain { .. } => {
+                if let Some(at) = answered {
+                    thread::sleep(Duration::from_secs(1).saturating_sub(at.elapsed()));
+                }
+                answered = Some(Instant::now());
+                vec![Message::Chain {
+                    from: 0,
+                    count: blocks,
+                }]
+            }
+            Message::GetBlocks(_) => {
+                asked.store(true, Ordering::SeqCst);
+                continue;
+            }
+            _ => continue,
+        };
+        for answer in answers {
+            if write_message(&mut reading, network, &answer).is_err() {
+                return;
+            }
+        }
+    });
+    socket
+}
+
+/// **A peer saying it keeps every block, answering for its chain and never
+/// sending a block of it, costs a read from the first block of a chain five
+/// batches long one answering window, and not a batch's patience for every
+/// batch.**
+///
+/// Beside an honest archivist, and claiming far more, so its word puts it
+/// first in line and it is read first. Its read is given up on when its
+/// answering window passes with nothing delivered, and the honest archivist
+/// is read to the depth. Past the depth the choice is over, and each peer is
+/// asked for its chain on its own: the batches it leaves outstanding are its
+/// connection's, and nobody else's blocks wait on them.
+#[test]
+fn a_peer_answering_for_its_chain_and_sending_no_block_costs_a_recovery_one_window() {
+    let blocks = 5 * MAX_REQUESTED;
+    let mut forge = Forge {
+        state: LedgerState::new(),
+        clock: rules().opens_at,
+        miner: 1,
+        spacing: 1,
+    };
+    let chain: Vec<Block> = (0..blocks).map(|_| forge.mine()).collect();
+    let (seed, seed_directory) = an_archivist("never-sends-seed", &chain);
+    let honest_tip = seed.with_chain(ChainStore::tip).unwrap();
+    let (newcomer, directory) = a_recovering_node("never-sends");
+
+    let started = Instant::now();
+    let asked = Arc::new(AtomicBool::new(false));
+    let fake = an_archivist_that_never_sends(
+        newcomer.address(),
+        seed.total_work().saturating_mul(1_000),
+        u64::try_from(blocks).unwrap(),
+        &asked,
+    );
+    newcomer.connect(seed.address()).unwrap();
+    let read = wait_until(PATIENCE * 2, || {
+        newcomer.with_chain(ChainStore::tip) == Some(honest_tip)
+    });
+    let took = started.elapsed();
+    let (height, first, fake_asked) = (
+        newcomer.height(),
+        newcomer.blocks_from(),
+        asked.load(Ordering::SeqCst),
+    );
+    let _ = fake.shutdown(Shutdown::Both);
+    newcomer.shutdown();
+    seed.shutdown();
+    drop((newcomer, seed));
+    let _ = std::fs::remove_dir_all(&directory);
+    let _ = std::fs::remove_dir_all(&seed_directory);
+
+    assert!(
+        fake_asked,
+        "fixture: the peer that never sends a block was asked for blocks"
+    );
+    assert!(
+        read,
+        "a read from the first block of {blocks} blocks, beside a peer that never sends one, \
+         was at height {height:?} after {:?}",
+        PATIENCE * 2
+    );
+    assert_eq!(first, Some(0), "fixture: it was read from the first block");
+    // Five batches' patience is what a batch's patience for every batch would
+    // cost. One answering window, and the settling and the read inside one
+    // batch's patience on a loaded runner, where the read alone takes about
+    // seven seconds over the loopback.
+    let bound = Duration::from_secs(ANSWERING_WINDOW + BATCH_PATIENCE);
+    assert!(
+        took < bound,
+        "reading {blocks} blocks from the first beside a peer that never sends one took \
+         {took:?}, past {bound:?}: a settling, one answering window, and the read"
     );
 }
