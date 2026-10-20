@@ -294,6 +294,51 @@ owners to their notes. That is a cost which grows with the chain, and it is
 here on purpose: it is exactly the cost the protocol refuses to put on the
 program everybody runs.
 
+## Building a release again to check it
+
+Every release says, through GitHub's attestation, which commit and which
+workflow made each file. That is GitHub's word. The Linux archives can also
+be checked without it: build one again from the release's tag and compare.
+
+```
+git clone https://github.com/cairnchain/cairn
+bash cairn/deploy/rebuild.sh <version>
+```
+
+The version is the release's number without its `v`. A release made before
+this script was in the repository has nothing to rebuild with, and it says so.
+
+It needs git, curl and Docker, and no account or key of anybody's. It checks
+the tag out into a directory of its own, builds the Linux archive for this
+machine's processor exactly as the release did, and compares it with the line
+for it in the release's `SHA256SUMS`. `the same` means the published archive
+is what that tag's source builds, whoever built it; any download whose hash
+is in that `SHA256SUMS` is then that source too. Add `all` to build the other
+processor's archive as well, through Docker's emulation, which is slower.
+
+What makes it the same everywhere is in `deploy/release-build.sh`, which the
+release runs too. The Linux programs are compiled in one container image
+named by its digest, so the compiler, linker and libraries are the same bytes
+on every machine; the paths of the checkout, of the downloaded crates and of
+the toolchain are written into the programs as fixed names; and the archive
+is packed in a fixed order, with a fixed owner and permissions, dated by the
+release commit. Each release is built twice, on two GitHub machines that
+share nothing (`.github/workflows/build.yml`), and a Linux archive whose two
+copies differ by one byte is not published. A Mac building both Linux
+archives in Docker, the x86_64 one through emulation, got GitHub's bytes.
+
+macOS and Windows are not reproducible yet, and the release does not claim
+they are. Their compilers' linkers and system libraries come with the
+machine, and there is no image of a Mac or of Windows to name by digest. The
+two copies GitHub builds of each are compared all the same, and the result is
+in the summary of every release run. Since Windows programs are linked with
+`/Brepro`, which keeps the link time out of them, the two copies of all five
+archives agree on GitHub's machines. On another machine the macOS programs do
+not: built on a Mac with a newer Xcode than GitHub's, from the same commit
+and with the same settings, they came out different. Rebuilding those needs
+the same Xcode, or Visual Studio and Windows SDK, that GitHub's machine had on
+the day, which nobody outside GitHub can be sure of having.
+
 ## What this network is
 
 `testnet-8` is a test network. Its money is worth nothing, it is meant to be

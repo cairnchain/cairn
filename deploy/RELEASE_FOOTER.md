@@ -46,6 +46,14 @@ shasum -a 256 -c SHA256SUMS --ignore-missing
 Comparing hashes without the first line shows only that a download arrived
 whole: whoever could replace an archive could replace the list beside it.
 
+The Linux archives can also be checked without asking GitHub: built again
+from this release's tag, they come out the same to the byte. With git, curl
+and Docker, from a clone of the repository:
+
+```
+bash deploy/rebuild.sh <this release's number, without the v>
+```
+
 ## This is a test network
 
 `testnet-8` money is worth nothing, is meant to be worth nothing, and the
