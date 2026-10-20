@@ -1638,10 +1638,46 @@ mod tests {
     use super::when_nobody_took_it;
     use super::{about_to_pay, answered_yes, ask, how_the_wait_ended, must_ask};
     use super::{after_sending, beside_the_balance, what_happened, what_is_waiting};
-    use super::{stop_before_paying, Waited};
+    use super::{stop_before_paying, why_the_read_stopped, Waited, READ_PATIENCE};
     use super::{what_was_not_read, wrapped, Flags, NotCarried, PerhapsCarried, Sent, Waiting};
     use super::{Amount, Covered, Direction, Holdings, Movement, MOVEMENTS_SHOWN};
     use cairn_primitives::Hash32;
+
+    /// A read that stopped says where, for how long nothing came, whether any
+    /// peer that keeps every block was reached, and that running it again
+    /// carries on: each half by what happened, never the other's words.
+    #[test]
+    fn a_read_that_stopped_says_why_by_who_was_reached() {
+        let data = std::path::Path::new("recovered");
+        let alone = why_the_read_stopped(0, Some(40), data);
+        let silent = why_the_read_stopped(2, None, data);
+        let waited = format!("{} seconds", READ_PATIENCE.as_secs());
+        for said in [&alone, &silent] {
+            assert!(said.contains(&waited), "the wait is not named: {said}");
+            assert!(
+                said.contains("Run recover again with the same --data"),
+                "what to do is not said: {said}"
+            );
+            assert!(
+                said.contains("recovered"),
+                "the directory is not named: {said}"
+            );
+        }
+        assert!(alone.contains("stopped at block 40"), "{alone}");
+        assert!(
+            alone.contains("no peer it reached keeps every block") && !alone.contains("peer(s)"),
+            "a read that reached no archivist says so, and only that: {alone}"
+        );
+        assert!(
+            silent.contains("stopped before the first block"),
+            "{silent}"
+        );
+        assert!(
+            silent.contains("2 peer(s) it reached say they keep every block")
+                && !silent.contains("no peer it reached"),
+            "a read whose archivists sent nothing says so, and only that: {silent}"
+        );
+    }
 
     fn parsed(line: &[&str]) -> Flags {
         let arguments: Vec<String> = line.iter().map(|&word| word.to_owned()).collect();

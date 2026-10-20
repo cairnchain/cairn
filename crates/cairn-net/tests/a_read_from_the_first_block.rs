@@ -40,7 +40,7 @@ use cairn_ledger::validation::{
 };
 use cairn_ledger::LedgerState;
 use cairn_net::message::{Handshake, Keeps, Message, PROTOCOL_VERSION};
-use cairn_net::node::READING_FROM_THE_FIRST;
+use cairn_net::node::{NodeError, READING_FROM_THE_FIRST};
 use cairn_net::wire::{read_message, write_message, Incoming, MAX_FRAME_BYTES};
 use cairn_net::Node;
 use cairn_primitives::Hash32;
@@ -456,6 +456,7 @@ fn a_read_from_the_first_block_starts_only_over_a_directory_holding_no_chain() {
         Node::open_recovering(rules(), loopback(), &ledger_alone, &[]).map(|(node, _)| {
             node.shutdown();
         });
+    let ledger_marked = ledger_alone.join(READING_FROM_THE_FIRST).exists();
 
     let empty_log = scratch("over-an-empty-log");
     let (node, _) = Node::open(rules(), loopback(), &empty_log).unwrap();
@@ -489,14 +490,17 @@ fn a_read_from_the_first_block_starts_only_over_a_directory_holding_no_chain() {
         let _ = std::fs::remove_dir_all(each);
     }
     assert!(
-        refused.is_err(),
-        "a read from the first block was started over a directory holding a chain"
+        matches!(refused, Err(NodeError::HoldsAChain { .. })),
+        "a read from the first block was started over a directory holding a chain: {:?}",
+        refused.err()
     );
     assert!(!marked, "and the refusal wrote the marker anyway");
     assert!(
-        ledger_refused.is_err(),
-        "a read from the first block was started over a directory holding a ledger"
+        matches!(ledger_refused, Err(NodeError::HoldsAChain { .. })),
+        "a read from the first block was started over a directory holding a ledger: {:?}",
+        ledger_refused.err()
     );
+    assert!(!ledger_marked, "and the refusal wrote the marker anyway");
     assert!(
         matches!(opened, Ok(true)),
         "a directory whose log holds nothing was refused: {:?}",

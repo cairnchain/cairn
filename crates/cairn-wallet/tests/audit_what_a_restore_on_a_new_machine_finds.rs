@@ -506,10 +506,16 @@ fn an_interrupted_recovery_carries_on_reading_from_the_first_block() {
             .is_some_and(|height| height >= 100)
     });
     let first_held = opened_plainly.node().blocks_from();
+    // And its account, read as far as the chain has come, is on the disk
+    // beside the chain: what recover is about to be handed back.
+    opened_plainly.follow();
+    let account_written = fresh.join("history.dat").exists();
     opened_plainly.shutdown();
     drop(opened_plainly);
 
-    let (carried_on, _) = Wallet::recover(&key_file, params(), &fresh).unwrap();
+    assert!(account_written, "fixture: the account was written down");
+    let (carried_on, _) = Wallet::recover(&key_file, params(), &fresh)
+        .expect("recover refused the directory of the recovery it was to carry on");
     assert!(carried_on.reach(keeper.address()));
     let read = carried_on.read_from_the_first_block(STILL_FOR);
     let total = carried_on.holdings().total();

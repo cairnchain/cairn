@@ -11537,6 +11537,7 @@ mod disk_and_headers {
             None,
             None,
             true,
+            false,
         )
         .unwrap()
     }
@@ -12711,6 +12712,7 @@ mod disk_and_headers {
             None,
             None,
             true,
+            false,
         )
         .unwrap()
     }
@@ -13121,6 +13123,7 @@ mod peers_and_loops {
             None,
             None,
             true,
+            false,
         )
         .unwrap();
         node.shutdown();
@@ -19758,6 +19761,7 @@ mod tests {
             None,
             None,
             true,
+            false,
         )
         .unwrap();
         // The turn a peer would be holding, put there rather than waited for:
