@@ -35,6 +35,7 @@ use cairn_crypto::{random_bytes, SecretKey};
 use cairn_ledger::note::{Address, NetworkId, Note, NoteId};
 use cairn_ledger::transaction::{Input, Transfer};
 use cairn_ledger::validation::{ConsensusParams, TransferError};
+use cairn_net::node::READING_FROM_THE_FIRST;
 use cairn_net::node::{
     Behind, Opening, Probation, Refused, Stranded, Unjudged, Unread, Unweighable, Unwritten,
 };
@@ -1483,6 +1484,17 @@ pub const BOOK_PATIENCE: Duration = Duration::from_secs(5);
 /// How often the wait for the book looks at who has arrived.
 const BOOK_POLL: Duration = Duration::from_millis(50);
 
+/// How long a read of the chain from the first block may stand still before
+/// it stops and says why.
+///
+/// Three of the node's patience for a batch of blocks
+/// (`cairn_net::sync::BATCH_PATIENCE`), because that is how long a peer that
+/// stopped sending is given before the blocks are asked of somebody else, and
+/// the read should outlast that twice over before it says nobody is sending
+/// them. A read moving at all is never stopped: the wait starts again with
+/// every block. Public for the reason [`CATCH_UP_BATCH`] is.
+pub const READ_PATIENCE: Duration = Duration::from_secs(180);
+
 /// How far above what the network asks a fee may go before the wallet stops
 /// and makes sure it was meant.
 ///
@@ -1660,13 +1672,62 @@ impl Wallet {
         params: ConsensusParams,
         data: &Path,
     ) -> Result<(Self, usize), WalletError> {
+        Self::open_with(path, params, data, false)
+    }
+
+    /// Opens the key at `path` over an empty data directory, with a node that
+    /// reads the chain from the first block rather than being handed a
+    /// ledger: see `Node::open_recovering`. Read it to the tip with
+    /// [`Self::read_from_the_first_block`].
+    ///
+    /// For a key made again from its words on a machine that never ran it.
+    /// Opened as [`Self::open`] opens it, the wallet finds the money still in
+    /// the set every node holds and what fell out of it in the last few
+    /// blocks, and nothing older, because the only record of where older
+    /// money sits was the account on the lost disk. Read from the first
+    /// block, its node writes down where every note of this key's fell, as
+    /// the node of a wallet that was there all along did.
+    ///
+    /// Refused over a directory that already holds this wallet's account or
+    /// a chain, unless what it holds is a read like this one left
+    /// unfinished, which it carries on.
+    pub fn recover(
+        path: &Path,
+        params: ConsensusParams,
+        data: &Path,
+    ) -> Result<(Self, usize), WalletError> {
+        // Asked before the node is opened, which would write down that this
+        // directory is being read from the first block.
+        let history_file = data.join(HISTORY_FILE);
+        if history_file.exists() && !data.join(READING_FROM_THE_FIRST).exists() {
+            return Err(WalletError::CouldNotStart(format!(
+                "{} is a wallet's account already, so reading the chain from the first block \
+                 into that directory would read into an account that did not start there. \
+                 Nothing has been changed. Give recover an empty directory of its own.",
+                history_file.display()
+            )));
+        }
+        Self::open_with(path, params, data, true)
+    }
+
+    fn open_with(
+        path: &Path,
+        params: ConsensusParams,
+        data: &Path,
+        recovering: bool,
+    ) -> Result<(Self, usize), WalletError> {
         let secret = keyfile::read(path).map_err(WalletError::CouldNotStart)?;
         let mine = Address::from(secret.public_key());
         let listen: SocketAddr = "0.0.0.0:0"
             .parse()
             .map_err(|_| WalletError::CouldNotStart("bad listen address".to_owned()))?;
-        let (node, restored) = Node::open_watching(params, listen, data, &[mine])
-            .map_err(|error| WalletError::CouldNotStart(error.to_string()))?;
+        let opened = if recovering {
+            Node::open_recovering(params, listen, data, &[mine])
+        } else {
+            Node::open_watching(params, listen, data, &[mine])
+        };
+        let (node, restored) =
+            opened.map_err(|error| WalletError::CouldNotStart(error.to_string()))?;
         let history_file = data.join(HISTORY_FILE);
         let (history, discarded) = History::load(&history_file);
         // Before anything can save, since a save renames a new account over
@@ -2250,6 +2311,50 @@ impl Wallet {
             taken = taken.saturating_add(read);
         }
         taken
+    }
+
+    /// Reads the chain from the first block to the tip, for a wallet opened
+    /// by [`Self::recover`], copying into the account where each of this
+    /// key's notes fell as the node learns it.
+    ///
+    /// Done when the chain has held still at a tip no peer claims more work
+    /// than, as [`Self::catch_up`] judges it, and then the node is told so,
+    /// and a start over this directory is an ordinary one from then on.
+    ///
+    /// Stopped when the chain stands still for `patience`, which a read never
+    /// does while anybody is sending it blocks: the most likely reason is that
+    /// no peer keeping every block, an archivist, is reachable, and what is
+    /// handed back says how many were. What was read is kept, and the read is
+    /// carried on by opening the same directory again.
+    ///
+    /// The places are copied every round rather than every block. The node's
+    /// list of this key's fallen notes lets one go only when more than
+    /// `cairn_ledger::state::WATCHED_NOTES` of them, each worth more, are
+    /// fallen and unspent at once, so however far the node reads between two
+    /// copies, a note is lost to the account only to that many notes paid to
+    /// this one key and left unspent, which is a flood aimed at it.
+    pub fn read_from_the_first_block(&self, patience: Duration) -> ReadFromTheFirst {
+        let mut stillness = Stillness::from(self.node.height(), Instant::now());
+        loop {
+            self.follow();
+            let look = self.look();
+            let still = stillness.saw(look.height, Instant::now());
+            if settled(&look, still) {
+                // A directory that could not be told is read from the first
+                // block again at its next start, which on a node holding its
+                // own chain is what it does anyway: nothing rests on this.
+                let _ = self.node.finished_reading();
+                self.follow_to_the_tip();
+                return ReadFromTheFirst::Reached;
+            }
+            if read_stands_still(&look, still, patience) {
+                return ReadFromTheFirst::Stopped {
+                    archivists: self.node.archiving_peers(),
+                    height: look.height,
+                };
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     /// Writes down where this key's fallen notes landed, while the node can
@@ -3643,6 +3748,21 @@ impl Wallet {
     }
 }
 
+/// What reading the chain from the first block came to: see
+/// [`Wallet::read_from_the_first_block`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadFromTheFirst {
+    /// The chain was read to a tip no peer claims more work than, and the
+    /// account holds where every note of this key's fell.
+    Reached,
+    /// The chain stood still before that. `archivists` is how many connected
+    /// peers said they keep every block, and `height` where the read stopped.
+    Stopped {
+        archivists: usize,
+        height: Option<u64>,
+    },
+}
+
 /// What waiting for the chain came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Waited {
@@ -3701,6 +3821,44 @@ impl Look {
     fn behind(&self) -> Option<u64> {
         self.claim.map(|(height, _)| height)
     }
+}
+
+/// How long the chain a wallet watches has stood still, from what each look
+/// at it saw.
+struct Stillness {
+    last: Option<u64>,
+    since: Instant,
+}
+
+impl Stillness {
+    fn from(height: Option<u64>, now: Instant) -> Self {
+        Self {
+            last: height,
+            since: now,
+        }
+    }
+
+    /// How long the chain has stood still, given that a look at `now` saw it
+    /// at `height`: nothing at all when that is a height it was not at.
+    fn saw(&mut self, height: Option<u64>, now: Instant) -> Duration {
+        if height != self.last {
+            self.last = height;
+            self.since = now;
+        }
+        now.saturating_duration_since(self.since)
+    }
+}
+
+/// Whether a read from the first block that has stood still for `still` stops
+/// there, handed `patience`.
+///
+/// Only one that is waiting on blocks: with nobody to ask, with no chain yet,
+/// or below a chain a peer claims. A chain standing still with somebody to ask
+/// and nobody claiming more is at the tip, and settles there in
+/// [`SETTLED_FOR`] however short the patience: stopped instead, a read handed
+/// a patience shorter than that could never finish.
+fn read_stands_still(look: &Look, still: Duration, patience: Duration) -> bool {
+    still >= patience && (look.peers == 0 || look.height.is_none() || look.behind().is_some())
 }
 
 /// Whether a wallet whose chain has held still for `still` can stop waiting.
@@ -5159,6 +5317,76 @@ mod tests {
     /// block is in the program. Nothing asked what a ledger on its way or a
     /// peer ahead did to the wait, so a wallet that answered two seconds into
     /// a handover, from block nought, passed.
+    #[test]
+    fn a_read_from_the_first_block_stops_only_standing_still_short_of_the_chain() {
+        use super::read_stands_still;
+        let patience = Duration::from_secs(5);
+        let at_the_tip = super::Look {
+            height: Some(100),
+            peers: 1,
+            joining: Joined::No,
+            claim: None,
+            out_of_reach: 0,
+        };
+        let below = super::Look {
+            claim: Some((900, 11)),
+            ..at_the_tip
+        };
+        let alone = super::Look {
+            peers: 0,
+            ..at_the_tip
+        };
+        let nothing = super::Look {
+            height: None,
+            ..at_the_tip
+        };
+        for (look, why) in [
+            (below, "below a chain a peer claims"),
+            (alone, "with nobody to ask"),
+            (nothing, "with no chain at all"),
+        ] {
+            assert!(
+                read_stands_still(&look, patience, patience),
+                "a read standing still for its whole patience {why} went on waiting"
+            );
+            assert!(
+                !read_stands_still(&look, patience - Duration::from_millis(1), patience),
+                "a read standing still for less than its patience {why} stopped"
+            );
+        }
+        assert!(
+            !read_stands_still(&at_the_tip, patience * 10, patience),
+            "a read standing at a tip nobody claims more than stopped rather than settling"
+        );
+    }
+
+    #[test]
+    fn a_read_stands_still_from_the_last_look_that_saw_it_move() {
+        let start = Instant::now();
+        let mut stillness = super::Stillness::from(Some(4), start);
+        let later = start + Duration::from_secs(3);
+        assert_eq!(
+            stillness.saw(Some(4), later),
+            Duration::from_secs(3),
+            "a chain seen at the same height has stood still since the first look"
+        );
+        assert_eq!(
+            stillness.saw(Some(5), later),
+            Duration::ZERO,
+            "a chain seen at a new height has not stood still at all"
+        );
+        assert_eq!(
+            stillness.saw(Some(5), later + Duration::from_secs(1)),
+            Duration::from_secs(1),
+            "and stands still from the look that saw it move"
+        );
+        assert_eq!(
+            stillness.saw(None, later + Duration::from_secs(2)),
+            Duration::ZERO,
+            "a chain gone is a chain that moved"
+        );
+    }
+
     #[test]
     fn the_wait_for_the_chain_ends_only_when_nothing_says_it_is_on_its_way() {
         let long = SETTLED_FOR + Duration::from_secs(1);

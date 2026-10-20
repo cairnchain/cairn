@@ -380,10 +380,17 @@ pub const GRACE_BLOCKS: usize = 64;
 /// note is worth, times the ceiling, where before it cost a transfer.
 ///
 /// What a wallet does when its note is the one let go of is what it does for
-/// any fallen note it cannot prove: it keeps its own record of what fell,
-/// which is the point of the proofs it carries, and an archivist can say
-/// where a note sits for a wallet that lost even that. The node reports the
-/// note as one it cannot prove rather than as one that does not exist.
+/// any fallen note it cannot prove: it keeps its own record of where it fell,
+/// which is the point of the proofs it carries, and asks an archivist for the
+/// path to that place. No message asks anybody where a note sits. A wallet
+/// that lost even its record reads the chain again from the first block, from
+/// a peer that kept every one, and learns where its notes fell as they fall,
+/// which is `cairn-wallet recover`. The node reports the note as one it cannot
+/// prove rather than as one that does not exist.
+///
+/// A wallet copies those places out of the node as it reads, so the ceiling
+/// costs it a note only when more than this many of its notes, each worth
+/// more, are fallen and unspent at once: a flood aimed at that one address.
 pub const WATCHED_NOTES: usize = 8_192;
 
 /// The cold set, as whoever is holding it holds it.
@@ -563,8 +570,10 @@ impl ColdSet {
         }
     }
 
-    /// Where a fallen note sits. Only an archivist can answer, which is
-    /// exactly the service a wallet that lost its record pays for.
+    /// Where a fallen note sits. Only an archivist can answer, and only to
+    /// itself: no message carries the question, so a wallet that lost its
+    /// record learns the place by reading the chain again rather than by
+    /// asking. The explorer is what asks it.
     fn locate(&self, id: &NoteId, note: &Note) -> Option<u64> {
         match self {
             Self::Roots(_) => None,

@@ -309,3 +309,62 @@ fn the_page_open_serves_says_what_became_of_the_payments() {
         "the page does not say which payments are waiting and which were not carried"
     );
 }
+
+/// **A seed named on the command line is dialled, and said to be reached.**
+///
+/// A listener stands in for the seed. The wallet is told only that address,
+/// and the line it prints says one seed was reached, which is true only if it
+/// dialled it: the listener counts the connection.
+#[test]
+fn a_seed_named_is_dialled_and_counted() {
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let home = scratch("named-seed");
+    let key = home.join("key");
+    let made = Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
+        .args(["new", key.to_str().unwrap(), "--unsafe-skip-word-check"])
+        .output()
+        .expect("the wallet runs");
+    assert!(made.status.success(), "fixture: a key was made");
+
+    let seed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = seed.local_addr().unwrap();
+    let dialled = Arc::new(AtomicUsize::new(0));
+    let counting = Arc::clone(&dialled);
+    thread::spawn(move || {
+        for stream in seed.incoming() {
+            if stream.is_ok() {
+                counting.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+
+    let ran = Command::new(env!("CARGO_BIN_EXE_cairn-wallet"))
+        .args([
+            "balance",
+            key.to_str().unwrap(),
+            "--data",
+            home.join("data").to_str().unwrap(),
+            "--network",
+            "devnet",
+            "--seed",
+            &address.to_string(),
+            "--wait",
+            "1",
+        ])
+        .output()
+        .expect("the wallet runs");
+    let _ = std::fs::remove_dir_all(&home);
+    let said = String::from_utf8_lossy(&ran.stdout);
+
+    assert!(
+        said.contains("1 seed(s) reached"),
+        "the wallet did not say it reached the seed it was named: {said}"
+    );
+    assert!(
+        dialled.load(Ordering::SeqCst) >= 1,
+        "the wallet said it reached a seed it never dialled: {said}"
+    );
+}

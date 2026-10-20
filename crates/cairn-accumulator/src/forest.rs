@@ -1049,9 +1049,10 @@ pub struct Archive {
     inner: Vec<Vec<Hash32>>,
     /// Where each standing leaf sits, so that finding one is a lookup.
     ///
-    /// [`Archive::locate`] is the question a wallet that lost its record asks
-    /// an archivist, and its own note says that is the reason an archivist is
-    /// worth paying. Answering it by walking every leaf is a pass over the
+    /// [`Archive::locate`] is a question asked of an archivist's own archive:
+    /// no message carries it, and a wallet that lost its record learns where
+    /// its notes sit by reading the chain again instead. Answering it by
+    /// walking every leaf is a pass over the
     /// whole archive, and the pass grows with the chain — the one thing this
     /// project says a node's cost never does.
     ///
@@ -1387,8 +1388,10 @@ impl Archive {
 
     /// Where a leaf sits, if it is still standing.
     ///
-    /// This is the question a wallet that lost its record asks an archivist,
-    /// and the reason an archivist is worth paying.
+    /// Asked of the archive by whoever holds it, the explorer above all. No
+    /// message carries it to a stranger: a wallet that lost its record of
+    /// where its notes sit reads the chain again from the first block, from
+    /// an archivist, and learns it as they fall.
     pub fn locate(&self, leaf: Hash32) -> Option<u64> {
         self.standing.get(&leaf).copied()
     }

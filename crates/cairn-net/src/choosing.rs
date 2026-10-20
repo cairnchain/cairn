@@ -17,7 +17,7 @@
 //! what to do, and never reads a clock or touches a socket, so the whole of
 //! it can be tested by handing it moments.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use crate::book::machine_of;
@@ -442,6 +442,13 @@ pub struct Chooser {
     /// settle, followed whichever chain its first handshake offered, and read
     /// past the reach of any other before the next peer had said a word.
     final_from: u64,
+    /// Set for a node that reads the chain from the first block, which is a
+    /// wallet recovering its old money from its key alone: see
+    /// [`Self::reading_from_the_first`].
+    from_the_first: bool,
+    /// Peers whose introduction said they keep the whole cold set, and so
+    /// every block from the first: see [`Self::archives`].
+    archivists: HashSet<u64>,
 }
 
 /// A chooser for a network whose nodes undo as deep as any node does, which is
@@ -461,6 +468,8 @@ impl Default for Chooser {
             first_short_at: None,
             reached: None,
             final_from: JOIN_RATHER_THAN_READ,
+            from_the_first: false,
+            archivists: HashSet::new(),
         }
     }
 }
@@ -479,6 +488,64 @@ impl Chooser {
             final_from: undo_limit,
             ..Self::default()
         }
+    }
+
+    /// The same chooser, for a node that reads the chain from the first block
+    /// and is never handed a ledger.
+    ///
+    /// For a wallet recovering money older than the window a handed ledger
+    /// carries. Where a note of its own fell is learned only as the block it
+    /// fell in is applied, and a ledger carries the cold set as sixty four
+    /// roots with no owner attached, so a node handed one has skipped every
+    /// such block for good. So every turn is a read, and a read asks for the
+    /// blocks from the first, which only a peer that kept all of them can
+    /// give: the peers that said they keep the whole cold set are asked
+    /// before the others. Nothing else changes. A read is weighed against the
+    /// other claims before it ends the choice, as any read is
+    /// ([`Self::must_carry`]), and the turns go round as they do for anyone.
+    ///
+    /// Only when `from_the_first`, so a node is started with one line whichever
+    /// it is.
+    #[must_use]
+    pub fn reading_from_the_first(self, from_the_first: bool) -> Self {
+        Self {
+            from_the_first,
+            ..self
+        }
+    }
+
+    /// Whether this chooser is a node's that reads from the first block.
+    #[must_use]
+    pub fn reads_from_the_first(&self) -> bool {
+        self.from_the_first
+    }
+
+    /// The read from the first block reached the tip, and the node is an
+    /// ordinary one from now on.
+    pub fn finished_reading(&mut self) {
+        self.from_the_first = false;
+    }
+
+    /// Notes that `peer` said it keeps the whole cold set, which an archivist
+    /// does, and with it every block from the first.
+    ///
+    /// Read only by a node reading from the first block, which asks such a
+    /// peer before any other: a peer that keeps less lets go of its oldest
+    /// blocks past its budget, and asked for them sends nothing a read can
+    /// use, so asking it first costs an answering window for nothing. It is a
+    /// word in a greeting like the claim beside it, and buys nothing but an
+    /// earlier turn, which is still a read checked block by block.
+    pub fn archives(&mut self, peer: u64) {
+        if self.done {
+            return;
+        }
+        self.archivists.insert(peer);
+    }
+
+    /// Whether `peer` is asked ahead of the claims beside it: a peer keeping
+    /// every block, on a node reading from the first one.
+    fn first_in_line(&self, peer: u64) -> bool {
+        self.from_the_first && self.archivists.contains(&peer)
     }
 
     /// Notes what a peer claims to have. Only called while this node has no
@@ -963,6 +1030,7 @@ impl Chooser {
         // for as long as the network stays that young, and notes a claim for
         // every connection that greets it meanwhile.
         self.claims.retain(|peer, _| connected.contains(peer));
+        self.archivists.retain(|peer| connected.contains(peer));
         // A chain held off goes with its connection too, so strangers coming
         // and going for as long as the choice stays open do not pile up here.
         self.chains_held_off
@@ -1322,12 +1390,13 @@ impl Chooser {
             .filter(|(_, claim)| claim.due <= self.rotation)
             .filter(|(_, claim)| claim.due < self.rotation || !self.held_off(claim, now))
             .filter(|(_, claim)| Self::worth_a_turn(claim, standing, ceiling, now))
-            .max_by_key(|(peer, claim)| (claim.work, **peer))?;
+            .max_by_key(|(peer, claim)| (self.first_in_line(**peer), claim.work, **peer))?;
         // A claim owed its turn past its machine's pause is read and not
         // handed a ledger: a handover is taken on the strength of the claim,
         // and one inside its pause must not buy that. What the pause costs is
         // the cheap way in, never the chain, as at the last resort.
-        let approach = if claim.shows_the_chain
+        let approach = if !self.from_the_first
+            && claim.shows_the_chain
             && claim.height >= JOIN_RATHER_THAN_READ
             && !self.held_off(claim, now)
         {
@@ -1372,7 +1441,7 @@ impl Chooser {
                     .tried
                     .is_none_or(|tried| now.saturating_sub(tried) >= RETRY_PAUSE)
             })
-            .max_by_key(|(peer, claim)| (claim.work, **peer))?;
+            .max_by_key(|(peer, claim)| (self.first_in_line(**peer), claim.work, **peer))?;
         Some((*peer, Approach::Read))
     }
 
@@ -1446,6 +1515,7 @@ impl Chooser {
         // moment longer.
         self.claims = HashMap::new();
         self.unbacked_hosts = HashMap::new();
+        self.archivists = HashSet::new();
         if behind.is_empty() {
             return Step::Quiet;
         }
@@ -2921,6 +2991,114 @@ mod tests {
             ),
             Step::Ask(1, Approach::Join),
             "a block moving the branch no higher than the turn had taken it renewed it"
+        );
+    }
+
+    /// A newcomer with two long claims beside each other: peer 1 heavier and
+    /// keeping only what its budget affords, peer 2 lighter and keeping
+    /// every block, as an archivist does.
+    fn an_archivist_beside_a_heavier_peer(chooser: Chooser) -> Chooser {
+        let mut chooser = chooser;
+        chooser.noted(1, Some(host(1)), 900, LONG, true, 100);
+        chooser.noted(2, Some(host(2)), 500, LONG, true, 100);
+        chooser.archives(2);
+        chooser
+    }
+
+    /// **A node reading from the first block asks the peer that keeps every
+    /// block first, and reads it rather than being handed a ledger.**
+    ///
+    /// The heavier claim is from a peer that keeps only what its budget
+    /// affords, which past that budget has let go of the first blocks a read
+    /// from the first block asks for. Asked first, it costs an answering
+    /// window and gives nothing.
+    #[test]
+    fn a_read_from_the_first_block_asks_the_archivist_first() {
+        let mut chooser =
+            an_archivist_beside_a_heavier_peer(Chooser::new().reading_from_the_first(true));
+        assert_eq!(
+            chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Read),
+            "a node reading from the first block asked a peer that keeps less before the \
+             archivist beside it, or asked to be handed a ledger"
+        );
+        assert_eq!(
+            chooser.asking_join(),
+            None,
+            "and no handover is being collected"
+        );
+
+        // Once the archivist's turn is over, the other is still asked, and
+        // still read.
+        chooser.failed(2, 101 + SETTLING);
+        assert_eq!(
+            chooser.step(102 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Read),
+            "the peer keeping less is asked once no archivist is left to ask, and read"
+        );
+    }
+
+    /// **And a node that is not reading from the first block weighs the same
+    /// claims as it always did:** the heaviest first, handed a ledger, whatever
+    /// the peer beside it keeps.
+    #[test]
+    fn an_ordinary_newcomer_takes_no_account_of_who_keeps_every_block() {
+        let mut chooser = an_archivist_beside_a_heavier_peer(Chooser::new());
+        assert_eq!(
+            chooser.step(100 + SETTLING, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Join),
+            "an ordinary newcomer put an archivist's lighter claim ahead of a heavier one"
+        );
+    }
+
+    /// **When every claim has failed, the last resort reads the archivist
+    /// first too, on a node reading from the first block.**
+    #[test]
+    fn the_last_resort_of_a_read_from_the_first_block_is_the_archivist() {
+        let mut chooser =
+            an_archivist_beside_a_heavier_peer(Chooser::new().reading_from_the_first(true));
+        chooser.failed(1, 100);
+        chooser.failed(2, 100);
+        let later = 100 + RETRY_PAUSE;
+        assert_eq!(
+            chooser.step(later, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(2, Approach::Read),
+            "the last resort read the heavier claim of a peer keeping less before the archivist"
+        );
+        let mut ordinary = an_archivist_beside_a_heavier_peer(Chooser::new());
+        ordinary.failed(1, 100);
+        ordinary.failed(2, 100);
+        assert_eq!(
+            ordinary.step(later, true, 0, JoinProgress::NothingYet, &[1, 2]),
+            Step::Ask(1, Approach::Read),
+            "an ordinary newcomer's last resort is the heaviest claim, as it was"
+        );
+    }
+
+    /// An archivist that leaves is not first in line for whoever takes its
+    /// connection number's place, and the choice once made keeps nothing.
+    #[test]
+    fn who_keeps_every_block_is_forgotten_with_the_connection_and_the_choice() {
+        let mut chooser =
+            an_archivist_beside_a_heavier_peer(Chooser::new().reading_from_the_first(true));
+        assert_eq!(
+            chooser.step(100, true, 0, JoinProgress::NothingYet, &[1]),
+            Step::Quiet,
+            "fixture: still settling"
+        );
+        assert!(
+            !chooser.first_in_line(2),
+            "a peer that left is still remembered as keeping every block"
+        );
+        chooser.archives(1);
+        assert_eq!(
+            chooser.step(100, false, 900, JoinProgress::NothingYet, &[1]),
+            Step::Quiet
+        );
+        chooser.archives(1);
+        assert!(
+            !chooser.first_in_line(1),
+            "a choice already made still writes down who keeps every block"
         );
     }
 }

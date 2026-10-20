@@ -325,7 +325,8 @@ fn restore_says_which_word_is_wrong_or_that_the_check_fails() {
 ///
 /// The finding of `audit_what_a_restore_on_a_new_machine_finds`: money that
 /// fell out of the set every node holds before the last few blocks is found
-/// only with history.dat.
+/// with history.dat, or by `recover` reading the whole chain again, and both
+/// are named.
 #[test]
 fn new_and_restore_say_the_words_do_not_carry_the_account() {
     let home = scratch("account");
@@ -344,9 +345,10 @@ fn new_and_restore_say_the_words_do_not_carry_the_account() {
             .join(" ");
         assert!(output.status.success(), "{told}");
         assert!(
-            told.contains("found only with history.dat"),
+            told.contains("found with history.dat"),
             "what the words leave behind is not said: {told}"
         );
+        assert!(told.contains("cairn-wallet recover"), "{told}");
         assert!(told.contains("cairn-wallet backup"), "{told}");
     }
     let _ = std::fs::remove_dir_all(&home);
