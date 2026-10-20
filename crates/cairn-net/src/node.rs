@@ -11100,8 +11100,11 @@ fn read_loop(
         // would have ended the choice on less than another claim states is
         // what it sent too, and the end of its turn.
         if reaction.applied.is_some() {
-            let height = shared.chain().height().unwrap_or(0);
-            shared.choosing().delivered(id, height, last_heard);
+            let (height, work) = {
+                let chain = shared.chain();
+                (chain.height().unwrap_or(0), chain.total_work())
+            };
+            shared.choosing().delivered(id, height, work, last_heard);
         }
         if let Some((height, work)) = reaction.outgrew {
             shared.choosing().outgrew(
