@@ -651,8 +651,14 @@ fn a_recovery_is_refused_over_a_directory_already_in_use() {
 }
 
 /// A peer that says it keeps every block and claims the whole chain, and
-/// sends the blocks below `serves` and then nothing more, while staying
-/// connected. Dialled into `wallet`'s node.
+/// sends the blocks below `serves`. Once asked for one past them it answers
+/// nothing but a ping, while staying connected. Dialled into `wallet`'s node.
+///
+/// Nothing at all, rather than its chain without the blocks: a peer that goes
+/// on answering for its chain and never sends the blocks is asked again for
+/// them each time, and a node waits out a batch's patience, a minute, for
+/// every batch it asks of it. That is the node's sync and not the recovery,
+/// which is the same read whoever it is asked of.
 fn an_archivist_that_stops_half_way(wallet: SocketAddr, serves: usize) -> TcpStream {
     let network = params().network;
     let blocks = the_chain();
@@ -677,20 +683,27 @@ fn an_archivist_that_stops_half_way(wallet: SocketAddr, serves: usize) -> TcpStr
     write_message(&mut socket, network, &hello).unwrap();
     let mut reading = socket.try_clone().unwrap();
     let mut answered: Option<Instant> = None;
+    let mut stopped = false;
     thread::spawn(move || loop {
         let message = match read_message(&mut reading, network, MAX_FRAME_BYTES) {
             Ok(Incoming::Message(message)) => message,
             Ok(Incoming::Quiet) => continue,
             Err(_) => return,
         };
+        // What it was asked for below `serves` is still sent, the last of it.
+        let asked_past = matches!(&message, Message::GetBlocks(heights)
+            if heights.iter().any(|at| usize::try_from(*at).is_ok_and(|at| at >= serves)));
         let answers = match message {
-            Message::GetPeers => vec![Message::Peers(Vec::new())],
             Message::Ping(nonce) => vec![Message::Pong(nonce)],
+            _ if stopped => continue,
+            Message::GetPeers => vec![Message::Peers(Vec::new())],
             // No oftener than once a second, under the ceiling on messages a
-            // node holds a peer to.
-            Message::GetChain { .. }
-                if answered.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) =>
-            {
+            // node holds a peer to. Answered late rather than dropped: a
+            // question dropped is a batch the node waits a minute for.
+            Message::GetChain { .. } => {
+                if let Some(at) = answered {
+                    thread::sleep(Duration::from_secs(1).saturating_sub(at.elapsed()));
+                }
                 answered = Some(Instant::now());
                 vec![Message::Chain {
                     from: 0,
@@ -711,6 +724,7 @@ fn an_archivist_that_stops_half_way(wallet: SocketAddr, serves: usize) -> TcpStr
                 return;
             }
         }
+        stopped |= asked_past;
     });
     socket
 }
