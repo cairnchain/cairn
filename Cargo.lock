@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-accumulator"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cairn-fuzz",
  "cairn-primitives",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-chain"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cairn-accumulator",
  "cairn-crypto",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-crypto"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cairn-primitives",
  "curve25519-dalek",
@@ -99,14 +99,14 @@ dependencies = [
 
 [[package]]
 name = "cairn-docs"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "cairn-explorer"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cairn-accumulator",
  "cairn-chain",
@@ -123,18 +123,18 @@ dependencies = [
 
 [[package]]
 name = "cairn-fuzz"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "cairn-http"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cairn-fuzz",
 ]
 
 [[package]]
 name = "cairn-ledger"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cairn-accumulator",
  "cairn-crypto",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-net"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cairn-accumulator",
  "cairn-chain",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-node"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cairn-chain",
  "cairn-crypto",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-primitives"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "blake3",
  "cairn-fuzz",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-store"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cairn-accumulator",
  "cairn-crypto",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-wallet"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "bip39",
  "cairn-accumulator",
