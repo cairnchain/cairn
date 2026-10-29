@@ -47,7 +47,7 @@ macro_rules! paper {
     };
 }
 
-pub(crate) const PAPERS: [(&str, &str); 6] = [
+pub(crate) const PAPERS: [(&str, &str); 7] = [
     ("/whitepaper", paper!("../../../docs/cairn-whitepaper.html")),
     (
         "/specification",
@@ -63,6 +63,10 @@ pub(crate) const PAPERS: [(&str, &str); 6] = [
         paper!("../../../docs/cairn-open-questions.html"),
     ),
     ("/prior-art", paper!("../../../docs/cairn-prior-art.html")),
+    (
+        "/integration",
+        paper!("../../../docs/cairn-integration.html"),
+    ),
 ];
 
 /// The look of each paper, kept beside it rather than inside it.

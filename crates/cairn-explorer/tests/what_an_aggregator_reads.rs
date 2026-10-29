@@ -196,6 +196,17 @@ fn the_two_figures_are_the_ledgers_at_the_height_status_names() {
         "the fixture leaves some of the schedule unclaimed, or it proves nothing"
     );
 
+    // The account the guide gives: the schedule's running total is the
+    // total, what was destroyed, and what was left unclaimed.
+    let destroyed: u64 = field(&status, "destroyed").parse().unwrap();
+    let unclaimed: u64 = field(&status, "unclaimed").parse().unwrap();
+    assert_eq!(
+        issued + destroyed + unclaimed,
+        params.emitted_by(7).as_pebbles(),
+        "{}",
+        body(&status)
+    );
+
     assert_eq!(field(&supply, "height"), "7");
     assert_eq!(field(&supply, "height"), field(&status, "height"));
     assert_eq!(pebbles(&body(&total)), issued, "{}", body(&total));
