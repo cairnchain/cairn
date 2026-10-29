@@ -3521,7 +3521,10 @@ mod tests {
             chooser.step(200, true, 0, JoinProgress::NothingYet, &[1, 2]),
             Step::Ask(1, Approach::Join)
         );
-        assert!(read_at_most(8) < ATTEMPT_PATIENCE, "fixture: the read's bound is the shorter");
+        assert!(
+            read_at_most(8) < ATTEMPT_PATIENCE,
+            "fixture: the read's bound is the shorter"
+        );
         for now in 201..200 + ATTEMPT_PATIENCE {
             assert_eq!(
                 chooser.step(now, true, 0, JoinProgress::Moving, &[1, 2]),
@@ -3532,7 +3535,13 @@ mod tests {
             );
         }
         assert_eq!(
-            chooser.step(200 + ATTEMPT_PATIENCE, true, 0, JoinProgress::Moving, &[1, 2]),
+            chooser.step(
+                200 + ATTEMPT_PATIENCE,
+                true,
+                0,
+                JoinProgress::Moving,
+                &[1, 2]
+            ),
             Step::Ask(2, Approach::Join),
             "and at its patience it is over, as it always was"
         );

@@ -52,15 +52,31 @@ fn rules() -> ConsensusParams {
 
 /// A chain of `MINE` blocks, and the blocks themselves.
 fn a_chain() -> (ChainStore, Vec<Block>) {
+    let (chain, blocks, _) = a_chain_and_a_block_beside_it_at(MINE - 1);
+    (chain, blocks)
+}
+
+/// A chain of `MINE` blocks, the blocks themselves, and a block of another
+/// miner's at `beside`, on the same parent as this chain's block there and
+/// carrying the same work, so it is held beside the branch and not followed.
+fn a_chain_and_a_block_beside_it_at(beside: u64) -> (ChainStore, Vec<Block>, Block) {
     let params = rules();
     let miner = SecretKey::from_bytes(&[4; 32]);
+    let other = SecretKey::from_bytes(&[5; 32]);
     let mut state = LedgerState::new();
     let mut chain = ChainStore::new(params);
     let mut clock = params.opens_at;
     let mut blocks = Vec::new();
+    let mut side = None;
     while (blocks.len() as u64) < MINE {
         let height = state.next_height().unwrap();
         clock += params.target_block_time;
+        if height == beside {
+            let reward = Note::new(params.initial_reward, other.public_key());
+            let coinbase = CoinbaseTransaction::new(height, vec![reward]);
+            let block = assemble_block(&state, coinbase, vec![], &params, clock, 0).unwrap();
+            side = Some(mine_block(block, 1 << 24).unwrap());
+        }
         let reward = Note::new(params.initial_reward, miner.public_key());
         let coinbase = CoinbaseTransaction::new(height, vec![reward]);
         let block = assemble_block(&state, coinbase, vec![], &params, clock, 0).unwrap();
@@ -69,7 +85,7 @@ fn a_chain() -> (ChainStore, Vec<Block>) {
         chain.add_block(block.clone(), NOW).unwrap();
         blocks.push(block);
     }
-    (chain, blocks)
+    (chain, blocks, side.unwrap())
 }
 
 fn met(chain: &mut ChainStore, peer: &mut PeerState) {
@@ -161,5 +177,94 @@ fn a_block_of_the_branch_followed_does_not_push_the_next_round_above_the_tip() {
         heights
             .as_ref()
             .and_then(|heights| heights.first().copied())
+    );
+}
+
+/// **A block held beside the branch, lower than the round's last block on
+/// the branch, does not send the next round back below that block.**
+///
+/// The peer answers a round on the branch this node follows, every block it
+/// was asked for, and sends one block beside the branch, lower down, that
+/// nobody asked for. Both were written down for the next `Chain`, and the one
+/// beside the branch was taken whatever its height: the next round was asked
+/// from just above it, the blocks the round had just walked asked again, so a
+/// peer could keep its walk from advancing for one block a round.
+#[test]
+fn a_block_beside_the_branch_below_the_round_does_not_send_the_walk_back() {
+    let beside = MINE - 5;
+    let (mut chain, blocks, side) = a_chain_and_a_block_beside_it_at(beside);
+    let mut peer = PeerState::new(Some(host(2)));
+    met(&mut chain, &mut peer);
+    let mut local = Local {
+        keeps: KEEPS,
+        nonce: 1,
+        chain: &mut chain,
+        listen: 4242,
+    };
+    let first = on_message(
+        &mut local,
+        &mut peer,
+        Message::Chain {
+            from: FORK,
+            count: 200,
+        },
+        NOW,
+    );
+    let asked = asked_for(&first).expect("fixture: the first round asks for blocks");
+    assert_eq!(
+        asked.first().copied(),
+        Some(FORK),
+        "fixture: asked from {FORK}"
+    );
+    for at in FORK..MINE {
+        assert!(asked.contains(&at), "fixture: {at} was asked for");
+        let block = blocks[usize::try_from(at).unwrap()].clone();
+        let mut local = Local {
+            keeps: KEEPS,
+            nonce: 1,
+            chain: &mut chain,
+            listen: 4242,
+        };
+        on_message(&mut local, &mut peer, Message::Block(Box::new(block)), NOW);
+    }
+    let mut local = Local {
+        keeps: KEEPS,
+        nonce: 1,
+        chain: &mut chain,
+        listen: 4242,
+    };
+    on_message(
+        &mut local,
+        &mut peer,
+        Message::Block(Box::new(side.clone())),
+        NOW,
+    );
+    assert!(
+        chain.held_header(&side.id()).is_some() && chain.id_at(beside) != Some(side.id()),
+        "fixture: the block at {beside} is held beside the branch"
+    );
+
+    let mut local = Local {
+        keeps: KEEPS,
+        nonce: 1,
+        chain: &mut chain,
+        listen: 4242,
+    };
+    let next = on_message(
+        &mut local,
+        &mut peer,
+        Message::Chain {
+            from: FORK,
+            count: 200,
+        },
+        NOW,
+    );
+    let from = asked_for(&next).and_then(|heights| heights.first().copied());
+    assert_eq!(
+        from,
+        Some(MINE),
+        "the next round was asked from {from:?} rather than from {MINE}, past the last block \
+         of the branch the round delivered: the block held beside the branch at {beside}, \
+         lower and unasked, was taken over it"
     );
 }

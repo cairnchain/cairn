@@ -2515,13 +2515,19 @@ fn answer(
         },
         Message::Chain { from, count } => {
             // Both taken whatever this answer comes to: see
-            // [`PeerState::aside`] and [`PeerState::walk`].
+            // [`PeerState::aside`] and [`PeerState::walk`]. The higher of the
+            // two, since a block held beside the branch is written whether
+            // it was asked for or not: preferred whatever its height, one
+            // sent below the round's last block on the branch had the round
+            // asked again from just above it, for a block a round.
             let walked = peer
                 .walk
                 .take()
                 .filter(|(asked_from, _)| *asked_from == from)
                 .and_then(|(_, last)| last);
-            let arrived = peer.aside.take().or(walked);
+            let arrived = std::cmp::max_by_key(peer.aside.take(), walked, |at| {
+                at.map(|located| located.height)
+            });
             let lowest = from.max(lowest_worth_asking(local.chain));
             let start = past_what_arrived(local.chain, lowest, arrived);
             let end = from.saturating_add(count);
