@@ -42,6 +42,14 @@ the test of whether it is finished.
 The two do not share sentences. A rule that appears in both is a rule that will
 be changed in one of them.
 
+**`cairn-integration.md`** is for whoever builds on the chain rather than
+reviewing it: an exchange, a custodian, a price aggregator. It says how to run
+a node for them, how addresses are checked, what depth to credit a deposit at
+and why, what the explorer's API answers, and what cannot be done yet. Where
+it repeats a rule of the specification, the specification is the one that is
+normative, and `crates/cairn-explorer/tests/the_integration_guide.rs` holds
+every default, command and figure in it to the programs.
+
 **`cairn-design.md`**, **`cairn-open-questions.md`**, **`cairn-prior-art.md`**
 are the project's own reasoning, for readers who want the thinking rather than
 the protocol. The design notes and the survey are in French. The open questions

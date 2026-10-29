@@ -30,8 +30,9 @@ pub use render::render;
 /// difference between a Markdown source and a file somebody left in the
 /// folder, and `no_markdown_document_is_left_out_of_the_list` fails on a
 /// document that is one and not the other.
-pub const DOCUMENTS: [&str; 9] = [
+pub const DOCUMENTS: [&str; 10] = [
     "cairn-design",
+    "cairn-integration",
     "cairn-open-questions",
     "cairn-open-questions.fr",
     "cairn-prior-art",

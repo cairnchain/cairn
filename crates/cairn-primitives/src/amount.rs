@@ -105,6 +105,18 @@ impl Amount {
         Self::from_pebbles(pebbles)
     }
 
+    /// The amount in whole CAIRN with all eight decimals and no unit, such as
+    /// `12.50000000`.
+    ///
+    /// The shape a price aggregator reads a supply figure in, and the number
+    /// [`fmt::Display`] writes before the unit, so the two cannot differ.
+    #[must_use]
+    pub fn in_cairn(self) -> String {
+        let whole = self.0.checked_div(PEBBLES_PER_CAIRN).unwrap_or_default();
+        let fraction = self.0.checked_rem(PEBBLES_PER_CAIRN).unwrap_or_default();
+        format!("{whole}.{fraction:08}")
+    }
+
     /// Sums an iterator, failing on overflow or on breaching the ceiling.
     pub fn checked_sum<I: IntoIterator<Item = Self>>(amounts: I) -> Option<Self> {
         amounts.into_iter().try_fold(Self::ZERO, Self::checked_add)
@@ -113,9 +125,7 @@ impl Amount {
 
 impl fmt::Display for Amount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let whole = self.0.checked_div(PEBBLES_PER_CAIRN).unwrap_or_default();
-        let fraction = self.0.checked_rem(PEBBLES_PER_CAIRN).unwrap_or_default();
-        write!(f, "{whole}.{fraction:08}{UNIT}")
+        write!(f, "{}{UNIT}", self.in_cairn())
     }
 }
 
@@ -169,6 +179,22 @@ mod tests {
         assert_eq!(Amount::from_cairn(" 7 ").unwrap().as_pebbles(), 700_000_000);
         assert_eq!(Amount::from_cairn(".5").unwrap().as_pebbles(), 50_000_000);
         assert_eq!(Amount::from_cairn("0").unwrap(), Amount::ZERO);
+    }
+
+    /// Every decimal written, so a figure read by a program that wants a
+    /// number never has to guess what a missing one meant.
+    #[test]
+    fn an_amount_in_cairn_carries_all_eight_decimals_and_reads_back() {
+        for (pebbles, text) in [
+            (0, "0.00000000"),
+            (1, "0.00000001"),
+            (1_250_000_000, "12.50000000"),
+            (Amount::MAX_MONEY.as_pebbles(), "1000000000.00000000"),
+        ] {
+            let amount = Amount::from_pebbles(pebbles).unwrap();
+            assert_eq!(amount.in_cairn(), text);
+            assert_eq!(Amount::from_cairn(text), Some(amount));
+        }
     }
 
     #[test]
