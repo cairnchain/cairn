@@ -128,6 +128,18 @@ fn the_words_new_shows_restore_the_key_it_wrote() {
         the_address(&shown),
         "and says the same address"
     );
+    // Said as `recover` says it, by the same function.
+    let restored_said = String::from_utf8_lossy(&restored.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        restored_said.contains(
+            "If you kept a copy of pending.dat beside history.dat, put it back in the --data \
+             directory as well"
+        ),
+        "a restore did not say what a copy of the payments keeps: {restored_said}"
+    );
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -183,9 +195,11 @@ fn new_writes_the_key_only_once_three_words_come_back() {
             continue;
         };
         let at: usize = asked.parse().unwrap();
+        // Made empty before the words were shown, so that a write refused
+        // is refused before them; the key goes in only once they are back.
         assert!(
-            !key.exists(),
-            "the key file is written before the words came back"
+            std::fs::read(&key).map_or(true, |held| held.is_empty()),
+            "the key is written before the words came back"
         );
         let shown = words.get_or_insert_with(|| the_words_shown(&seen));
         // In capitals the first time, as somebody might type it.
@@ -262,6 +276,77 @@ fn new_and_restore_refuse_a_name_already_taken_before_any_word() {
         "and nothing was written over it"
     );
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// **A key file that cannot be written is refused before any word is shown,
+/// whatever the reason it cannot be.**
+///
+/// A name already taken was the one refusal asked before the words; a
+/// directory nobody may write in was found out after them, once the paper had
+/// been written on, with a message about the directory and no word about the
+/// paper. The file is now made before the words, so every refusal its making
+/// can meet comes first.
+#[cfg(unix)]
+#[test]
+fn new_shows_no_words_for_a_key_file_it_cannot_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = scratch("unwritable");
+    let locked = home.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // An account that writes wherever it likes, as root does, cannot be shown
+    // a directory it may not write in.
+    if std::fs::write(locked.join("probe"), b"").is_ok() {
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
+    let key = locked.join("mine.key");
+
+    let made = wallet(
+        &[
+            "new",
+            text(&key),
+            "--unsafe-skip-word-check",
+            "--network",
+            "devnet",
+        ],
+        "",
+    );
+    let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(!made.status.success(), "{}", said(&made));
+    assert!(
+        !String::from_utf8_lossy(&made.stdout).contains(" 1. "),
+        "words were shown, to be copied onto paper, for a key file that was then refused: {}",
+        said(&made)
+    );
+    assert!(
+        said(&made).contains("could not write"),
+        "and the refusal does not say what it could not do: {}",
+        said(&made)
+    );
+}
+
+/// **On a platform with no file mode, `restore` says so, as `new` does.**
+#[cfg(not(unix))]
+#[test]
+fn restore_says_what_this_platform_could_not_check() {
+    let home = scratch("no-mode");
+    let key = home.join("restored.key");
+    let restored = wallet(&["restore", text(&key)], &format!("{ABANDON_ART}\n"));
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(restored.status.success(), "{}", said(&restored));
+    let restored_said = said(&restored)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        restored_said.contains("no file mode for this wallet to check"),
+        "{restored_said}"
+    );
 }
 
 /// **`restore` takes no words from its command line, and does not repeat

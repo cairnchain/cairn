@@ -357,9 +357,10 @@ fn make_key(arguments: &[String]) -> Result<(), String> {
     let path = flags.key_file()?;
     // Asked before the key exists, so a misspelt network leaves no file behind.
     let network = rules_of(&flags)?.network;
-    // And the name, before the words are shown: words copied onto paper for a
-    // key the write then refuses are words for nothing.
-    keyfile::refuse_if_there(&path)?;
+    // And the file itself, made empty before the words are shown: words
+    // copied onto paper for a key the write then refuses are words for
+    // nothing. Dropped on any way out below, it takes itself away again.
+    let reserved = keyfile::reserve(&path)?;
 
     let phrase = Phrase::draw()?;
     let secret = phrase.key(network)?;
@@ -379,7 +380,9 @@ fn make_key(arguments: &[String]) -> Result<(), String> {
             &mut std::io::stdout(),
         )?;
     }
-    keyfile::write(&path, &secret)?;
+    reserved
+        .write(&secret)
+        .map_err(|failed| after_the_words_were_shown(&failed))?;
 
     println!();
     println!("key written to {}", path.display());
@@ -417,7 +420,9 @@ fn restore(arguments: &[String]) -> Result<(), String> {
     })?;
     let path = flags.key_file()?;
     let network = rules_of(&flags)?.network;
-    keyfile::refuse_if_there(&path)?;
+    // Made before the words are asked for, so that nobody types twenty four
+    // words into a write that was always going to be refused.
+    let reserved = keyfile::reserve(&path)?;
 
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
@@ -430,7 +435,7 @@ fn restore(arguments: &[String]) -> Result<(), String> {
     let typed = read_the_words(&mut stdin.lock())?;
     let phrase = Phrase::read(&typed)?;
     let secret = phrase.key(network)?;
-    keyfile::write(&path, &secret)?;
+    reserved.write(&secret).map_err(|failed| failed.said)?;
 
     println!();
     println!("key written to {}", path.display());
@@ -443,7 +448,35 @@ fn restore(arguments: &[String]) -> Result<(), String> {
          was made from: nothing was paid to this one. Check the paper.",
     );
     say_what_the_words_do_not_carry(&path);
+    say_what_a_copy_of_the_payments_keeps();
+    if let Some(note) = keyfile::what_was_not_checked() {
+        say(note);
+    }
     Ok(())
+}
+
+/// What `new` says when the key did not reach its file after the words were
+/// shown, which the file made before them leaves to a disk that filled or a
+/// machine that would not confirm a write.
+///
+/// The words are said to be the key either way, because they are: whatever
+/// the file holds, a `restore` from them makes this key again.
+fn after_the_words_were_shown(failed: &keyfile::NotWritten) -> String {
+    let words = phrase::WORDS;
+    if failed.left_a_file {
+        format!(
+            "{} The {words} words shown above are this key all the same: keep the paper. If \
+             the file is not there, `cairn-wallet restore <key file>` makes it from them.",
+            failed.said
+        )
+    } else {
+        format!(
+            "{} No key file was written, and the {words} words shown above are this key all \
+             the same: keep the paper. `cairn-wallet restore <key file>` makes the file from \
+             them, at a name that can be written.",
+            failed.said
+        )
+    }
 }
 
 /// What `restore` says to somebody who put the words on its command line.
@@ -610,6 +643,21 @@ fn say_what_the_words_do_not_carry(path: &std::path::Path) {
     );
 }
 
+/// What a copy of the record of payments brings back, said by `restore` and
+/// by `recover` alike.
+///
+/// The words do not carry it and neither does a read of the chain: a payment
+/// handed over that no block carries yet is known only to the wallet that
+/// made it, and `backup` copies the file it is kept in.
+fn say_what_a_copy_of_the_payments_keeps() {
+    say(
+        "If you kept a copy of pending.dat beside history.dat, put it back in the --data \
+         directory as well, before the wallet starts: it is this wallet's record of the payments \
+         it handed over that no block carries yet, and with it the wallet goes on knowing they \
+         are waiting.",
+    );
+}
+
 /// Reads the chain from the first block into a directory of its own, for a
 /// key made again from its words on a machine that never ran it: see
 /// `Wallet::recover`.
@@ -639,31 +687,17 @@ fn recover(arguments: &[String]) -> Result<(), String> {
         return Err(why_the_read_stopped(archivists, height, &data));
     }
 
-    let holdings = wallet.holdings();
-    let covered = wallet.history_covers();
-    println!();
-    println!("address   {}", wallet.address_text());
-    println!(
-        "height    {}",
-        covered
-            .tip
-            .map_or_else(|| "-".to_owned(), |h| h.to_string())
-    );
-    println!("balance   {}", holdings.spendable);
-    println!(
-        "account   from block {}",
-        covered
-            .from
-            .map_or_else(|| "-".to_owned(), |from| from.to_string())
-    );
-    for line in beside_the_balance(&holdings, None, &covered) {
-        println!("{line}");
-    }
+    // What `balance` says, all of it: the money a read from the first block
+    // finds is qualified by the same lines, and this is the command a person
+    // runs having lost everything else.
+    say_the_balance(&wallet);
+    say_what_happened(&wallet);
     say(&format!(
         "{} is this wallet's --data directory now: give it to balance, send and open, and \
          back it up with backup after the wallet has run.",
         data.display()
     ));
+    say_what_a_copy_of_the_payments_keeps();
     wallet.shutdown();
     Ok(())
 }
@@ -809,6 +843,19 @@ fn say(text: &str) {
 fn show_balance(arguments: &[String]) -> Result<(), String> {
     let flags = Flags::parse(arguments)?;
     let wallet = join(&flags)?;
+    say_the_balance(&wallet);
+    say_what_happened(&wallet);
+    wallet.shutdown();
+    Ok(())
+}
+
+/// The balance and everything said beside it, for `balance` and for the end
+/// of `recover`.
+///
+/// One function for both because `recover` printed its own copy, which kept
+/// the balance line and left out every line that says the number may not be
+/// this wallet's own answer, and the notes it cannot move yet.
+fn say_the_balance(wallet: &Wallet) {
     let progress = wallet.progress();
     // Before the money is counted, because this is what decides part of the
     // answer: a note whose path has been rebuilt is money that can move, and
@@ -868,10 +915,6 @@ fn show_balance(arguments: &[String]) -> Result<(), String> {
     for line in beside_the_balance(&holdings, recovery.words(), &wallet.history_covers()) {
         println!("{line}");
     }
-
-    say_what_happened(&wallet);
-    wallet.shutdown();
-    Ok(())
 }
 
 /// The list of movements, and everything true about what is not in it.
@@ -1642,6 +1685,70 @@ mod tests {
     use super::{what_was_not_read, wrapped, Flags, NotCarried, PerhapsCarried, Sent, Waiting};
     use super::{Amount, Covered, Direction, Holdings, Movement, MOVEMENTS_SHOWN};
     use cairn_primitives::Hash32;
+
+    /// A key that did not reach its file after the words were shown is said
+    /// to be in the words all the same, and whether a file was left is said
+    /// as it is.
+    #[test]
+    fn a_write_that_fails_after_the_words_says_they_are_the_key() {
+        let none = super::after_the_words_were_shown(&cairn_wallet::keyfile::NotWritten {
+            said: "could not write mine.key: disk full.".to_owned(),
+            left_a_file: false,
+        });
+        let unconfirmed = super::after_the_words_were_shown(&cairn_wallet::keyfile::NotWritten {
+            said: "mine.key was written but this machine would not confirm it.".to_owned(),
+            left_a_file: true,
+        });
+        for said in [&none, &unconfirmed] {
+            assert!(
+                said.contains("words shown above are this key") && said.contains("keep the paper"),
+                "{said}"
+            );
+        }
+        assert!(none.contains("No key file was written"), "{none}");
+        assert!(
+            !unconfirmed.contains("No key file was written"),
+            "a file this machine would not confirm was said not to be there: {unconfirmed}"
+        );
+    }
+
+    /// Every command that writes a key file says what this platform could not
+    /// check about it.
+    ///
+    /// The note prints only where there is no file mode to check, so on the
+    /// machines most of this is written on it never shows, and `restore` went
+    /// without it: a person restoring from the words on Windows was never told
+    /// what `new` tells them. Asked of this file's own text, so the question
+    /// is put on every platform the tests run on.
+    #[test]
+    fn every_command_that_writes_a_key_file_says_what_was_not_checked() {
+        let source = include_str!("main.rs");
+        // The program and not these tests, which name what they look for.
+        let program = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source);
+        let commands: Vec<&str> = program
+            .split("\nfn ")
+            .filter(|body| {
+                ["keyfile::reserve(", "keyfile::write(", "keyfile::back_up("]
+                    .iter()
+                    .any(|writes| body.contains(writes))
+            })
+            .collect();
+        assert!(
+            commands.len() >= 3,
+            "fixture: new, restore and backup are found among the commands"
+        );
+        for body in commands {
+            let name = body.split('(').next().unwrap_or(body);
+            assert!(
+                body.contains("keyfile::what_was_not_checked()"),
+                "{name} writes a key file and does not say what this platform could not check \
+                 about it"
+            );
+        }
+    }
 
     /// A read that stopped says where, for how long nothing came, whether any
     /// peer that keeps every block was reached, and that running it again

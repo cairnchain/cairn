@@ -85,3 +85,87 @@ fn recover_names_the_directory_it_reads_into_and_refuses_one_in_use() {
         "the help does not say how to recover"
     );
 }
+
+/// What a person reads, with the lines folded back into one.
+fn read_as_one(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The balance and what is said beside it, from the address line to the list
+/// of what happened.
+fn the_balance_said(output: &Output) -> Vec<String> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip_while(|line| !line.starts_with("address"))
+        .take_while(|line| !line.starts_with("What happened"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// **A recovery that reaches the tip says of the money what `balance` says,
+/// every line of it, and what to do with a copy of the payments.**
+///
+/// It printed a balance of its own: the address, the height and the number,
+/// without the notes line, without the warning that says the number may not
+/// be this wallet's own answer, and without the notes that cannot move yet.
+/// That was the one command a person runs having lost everything, and the one
+/// that put the number bare.
+#[test]
+fn a_recovery_that_reaches_the_tip_says_what_balance_says() {
+    use cairn_ledger::validation::ConsensusParams;
+    use cairn_net::Node;
+
+    let home = scratch("reached");
+    let key = a_key(&home);
+    let params = ConsensusParams::for_network("devnet").unwrap();
+    let (keeper, _) =
+        Node::open_archiving(params, "127.0.0.1:0".parse().unwrap(), home.join("keeper")).unwrap();
+    let seed = format!("127.0.0.1:{}", keeper.address().port());
+    let data = home.join("recovered");
+    let both = |command: &str| {
+        wallet(&[
+            command,
+            key.to_str().unwrap(),
+            "--network",
+            "devnet",
+            "--seed",
+            &seed,
+            "--data",
+            data.to_str().unwrap(),
+        ])
+    };
+    let recovered = both("recover");
+    let balance = both("balance");
+    keeper.shutdown();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        recovered.status.success(),
+        "fixture: the recovery reached the tip of a chain an archivist holds: {}{}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(balance.status.success(), "fixture: balance ran over it");
+    let said = the_balance_said(&recovered);
+    assert!(
+        said.iter()
+            .any(|line| line.starts_with("notes") && line.contains("that can move now")),
+        "a recovery printed its balance without the lines balance prints beside it: {said:?}"
+    );
+    assert_eq!(
+        said,
+        the_balance_said(&balance),
+        "a recovery and a balance over the same directory said different things of the money"
+    );
+    assert!(
+        read_as_one(&recovered).contains(
+            "If you kept a copy of pending.dat beside history.dat, put it back in the --data \
+             directory as well"
+        ),
+        "a recovery did not say what a copy of the payments keeps: {}",
+        read_as_one(&recovered)
+    );
+}
