@@ -837,6 +837,9 @@ fn route(context: &Context<'_>, request: &Request) -> Option<Response> {
             "pool" => pool(context, request),
             "holders" => holders(context),
             "search" => search(context, request),
+            "supply" => supply(context),
+            "supply/total" => supply_figure(context, Figure::Total),
+            "supply/circulating" => supply_figure(context, Figure::Circulating),
             other => match other.split_once('/') {
                 Some(("block", reference)) => block(context, request, reference),
                 Some(("tx", id)) => transaction(context, id),
@@ -962,6 +965,176 @@ fn status(context: &Context<'_>) -> Response {
 
     json.end_object();
     Response::json(json.finish())
+}
+
+/// One of the two supply figures an aggregator fetches on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Figure {
+    Total,
+    Circulating,
+}
+
+/// The money there is at the tip this node follows, and how much of it can
+/// move.
+///
+/// Both read off the ledger under the same hold of the chain, so the two
+/// figures and the height they are given at are one moment and not three.
+struct Supply {
+    height: Option<u64>,
+    /// What the ledger states as issued and not destroyed, the figure
+    /// `/api/status` serves as `supply.issued`.
+    total: Amount,
+    /// The rewards no one can spend yet, or `None` where this node does not
+    /// hold every block that paid one.
+    maturing: Option<Amount>,
+}
+
+impl Supply {
+    fn of(context: &Context<'_>) -> Self {
+        Self {
+            height: context.height(),
+            total: context.chain.state().supply(),
+            maturing: maturing_rewards(context),
+        }
+    }
+
+    /// The total less the rewards still maturing: what the rules let anybody
+    /// spend at this tip.
+    fn circulating(&self) -> Option<Amount> {
+        self.total.checked_sub(self.maturing?)
+    }
+}
+
+/// What the coinbases still inside the maturity window paid.
+///
+/// The window is in the state, so which rewards are waiting is the ledger's
+/// answer; how much each paid is in its block. Every one of those blocks is
+/// inside the window a node holds in memory, since the maturity is the burial
+/// and the window is one more than the deepest switch, so this reads no disk.
+/// A node handed its ledger rather than building it holds none of them until
+/// it has applied that many blocks of its own, and says it cannot tell rather
+/// than counting them as spendable.
+fn maturing_rewards(context: &Context<'_>) -> Option<Amount> {
+    let maturity = context.params().coinbase_maturity;
+    let next = context.height().map_or(0, |tip| tip.saturating_add(1));
+    let mut waiting = Amount::ZERO;
+    for (matures_at, coinbase) in context.chain.state().maturing() {
+        // Still in the window and spendable all the same: the window lets go
+        // of a reward on the block that may spend it, so the one maturing
+        // there can already be paid out of in the next block, which is what
+        // money that can move means.
+        if matures_at <= next {
+            continue;
+        }
+        let block = context.chain.block_at(matures_at.checked_sub(maturity)?)?;
+        if block.coinbase.id() != coinbase {
+            return None;
+        }
+        waiting = waiting.checked_add(block.coinbase.total_output()?)?;
+    }
+    Some(waiting)
+}
+
+/// The height from which every block pays the floor, or `None` for a schedule
+/// that never halves.
+fn floor_from(params: &ConsensusParams) -> Option<u64> {
+    if params.halving_interval == 0 {
+        return None;
+    }
+    let mut halvings: u32 = 0;
+    while params
+        .initial_reward
+        .as_pebbles()
+        .checked_shr(halvings)
+        .unwrap_or(0)
+        > params.tail_reward.as_pebbles()
+    {
+        halvings = halvings.checked_add(1)?;
+    }
+    params.halving_interval.checked_mul(u64::from(halvings))
+}
+
+/// The supply in the shape a price aggregator reads, with the schedule beside
+/// it.
+///
+/// There is no maximum, and `maximum` says so with a null rather than a
+/// number: the reward never falls below its floor, so the money keeps growing
+/// for as long as blocks are mined. The monetary ceiling is a bound on what an
+/// amount can hold and not a supply anybody reaches, and serving it as one
+/// would be the largest wrong number this site could publish. What the
+/// schedule does have is the sum its halvings pay before the floor, and the
+/// floor itself.
+fn supply(context: &Context<'_>) -> Response {
+    let params = context.params();
+    let supply = Supply::of(context);
+    let mut json = Writer::new();
+    json.begin_object();
+    match supply.height {
+        Some(height) => json.field_u64("height", height),
+        None => json.field_null("height"),
+    }
+    json.field_str("unit", "CAIRN");
+    json.field_u64("decimals", 8);
+    json.field_str("total", &supply.total.in_cairn());
+    match supply.circulating() {
+        Some(circulating) => json.field_str("circulating", &circulating.in_cairn()),
+        None => json.field_null("circulating"),
+    }
+    match supply.maturing {
+        Some(maturing) => json.field_str("maturing", &maturing.in_cairn()),
+        None => json.field_null("maturing"),
+    }
+    json.field_null("maximum");
+    json.key("schedule");
+    json.begin_object();
+    match floor_from(params) {
+        Some(height) => {
+            json.field_u64("floorFrom", height);
+            // Everything paid below that height, which is nothing when the
+            // opening reward is already the floor.
+            let before = height
+                .checked_sub(1)
+                .map_or(Amount::ZERO, |last| params.emitted_by(last));
+            json.field_str("beforeTheFloor", &before.in_cairn());
+        }
+        None => {
+            json.field_null("floorFrom");
+            json.field_null("beforeTheFloor");
+        }
+    }
+    json.field_str("floorPerBlock", &params.tail_reward.in_cairn());
+    json.end_object();
+    json.end_object();
+    Response::json(json.finish())
+}
+
+/// One supply figure alone, as a plain number in whole CAIRN.
+///
+/// An aggregator is handed a URL and reads the body as a number, so there is
+/// nothing around it to read: no field, no unit, no line after it.
+fn supply_figure(context: &Context<'_>, figure: Figure) -> Response {
+    let supply = Supply::of(context);
+    let amount = match figure {
+        Figure::Total => supply.total,
+        Figure::Circulating => match supply.circulating() {
+            Some(circulating) => circulating,
+            None => {
+                return Response::error(
+                    503,
+                    "this node does not yet hold every block whose reward is still \
+                     waiting to be spendable, so it cannot say how much can move; it can \
+                     once it has applied that many blocks itself, and /api/supply/total \
+                     answers meanwhile",
+                )
+            }
+        },
+    };
+    Response {
+        status: 200,
+        content_type: "text/plain; charset=utf-8",
+        cache: "no-store",
+        body: amount.in_cairn().into_bytes(),
+    }
 }
 
 /// How much of the chain the index has read, and what it cost to read it.
