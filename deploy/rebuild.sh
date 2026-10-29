@@ -26,6 +26,34 @@ set -euo pipefail
 
 repository=${CAIRN_REPOSITORY:-https://github.com/cairnchain/cairn}
 
+# What a run that matched has shown, and what it has not: the archives it
+# rebuilt are known to be the source, and nothing else in SHA256SUMS is. It
+# said a download whose hash is in SHA256SUMS was known to be the source,
+# having rebuilt one Linux archive of five: a SHA256SUMS published beside a
+# swapped macOS archive carries the right Linux line all the same.
+what_was_checked() {
+  local names=$1 work=$2 version=$3 name
+  echo "Known now to be what v$version's source builds:"
+  for name in $names; do
+    echo "  cairn-$name.tar.gz"
+  done
+  echo "Every other archive in SHA256SUMS is not checked by this. For those, the"
+  echo "check is the attestation:"
+  echo "  gh attestation verify <the archive you downloaded> --repo cairnchain/cairn"
+  echo "Copy SHA256SUMS out of $work into the folder you downloaded to:"
+  echo "$work is a temporary directory, which this machine may clear."
+  echo "Then, in that folder, check one of the archives above against it with:"
+  for name in $names; do
+    echo "  grep 'cairn-$name.tar.gz\$' SHA256SUMS | shasum -a 256 -c -"
+  done
+}
+
+if [ "${1:-}" = "--say-what-was-checked" ]; then
+  # For the test that holds the sentence above to what was rebuilt.
+  what_was_checked "$2" "$3" "$4"
+  exit 0
+fi
+
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
   echo "usage: $0 <version> [linux-x86_64 | linux-arm64 | all]" >&2
   exit 2
@@ -96,8 +124,6 @@ done
 echo
 echo "The archives built are in $work/built."
 if [ "$status" -eq 0 ]; then
-  echo "A download whose hash is in $work/SHA256SUMS is now known to be this source."
-  echo "Check yours against it, in the folder you downloaded it to, with:"
-  echo "  shasum -a 256 -c $work/SHA256SUMS --ignore-missing"
+  what_was_checked "$names" "$work" "$version"
 fi
 exit "$status"

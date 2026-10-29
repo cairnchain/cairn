@@ -312,9 +312,11 @@ It needs git, curl and Docker, and no account or key of anybody's. It checks
 the tag out into a directory of its own, builds the Linux archive for this
 machine's processor exactly as the release did, and compares it with the line
 for it in the release's `SHA256SUMS`. `the same` means the published archive
-is what that tag's source builds, whoever built it; any download whose hash
-is in that `SHA256SUMS` is then that source too. Add `all` to build the other
-processor's archive as well, through Docker's emulation, which is slower.
+is what that tag's source builds, whoever built it; a download of that
+archive whose hash is that line is then that source too. It shows nothing of
+the other archives in `SHA256SUMS`, which their attestation checks. Add `all`
+to build the other processor's archive as well, through Docker's emulation,
+which is slower.
 
 What makes it the same everywhere is in `deploy/release-build.sh`, which the
 release runs too. The Linux programs are compiled in one container image

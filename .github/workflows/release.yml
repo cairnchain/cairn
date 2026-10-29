@@ -225,10 +225,12 @@ jobs:
           # waited here for an unrelated change to the code. The step that
           # gathers the archive copies exactly these three.
           #
-          # And the two files that make the archives, which name the container
-          # the Linux programs are compiled in and how each archive is packed:
-          # a change to either changes the bytes people download.
-          paths="$paths Cargo.lock rust-toolchain.toml Cargo.toml web docs/*.html docs/*.css LICENSE-MIT LICENSE-APACHE deploy/DOWNLOAD.txt deploy/release-build.sh deploy/release-zip.py"
+          # And the files that make the archives: the two that name the
+          # container the Linux programs are compiled in and how each archive
+          # is packed, and the workflow that picks the machines and toolchains
+          # the macOS and Windows programs are compiled on. A change to any of
+          # them changes the bytes people download.
+          paths="$paths Cargo.lock rust-toolchain.toml Cargo.toml web docs/*.html docs/*.css LICENSE-MIT LICENSE-APACHE deploy/DOWNLOAD.txt deploy/release-build.sh deploy/release-zip.py .github/workflows/build.yml"
           echo "built from:" $built
 
           # Unquoted on purpose: this is a list of paths and not one path.
