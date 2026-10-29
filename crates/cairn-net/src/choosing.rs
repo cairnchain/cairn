@@ -3403,13 +3403,24 @@ mod tests {
         );
     }
 
-    /// The stranger of the two tests below: the only peer at first, claiming
-    /// a lot and keeping no headers, so it is read, on a network undoing
-    /// eight. It is asked, drips a block inside every answering window, and
-    /// its turn is ended at its bound. Gives back that moment.
-    fn a_stranger_drips_until_its_bound(chooser: &mut Chooser, from: u64) -> u64 {
-        chooser.noted(1, Some(host(1)), 10_000, 100, false, from);
-        let asked_at = from + SETTLING;
+    /// **A claim heard after a read ran out at its bound still holds a light
+    /// branch off.**
+    ///
+    /// A read ended at its bound refused nothing: the peer is ranked by what
+    /// it sent and the turn moves on. Ended through [`Chooser::fell_short`],
+    /// it fixed the claims that can hold a branch off at that moment, so a
+    /// stranger dripping blocks for one bound made every claim heard after
+    /// it, the honest chain's included, count for nothing against the next
+    /// branch pushed past the depth.
+    #[test]
+    fn a_claim_heard_after_a_read_ran_out_still_holds_a_branch_off() {
+        // The stranger: the only peer at first, claiming a lot and keeping no
+        // headers, so it is read, on a network undoing eight. It is asked,
+        // drips a block inside every answering window, and its turn is ended
+        // at its bound.
+        let mut chooser = Chooser::reaching(8);
+        chooser.noted(1, Some(host(1)), 10_000, 100, false, 1_000);
+        let asked_at = 1_000 + SETTLING;
         assert_eq!(
             chooser.step(asked_at, true, 0, JoinProgress::NothingYet, &[1, 2]),
             Step::Ask(1, Approach::Read),
@@ -3430,22 +3441,6 @@ mod tests {
         }
         let ran_out = asked_at + bound;
         chooser.step(ran_out, true, 0, JoinProgress::NothingYet, &[1, 2]);
-        ran_out
-    }
-
-    /// **A claim heard after a read ran out at its bound still holds a light
-    /// branch off.**
-    ///
-    /// A read ended at its bound refused nothing: the peer is ranked by what
-    /// it sent and the turn moves on. Ended through [`Chooser::fell_short`],
-    /// it fixed the claims that can hold a branch off at that moment, so a
-    /// stranger dripping blocks for one bound made every claim heard after
-    /// it, the honest chain's included, count for nothing against the next
-    /// branch pushed past the depth.
-    #[test]
-    fn a_claim_heard_after_a_read_ran_out_still_holds_a_branch_off() {
-        let mut chooser = Chooser::reaching(8);
-        let ran_out = a_stranger_drips_until_its_bound(&mut chooser, 1_000);
         chooser.noted(2, Some(host(2)), 1_000_000, 100, true, ran_out + 1);
         let share = share_at(1_000_000, 100, 9);
         assert_eq!(
