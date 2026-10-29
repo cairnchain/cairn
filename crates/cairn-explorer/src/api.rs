@@ -1084,20 +1084,17 @@ fn supply(context: &Context<'_>) -> Response {
     json.field_null("maximum");
     json.key("schedule");
     json.begin_object();
-    match floor_from(params) {
-        Some(height) => {
-            json.field_u64("floorFrom", height);
-            // Everything paid below that height, which is nothing when the
-            // opening reward is already the floor.
-            let before = height
-                .checked_sub(1)
-                .map_or(Amount::ZERO, |last| params.emitted_by(last));
-            json.field_str("beforeTheFloor", &before.in_cairn());
-        }
-        None => {
-            json.field_null("floorFrom");
-            json.field_null("beforeTheFloor");
-        }
+    if let Some(height) = floor_from(params) {
+        json.field_u64("floorFrom", height);
+        // Everything paid below that height, which is nothing when the
+        // opening reward is already the floor.
+        let before = height
+            .checked_sub(1)
+            .map_or(Amount::ZERO, |last| params.emitted_by(last));
+        json.field_str("beforeTheFloor", &before.in_cairn());
+    } else {
+        json.field_null("floorFrom");
+        json.field_null("beforeTheFloor");
     }
     json.field_str("floorPerBlock", &params.tail_reward.in_cairn());
     json.end_object();

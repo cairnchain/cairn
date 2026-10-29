@@ -123,11 +123,7 @@ fn field(answer: &Response, name: &str) -> String {
         .1;
     match rest.strip_prefix('"') {
         Some(quoted) => quoted.split_once('"').unwrap().0.to_owned(),
-        None => rest
-            .split(|c: char| c == ',' || c == '}')
-            .next()
-            .unwrap()
-            .to_owned(),
+        None => rest.split([',', '}']).next().unwrap().to_owned(),
     }
 }
 
