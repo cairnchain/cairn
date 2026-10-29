@@ -504,7 +504,10 @@ impl CatchUp {
     }
 
     /// Gives back what a claim cost once this node's chain holds the work it
-    /// said, if it came to hold it in time, and forgets the debt otherwise.
+    /// said, if it came to hold it in time, and settles the debt either way.
+    ///
+    /// A debt past its time is left until then rather than dropped: it can
+    /// never be paid, and dropping it earlier would change nothing.
     fn settle(&mut self, now: Instant, ours: u128) {
         let Some(owed) = self.owed else {
             return;
@@ -513,8 +516,6 @@ impl CatchUp {
             if now <= owed.by {
                 self.left = self.left.saturating_add(owed.spent).min(self.whole);
             }
-            self.owed = None;
-        } else if now > owed.by {
             self.owed = None;
         }
     }
