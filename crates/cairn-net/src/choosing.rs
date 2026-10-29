@@ -755,8 +755,20 @@ impl Chooser {
     ///
     /// And never past [`read_at_most`] from the moment the turn began, which
     /// is what a block a window apart, each one higher, bought: the depth's
-    /// worth of windows. `work` is what the branch carries at `height`, which
-    /// is what the peer is ranked by if that bound ends its turn.
+    /// worth of windows. `height` and `work` are those of the block the peer
+    /// sent, which is what the peer is ranked by if that bound ends its turn.
+    ///
+    /// A block that moves the branch to a lower tip renews nothing, and such a
+    /// block is possible while the choice is open: the fork choice weighs by
+    /// work and not by height (`ChainStore::outweighed_by`), so a branch of
+    /// fewer blocks at a higher difficulty is taken over a longer one. The
+    /// peer that sent it keeps its window from its last block higher than
+    /// the rest, and its next one higher renews it. Renewed by every block
+    /// carrying more work whatever its height, a peer near the lowest
+    /// difficulty there is could move the branch back and forth for a handful
+    /// of hashes each, which is the renewal counting by height closed. What a
+    /// peer loses to that is a turn, never a block it sent, which the node
+    /// holds.
     pub fn delivered(&mut self, peer: u64, height: u64, work: u128, now: u64) {
         if let Some((asked, _, at)) = self.asked.as_mut() {
             if *asked == peer && self.reached.is_none_or(|(top, _)| height > top) {

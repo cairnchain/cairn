@@ -1211,6 +1211,16 @@ pub struct Reaction {
     /// (`Chooser::fell_short`): the claim standing in front of it is one the
     /// choice has not looked at yet.
     pub fell_short: Option<(u64, u128)>,
+    /// The height of the block [`Self::applied`] names and the work of the
+    /// branch up to it, which its header states and which holding it made
+    /// true.
+    ///
+    /// Named for the node to tell its chooser what the peer's block took the
+    /// branch to (`Chooser::delivered`). The chain's own tip and work were
+    /// told instead, which are the same thing for a block that extends the
+    /// branch and not for one that fills a gap below blocks held beside it:
+    /// those were sent by somebody, perhaps not by this peer.
+    pub moved_to: Option<(u64, u128)>,
 }
 
 impl Reaction {
@@ -1966,6 +1976,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
                 .flatten();
             let mut reaction = follow_up(chain, peer, now);
             reaction.applied = Some(accepted);
+            reaction.moved_to = Some((height, claimed));
             reaction.outgrew = outgrew;
             reaction.broadcast.push(Located::new(height, id));
             reaction

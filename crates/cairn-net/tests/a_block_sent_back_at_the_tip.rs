@@ -268,3 +268,61 @@ fn a_block_beside_the_branch_below_the_round_does_not_send_the_walk_back() {
          lower and unasked, was taken over it"
     );
 }
+
+/// **What a block moved the branch to is named with the block's own height
+/// and work, and only for a block that moved it.**
+///
+/// The node tells its chooser this for the peer that sent the block, and it
+/// read the chain's tip and work back instead, after letting the chain go:
+/// the same numbers for a block that extends the branch, and whatever the
+/// chain held by then otherwise.
+#[test]
+fn a_block_that_moves_the_branch_names_its_own_height_and_work() {
+    let beside = MINE - 5;
+    let (_, blocks, side) = a_chain_and_a_block_beside_it_at(beside);
+    let mut chain = ChainStore::new(rules());
+    for block in &blocks[..usize::try_from(MINE - 1).unwrap()] {
+        chain.add_block(block.clone(), NOW).unwrap();
+    }
+    let mut peer = PeerState::new(Some(host(2)));
+    met(&mut chain, &mut peer);
+    let mut send = |chain: &mut ChainStore, block: &Block| {
+        let mut local = Local {
+            keeps: KEEPS,
+            nonce: 1,
+            chain,
+            listen: 4242,
+        };
+        on_message(
+            &mut local,
+            &mut peer,
+            Message::Block(Box::new(block.clone())),
+            NOW,
+        )
+    };
+    let tip = &blocks[usize::try_from(MINE - 1).unwrap()];
+    let extended = send(&mut chain, tip);
+    assert!(
+        extended.applied.is_some(),
+        "fixture: the block extends the branch"
+    );
+    assert_eq!(
+        extended.moved_to,
+        Some((MINE - 1, tip.header.total_work)),
+        "a block that extended the branch did not name its own height and work"
+    );
+    let aside = send(&mut chain, &side);
+    assert!(
+        aside.applied.is_none() && chain.held_header(&side.id()).is_some(),
+        "fixture: the block at {beside} is held beside the branch"
+    );
+    assert_eq!(
+        aside.moved_to, None,
+        "a block held beside the branch was named as moving it"
+    );
+    assert_eq!(
+        send(&mut chain, tip).moved_to,
+        None,
+        "a block already held was named as moving the branch"
+    );
+}

@@ -2952,19 +2952,24 @@ A peer whose block is not taken is ranked from then on by what it sent, the
 block's height and the work of the block beneath it, its turn ends, and the
 next turn goes to the heaviest claim left. Only claims heard by the first time
 a block was not taken this way can hold one off afterwards, so the claims that
-can do so only grow fewer. A turn of a read is renewed by a block only when the
-block takes the branch higher than the turn had taken it.
+can do so only grow fewer. A turn is renewed by a block only when the block
+takes the branch higher than the turn had taken it.
 
-**A turn of a read SHOULD end, however it keeps delivering, once it has lasted
-an answering window and the time every block from the first to the one past the
-depth takes at two blocks a second**: thirty seconds and then `(d + 2) / 2`
-seconds rounded up, for a depth `d`, which is 543 seconds, nine minutes and
-three seconds, at a depth of 1 024. A turn so ended ends as one whose block
-was not taken does, with the peer ranked by the branch it delivered and
-nothing held against it. Each block taking the branch higher renews the
-answering window, so without this a peer sending one block a window apart held
-the choice for as many windows as the depth, about eight and a half hours. Two
-blocks a second is half of what a peer's allowance lets through of full
+**A turn SHOULD end, however it keeps delivering and whether it was asked as a
+read or as a join, once it has lasted an answering window and the time every
+block from the first to the one past the depth takes at two blocks a second**:
+thirty seconds and then `(d + 2) / 2` seconds rounded up, for a depth `d`,
+which is 543 seconds, nine minutes and three seconds, at a depth of 1 024. A
+turn asked as a join is given no less than the three minutes a handover has.
+A turn so ended ends as one whose block was not taken does, with the peer
+ranked by the branch it delivered and nothing held against it, except that,
+nothing having been refused, it does not fix the claims that can hold a branch
+off. Each block taking the branch higher renews the answering window, so
+without this a peer sending one block a window apart held the choice for as
+many windows as the depth, about eight and a half hours; and a node holding a
+branch of its own reads the peer of a join turn rather than being handed a
+ledger, so a bound on reads alone left the same hold open on every such turn.
+Two blocks a second is half of what a peer's allowance lets through of full
 blocks; an honest peer slower than that loses nothing it sent, and is read on
 from there at its next turn.
 
