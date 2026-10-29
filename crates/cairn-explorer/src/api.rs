@@ -1018,7 +1018,7 @@ fn maturing_rewards(context: &Context<'_>) -> Option<Amount> {
     let maturity = context.params().coinbase_maturity;
     let next = context.height().map_or(0, |tip| tip.saturating_add(1));
     let mut waiting = Amount::ZERO;
-    for (matures_at, coinbase) in context.chain.state().maturing() {
+    for (matures_at, _) in context.chain.state().maturing() {
         // Still in the window and spendable all the same: the window lets go
         // of a reward on the block that may spend it, so the one maturing
         // there can already be paid out of in the next block, which is what
@@ -1027,9 +1027,6 @@ fn maturing_rewards(context: &Context<'_>) -> Option<Amount> {
             continue;
         }
         let block = context.chain.block_at(matures_at.checked_sub(maturity)?)?;
-        if block.coinbase.id() != coinbase {
-            return None;
-        }
         waiting = waiting.checked_add(block.coinbase.total_output()?)?;
     }
     Some(waiting)

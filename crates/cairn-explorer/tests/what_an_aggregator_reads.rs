@@ -364,3 +364,30 @@ fn rewards_this_node_cannot_count_leave_the_circulating_figure_unknown() {
     assert_eq!(total.status, 200, "the total does not need the blocks");
     explorer.node().shutdown();
 }
+
+/// **The floor is found where the reward first stops falling, on a schedule
+/// whose last halving lands exactly on it.**
+///
+/// The shipped schedule passes the floor between two halvings, so a search
+/// that stopped one halving late would find the same height there and be
+/// wrong on any schedule that halves onto the floor exactly. This one does:
+/// sixty four pebbles halving every four blocks reach the floor of eight at
+/// the third halving.
+#[test]
+fn the_floor_is_where_the_reward_first_stops_falling() {
+    let mut params = params();
+    params.initial_reward = Amount::from_pebbles(64).unwrap();
+    params.tail_reward = Amount::from_pebbles(8).unwrap();
+    params.halving_interval = 4;
+    let blocks = mine(params, 2, in_full(params));
+    let explorer = explorer(params, &blocks);
+    let supply = ask(&explorer, "supply");
+    assert_eq!(field(&supply, "floorFrom"), "12", "{}", body(&supply));
+    assert_eq!(params.reward_at(12), params.tail_reward);
+    assert!(params.reward_at(11) > params.tail_reward);
+    assert_eq!(
+        pebbles(&field(&supply, "beforeTheFloor")),
+        4 * (64 + 32 + 16)
+    );
+    explorer.node().shutdown();
+}
