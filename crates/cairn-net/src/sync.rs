@@ -1228,6 +1228,16 @@ pub struct Reaction {
     /// (`Chooser::fell_short`): the claim standing in front of it is one the
     /// choice has not looked at yet.
     pub fell_short: Option<(u64, u128)>,
+    /// The height of the block [`Self::applied`] names and the work of the
+    /// branch up to it, which its header states and which holding it made
+    /// true.
+    ///
+    /// Named for the node to tell its chooser what the peer's block took the
+    /// branch to (`Chooser::delivered`). The chain's own tip and work were
+    /// told instead, which are the same thing for a block that extends the
+    /// branch and not for one that fills a gap below blocks held beside it:
+    /// those were sent by somebody, perhaps not by this peer.
+    pub moved_to: Option<(u64, u128)>,
 }
 
 impl Reaction {
@@ -1988,6 +1998,7 @@ fn on_block(chain: &mut ChainStore, peer: &mut PeerState, block: Block, now: u64
                 .flatten();
             let mut reaction = follow_up(chain, peer, now);
             reaction.applied = Some(accepted);
+            reaction.moved_to = Some((height, claimed));
             reaction.outgrew = outgrew;
             reaction.broadcast.push(Located::new(height, id));
             reaction
@@ -2541,13 +2552,18 @@ fn answer(
         },
         Message::Chain { from, count } => {
             // Both taken whatever this answer comes to: see
-            // [`PeerState::aside`] and [`PeerState::walk`].
+            // [`PeerState::aside`] and [`PeerState::walk`]. The higher of the
+            // two (`Located` is ordered by height first), since a block held
+            // beside the branch is written whether it was asked for or not:
+            // preferred whatever its height, one sent below the round's last
+            // block on the branch had the round asked again from just above
+            // it, for a block a round.
             let walked = peer
                 .walk
                 .take()
                 .filter(|(asked_from, _)| *asked_from == from)
                 .and_then(|(_, last)| last);
-            let arrived = peer.aside.take().or(walked);
+            let arrived = peer.aside.take().max(walked);
             let lowest = from.max(lowest_worth_asking(local.chain));
             let start = past_what_arrived(local.chain, lowest, arrived);
             let end = from.saturating_add(count);
