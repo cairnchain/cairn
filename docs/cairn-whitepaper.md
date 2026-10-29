@@ -6,11 +6,11 @@ strap:
   A proof-of-work currency in which the state every node must hold is capped
   by consensus rule at a fixed size, and everything beyond that cap is
   carried in sixty four hashes.
-byline: Draft, 31 August 2026
+byline: Draft, 29 October 2026
 byline: [github.com/cairnchain/cairn](https://github.com/cairnchain/cairn)
 byline: testnet-8, no mainnet exists
 abstract: Abstract
-footer: Cairn · draft whitepaper · 29 August 2026
+footer: Cairn · draft whitepaper · 29 October 2026
 footer: Nothing here is investment advice
 footer: No mainnet exists
 ---
@@ -1112,9 +1112,13 @@ estimated, on one core of an ordinary machine.
 
 ## Limitations
 
-**Nothing here has been audited.** No external review has
-taken place. The only network in existence is a test network whose
-currency is worthless by design and which will be reset.
+**Nothing here has been reviewed by a person.** The code, this paper
+and every audit of them so far were written by AI models, directed by
+one person who does not program. The audits were many and adversarial
+and found real defects, listed with their fixes in the guide for
+reviewers, but no human outside the project has checked any of it. The
+only network in existence is a test network whose currency is worthless
+by design and which will be reset.
 
 **A node that started from a handed ledger is not the same node as
 one that read the chain.** A validator that applied every block

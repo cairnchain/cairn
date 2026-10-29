@@ -28,15 +28,48 @@ already done with this problem, and where Cairn stands against it, is in
 `docs/cairn-design.html`.
 
 Review is the contribution most wanted right now, and the paper says plainly
-what it borrows and what limit it accepts.
+what it borrows and what limit it accepts. Someone who knows the field and has
+an afternoon should start with `docs/cairn-review-guide.md`: where each claim
+is, the command that checks it, the serious mistakes this project has already
+made and fixed, and what is still open. How to join the test network is
+`docs/cairn-testnet.md`, and what the project has decided not to decide yet is
+`docs/cairn-open-questions.md`.
+
+Cairn was written, and audited, by an AI model, and no human has reviewed it
+yet. The last section of this page says how it is built.
 
 ## Status
 
-Pre-alpha, and running in public. `testnet-8` opens on 5 October 2026 at
-18:00 UTC: its first block is dated at that moment, because the difficulty's
-schedule starts at its timestamp, and a node installed before then says when
-the network opens and lays the block down itself. Its money is worth nothing, is
-meant to be worth nothing, and the network will be reset.
+Pre-alpha, and running in public. `testnet-8` opened on 5 October 2026 at
+18:00 UTC and has run since without a restart. On 29 October 2026, its
+twenty-fourth day, the public explorer's `/api/status` read height 34 132,
+1 706 600 CAIRN issued, all of it as block rewards, and three peers. No payment
+between two people has been made on it yet: every coin is still where the
+block that issued it put it. The node went from 0.12.0 to 0.14.0 in that time,
+each version installed over the last without the chain starting again. Its
+money is worth nothing, is meant to be worth nothing, and the network will be
+reset.
+
+What went wrong on it, each fixed:
+
+- From 8 October 22:36 UTC to 9 October 08:06 UTC, and again from 9 October
+  12:29 UTC to the morning of 12 October, no block was mined, because the
+  server the only miner ran on was taken offline by its hosting provider, for
+  reasons unrelated to Cairn. The difficulty came back down on its own when
+  it restarted, and a second miner now runs on another machine.
+- On 12 October that restart left the chain far behind its schedule, so it ran
+  at the difficulty floor for a few minutes, as the rule says it must
+  ([open questions](docs/cairn-open-questions.md)); the test network's watcher
+  now rings on such a run ([#293](https://github.com/cairnchain/cairn/pull/293)).
+  The same morning a restarted miner whose every connection lost a tie mined
+  nothing ([#298](https://github.com/cairnchain/cairn/pull/298)), a miner that
+  restarted behind mined on its own old tip
+  ([#299](https://github.com/cairnchain/cairn/pull/299)), and nodes stopped
+  following for about fifteen minutes because a node never asked for a branch
+  that parted more than 72 blocks below its tip
+  ([#300](https://github.com/cairnchain/cairn/pull/300), with
+  [#301](https://github.com/cairnchain/cairn/pull/301) and
+  [#303](https://github.com/cairnchain/cairn/pull/303)).
 
 It is the eighth because a few minutes of hired hash rate could nearly stop
 the chain for 33 hours. On 2 October 2026 a stranger mined eighty blocks in
@@ -72,8 +105,9 @@ A node keeps its chain on disk and replays it on start, and finds its peers by
 asking the ones it already has, so it needs one address to join a network and
 none at all to rejoin one.
 
-There is a node and there is a wallet, and money moves between people on a
-network running on one machine. Every consensus rule is settled, including the
+There is a node and there is a wallet, and money has moved between wallets on
+earlier test networks and in the tests; on `testnet-8` it is waiting for its
+first payment. Every consensus rule is settled, including the
 two that were open longest: the hot set holds 131072 notes, measured at roughly
 68 MB so that a phone can hold it, and the reward halves every two years until
 it reaches a floor it then keeps forever.
@@ -185,8 +219,9 @@ from the age the tip claims, which a reader's own clock bounds. `cargo run
 and `--example searching_for_a_break` is the search that found the second one;
 both check themselves against forgeries that were actually built.
 
-What is left before a network worth trusting: an outside eye on that bound, an
-audit, and enough people running nodes that no single one of them matters.
+What is left before a network worth trusting: an outside eye on that bound, a
+review by people rather than models, and enough people running nodes that no
+single one of them matters.
 
 ## Getting it
 
@@ -392,6 +427,15 @@ cargo run --release -p cairn-crypto --example verify   what a signature costs
 ```
 
 ## How this is built
+
+Cairn's code, documents and tests were written by an AI model (Claude), directed
+by one person who does not program; the commits say so. Every audit so far was
+done by AI models as well: many of them, adversarial and enumerative, and they
+found real defects, some serious, each fixed with a test that fails without the
+fix. No human outside the project has reviewed any of it yet. The audit reports
+themselves are not in this repository; the defects they found that were rated
+critical or high, and the pull request that fixed each, are listed in
+`docs/cairn-review-guide.md`, with what is still open.
 
 The workspace denies `unsafe`, panicking helpers, unchecked arithmetic, and
 slice indexing. Consensus code takes the current time as an argument rather

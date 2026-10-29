@@ -1,0 +1,388 @@
+---
+title: Cairn, les questions ouvertes
+language: fr
+stylesheet: cairn-design.css
+strap:
+  Trois questions qu'une *revue extérieure* a posées, et la position prise
+  sur chacune.
+byline: Questions ouvertes · v1.3
+byline: 31 août 2026, revu le 7 octobre 2026
+byline: Complète le document de conception
+numerals: roman
+subsections: unnumbered
+footer: Cairn · questions ouvertes v1.3
+footer: Statut : positions prises, à discuter
+footer: Rien de ce document n'est un conseil en investissement
+---
+
+# CAIRN
+
+## Le cadre | Trois omissions, pas trois bogues
+
+<p class="lede">Une revue de conception extérieure a relevé trois choses qu'une monnaie doit traiter et que nos documents n'avaient jamais traitées. Rien ne casse, rien ne fuit : ce sont des silences. Après vérification contre le code, la revue a raison sur les trois.</p>
+
+Les trois : ce que la chaîne montre de ses utilisateurs ; ce qu'un ordinateur
+quantique pourrait un jour lui prendre ; et de qui dépend l'épargnant qui
+revient après des années d'absence. La revue place les deux premières au
+premier ordre, et juge la troisième plus grave que nos papiers ne le disent.
+
+La règle de ce document est celle de tous les autres : ce qui suit est établi
+depuis le code, pas depuis nos propres papiers, chaque chiffre est mesuré ou
+compté, et ce qui n'est pas su est écrit comme tel. Un lecteur doit apprendre
+une faiblesse de nous, pas contre nous.
+
+Pour chaque question : ce qui est vrai aujourd'hui, ce que le terrain a déjà
+essayé et à quel prix, ce que cela coûterait ici, la position prise, et ce
+qu'elle change au format du billet. Ce dernier point n'est pas un détail. Une
+règle peut changer à une hauteur annoncée, mais un billet déjà créé garde pour
+toujours la forme qu'il avait en naissant : ce qui se décide du format
+aujourd'hui vaut pour toute la valeur qui se posera dessus.
+
+## La vie privée | Ce que la chaîne montre, et à qui
+
+<p class="lede">Aujourd'hui, Cairn protège moins bien la vie privée que Bitcoin. Non par un choix assumé : par silence. C'est la phrase que nos documents devaient contenir et ne contenaient pas.</p>
+
+### Ce qu'un observateur apprend
+
+L'adresse est écrite sur la chaîne à la création du billet, en clair, à côté
+du montant. Jusqu'à la 0.11.0 c'était la clé publique elle-même ; c'en est
+l'empreinte depuis, ce qui ne change rien à ce qu'un observateur lit. Un
+paiement ordinaire pèse 223 octets et chacun d'eux se lit : quels billets
+meurent, quels billets naissent, pour qui, pour combien, et la différence
+entre les deux, qui est le frais. Rien n'est chiffré nulle part.
+
+Le portefeuille aggrave ce que le protocole expose. Il tient une clé par
+fichier, donc une adresse par personne, réutilisée à chaque paiement : le
+salaire, le loyer et les dons arrivent au même endroit, et quiconque connaît
+l'adresse lit le solde et toute l'histoire. Le papier d'origine de Bitcoin
+recommandait déjà une clé neuve par transaction, et les portefeuilles de ce
+réseau le font par défaut depuis des années. Le nôtre ne le fait pas.
+
+L'explorateur, enfin, industrialise la lecture. Il tient pour chaque
+propriétaire tout ce qu'il a reçu et dépensé, à quelle hauteur, le solde qui
+en découle, et il publie les cinquante détenteurs les plus riches. C'est un
+programme séparé que personne n'est obligé de faire tourner, et cette
+séparation est réelle du côté du coût des nœuds ; du côté de la vie privée
+elle ne protège de rien, car n'importe qui peut construire le même index
+depuis ce que le réseau diffuse de toute façon. Un nœud oublie ; le monde,
+non. Ce qui a été diffusé une fois est public pour toujours.
+
+Le réseau, lui, apprend autre chose que la chaîne : d'où l'on parle. Un
+portefeuille est un nœud, et chacun de ses pairs voit l'adresse IP de la
+machine. Un paiement part vers tous les pairs connectés à l'instant où il est
+envoyé, sans délai ni détour : le premier à le recevoir peut lire d'où il
+vient, et relier cette adresse IP aux billets dépensés, donc à leur
+propriétaire. Bitcoin a la même exposition et a ajouté de quoi la brouiller ;
+Cairn ne l'a pas fait, et c'est un choix qui n'était écrit nulle part. Un
+portefeuille qui doit demander le chemin d'un billet tombé envoie des places
+dans la cave, et une place désigne, pour quiconque a la chaîne, le billet, son
+propriétaire et son montant : il ne la demande donc qu'aux pairs qui disent
+garder toute la cave. Il ne demande pas à ses pairs d'inscrire son adresse
+dans leurs carnets, et un nœud qui ne garde pas toute la cave ne répond à
+personne depuis les chemins qu'il tient pour son propriétaire, ce qui dirait à
+un inconnu à qui est la machine. Il ne compose l'adresse écrite dans le
+programme, la graine, que si moins de deux des pairs rencontrés la fois
+précédente lui répondent. Quand il la compose, la graine voit la session, et
+d'où part un paiement envoyé pendant qu'elle est là ; ce qu'elle en garde, le
+code ne le dit pas.
+
+### Ce que font les autres, et à quel prix
+
+<div class="tablewrap">
+  <table>
+    <caption>Le terrain, honnêtement</caption>
+    <thead><tr><th>Réseau</th><th>Ce qui est caché</th><th>Le prix payé</th></tr></thead>
+    <tbody>
+      <tr><td>Bitcoin</td><td>Rien, mais l'adresse est l'empreinte de la clé et une clé neuve par paiement est la norme</td><td>L'analyse du graphe reste efficace ; des sociétés entières en vivent</td></tr>
+      <tr><td>Monero</td><td>L'expéditeur, le destinataire, le montant</td><td>Environ 2 ko par transaction, dix fois le nôtre ; chaque sortie jamais créée et un reçu par dépense gardés pour toujours, donc un état qui grandit sans borne</td></tr>
+      <tr><td>Zcash</td><td>Tout, dans la partie protégée</td><td>Des transactions de plusieurs kilooctets ; un reçu par dépense gardé pour toujours ; retrouver son propre argent oblige à essayer de déchiffrer chaque sortie de la chaîne</td></tr>
+      <tr><td>Mimblewimble</td><td>Les montants, et le graphe se compacte</td><td>Des paiements interactifs, les deux portefeuilles doivent se parler ; une centaine d'octets par transaction gardés pour toujours</td></tr>
+      <tr class="us"><td>Cairn aujourd'hui</td><td>Rien, et l'adresse est la clé elle-même, réutilisée</td><td>La lecture est gratuite, pour tout le monde, pour toujours</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="push-md">Un motif traverse cette table, et il n'est pas un accident. Cacher qui dépense quoi oblige le réseau à se souvenir de quelque chose par dépense, pour toujours : Monero garde une image de clé, Zcash un jeton de dépense, Mimblewimble un noyau. Ou bien il oblige l'utilisateur à porter l'histoire : les leurres de Monero se tirent parmi toutes les sorties passées, et un portefeuille Zcash qui revient d'absence essaie de déchiffrer tout ce qu'il a manqué. Une mémoire éternelle chez les nœuds, ou l'histoire chez les utilisateurs : les deux sont exactement le coût qui grandit que ce projet existe pour refuser.</p>
+
+Une nuance, parce qu'elle est vraie : notre accumulateur sait prouver
+l'absence, donc un ensemble de reçus de dépense tiendrait chez chaque nœud en
+soixante-quatre empreintes, comme la cave. Ce qui ne tient pas, c'est
+l'entretien. La preuve d'absence d'un reçu encore secret ne peut être
+rafraîchie que par son propriétaire, qui ne peut la confier à personne sans se
+désigner. Le fardeau de mise à jour que ce projet a accepté pour les billets
+s'étendrait à des chemins que nul ne peut surveiller pour vous. Personne n'a
+résolu cela, nous non plus, et ce document ne prétend pas le contraire.
+
+Enfin, tout ce que le terrain déploie pour cacher, montants engagés,
+signatures en anneau, preuves à divulgation nulle, repose sur le logarithme
+discret, que l'adversaire de la section suivante casse.
+
+### La position
+
+<div class="decisions">
+  <div class="dec">
+    <span class="q">La réutilisation d'adresse</span>
+    <span class="a">Le portefeuille tire une clé neuve par paiement, avant le mainnet</span>
+    <span class="why">Une graine unique, des clés dérivées, une adresse fraîche à chaque encaissement. Le portefeuille est déjà un nœud qui lit chaque bloc : reconnaître cent adresses au lieu d'une est une comparaison de plus par sortie, pas un serveur de plus, et personne n'apprend lesquelles il reconnaît, là où un portefeuille sur téléphone, ailleurs, confie sa liste d'adresses au serveur qu'il interroge. Cela ramène Cairn à la norme de Bitcoin, pas au-delà : une dépense qui réunit plusieurs billets les relie publiquement, et une adresse de dons publiée reste un point fixe. C'est un changement de logiciel, pas de protocole, et le fichier de clé actuel reste lisible.</span>
+    <span class="state">Statut : pas commencé. Aucune règle ne lit comment une clé a été faite : c'est un fichier du portefeuille et le balayage qu'il fait déjà, qui peuvent venir dans n'importe quelle version.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Les montants</span>
+    <span class="a">En clair, et ce n'est pas un report</span>
+    <span class="why">Les montants cachés existent et se paient : environ 700 octets de preuve par montant pour établir qu'il n'est pas négatif, une vérification en millisecondes, un paiement qui passe de 223 octets à près d'un kilooctet, le débit divisé par cinq. Le refus ne vient pas de là. Il vient de ce qu'une offre cachée n'est plus vérifiable que par une hypothèse mathématique, le logarithme discret, qu'un ordinateur quantique casse : le jour où il la casse, quelqu'un peut fabriquer de la monnaie cachée et personne, jamais, ne peut le démontrer. Une chaîne dont la promesse est d'être encore vérifiable dans trente ans ne pose pas son émission là-dessus. Cairn promet une offre que n'importe qui recompte, et l'écrit.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Cacher qui paie qui</span>
+    <span class="a">Pas au niveau du protocole tant que le dilemme ci-dessus tient</span>
+    <span class="why">Les adresses furtives coûteraient un balayage à chaque portefeuille et reposent sur un échange de clés qui n'est pas post-quantique ; les reçus de dépense butent sur l'entretien décrit plus haut. Plutôt qu'une promesse vague, une porte laissée ouverte : l'adresse-empreinte de la section suivante est compatible avec des clés à usage unique, donc rien de ce qui se verrouille aujourd'hui n'interdit d'y revenir quand quelqu'un, ici ou ailleurs, aura résolu l'entretien sans mémoire éternelle. D'ici là, ce que Cairn offre est une transparence dite, pas un anonymat manqué.</span>
+  </div>
+  <div class="dec">
+    <span class="q">L'explorateur</span>
+    <span class="a">Il continue de montrer ce que tout le monde peut voir, et le dit</span>
+    <span class="why">Retirer l'index de notre explorateur ne retirerait l'information à personne, sauf au lecteur honnête : le réseau diffuse tout, et le premier venu reconstruit le même index. Le site affichera donc, à côté du solde d'une adresse, que cette page est possible précisément parce que la chaîne est publique. Une conséquence mérite d'être écrite : sur une chaîne transparente, des tiers peuvent juger un billet à son histoire. Les règles, elles, n'en jugent aucun, aucun billet n'y vaut plus ou moins qu'un autre, et c'est tout ce qu'un protocole peut promettre là-dessus. Bitcoin vit avec la même limite ; il la dit rarement.</span>
+  </div>
+</div>
+
+<p class="push-md">Ce que cette position change au format du billet : rien pour les montants, qui restent huit octets en clair. Pour l'adresse, le changement vient de la section suivante, décidé pour une autre raison, et il sert aussi ici.</p>
+
+## L'ordinateur quantique | Un adversaire annoncé trente ans d'avance
+
+<p class="lede">La promesse du projet se compte en décennies, et c'est exactement l'horizon où les estimations publiques placent un ordinateur quantique capable de casser ces clés. La revue a raison : une ligne en aparté ne suffisait pas.</p>
+
+### Ce qui est exposé, précisément
+
+Il y a deux familles de cryptographie dans Cairn, et elles ne tombent pas
+ensemble. La structure, le sceau, les deux forêts, la preuve de travail, les
+identifiants, est faite de fonctions de hachage, que l'ordinateur quantique
+n'entame pas de façon utile. Ce point était déjà dans le document de
+conception, et il tient : l'état, le sceau qui l'engage et l'histoire des
+en-têtes n'ont rien à craindre.
+
+Les fonds, si. Un billet est verrouillé par une signature Ed25519, dont la clé
+secrète se retrouve depuis la clé publique sur un ordinateur quantique assez
+grand. Et tant que l'adresse était la clé publique elle-même, jusqu'à la
+0.11.0, la clé de chaque billet non dépensé était en clair sur la chaîne
+depuis sa création. Un tel adversaire
+n'a pas besoin d'attraper une transaction au vol : il lit la chaîne, à son
+heure, et chaque billet dormant est une cible immobile. L'épargnant,
+précisément celui que ce projet met en avant, est le plus exposé.
+
+Bitcoin fait mieux, et il vaut la peine de dire pourquoi. Une sortie ordinaire
+y porte l'empreinte de la clé, et la clé ne paraît qu'au moment de dépenser :
+un billet jamais dépensé, d'une adresse jamais réutilisée, n'offre rien à
+casser, et la fenêtre d'attaque se réduit aux minutes entre la diffusion d'un
+paiement et son enfouissement. Le bouclier est imparfait, les recensements
+publics situent autour du quart de l'offre de Bitcoin ce qui est déjà à
+découvert, clés réutilisées et sorties des premières années, et le format le
+plus récent, Taproot, y renonce en remettant la clé dans la sortie. Mais la
+norme protège. Cairn n'avait pas la norme : chez nous, cent pour cent de
+l'offre était à découvert, par construction, jusqu'à la décision qui suit.
+
+### Ce que coûterait une signature post-quantique
+
+Les schémas standardisés existent, publiés en 2024 ; un quatrième, Falcon,
+attend encore sa version finale au moment d'écrire. Aucun ne rend les 64
+octets d'Ed25519 : une signature post-quantique se compte en kilooctets, et
+c'est un problème particulier pour une conception dont tout l'intérêt est
+d'être petite. Mesuré contre notre format, un paiement ordinaire, un billet
+dépensé, deux créés, dans un bloc de 128 ko :
+
+<div class="tablewrap">
+  <table>
+    <caption>Un paiement ordinaire sous chaque schéma, adresse en empreinte de clé</caption>
+    <thead><tr><th>Schéma</th><th>Clé publique</th><th>Signature</th><th>Un paiement</th><th>Par bloc</th><th>Par seconde</th></tr></thead>
+    <tbody>
+      <tr><td>Ed25519, adresse = clé (jusqu'à la 0.11.0)</td><td class="num">32 o</td><td class="num">64 o</td><td class="num">191 o</td><td class="num">686</td><td class="num">11,4</td></tr>
+      <tr class="us"><td>Ed25519, adresse en empreinte</td><td class="num">32 o</td><td class="num">64 o</td><td class="num">223 o</td><td class="num">587</td><td class="num">9,8</td></tr>
+      <tr><td>Falcon-512</td><td class="num">897 o</td><td class="num">666 o</td><td class="num">1 690 o</td><td class="num">77</td><td class="num">1,3</td></tr>
+      <tr><td>ML-DSA-44</td><td class="num">1 312 o</td><td class="num">2 420 o</td><td class="num">3 859 o</td><td class="num">33</td><td class="num">0,55</td></tr>
+      <tr><td>SLH-DSA-128s</td><td class="num">32 o</td><td class="num">7 856 o</td><td class="num">8 015 o</td><td class="num">16</td><td class="num">0,27</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="push-md">Le bloc n'est pas la seule victime, et c'est le chiffre qui décide tout. Tant que l'adresse est la clé, la clé vit dans le billet, et le billet vit dans le tiroir que chaque nœud porte : sous ML-DSA-44, chaque billet chaud grossit de 1 280 octets, le tiroir passe d'environ 68 Mo à environ 236 Mo, et le téléphone, qui est la raison d'être du chiffre, ne suit plus. Avec l'adresse en empreinte, le billet garde ses quarante octets quel que soit le schéma : la clé ne paraît que sur le fil, à la dépense, et le tiroir ne bouge pas. C'est la différence entre une migration coûteuse et une migration impossible.</p>
+
+Sur le choix du schéma lui-même : SLH-DSA est le seul qui repose sur les mêmes
+hypothèses que notre structure, du hachage et rien d'autre, et c'est le plus
+lourd du tableau. Falcon est le plus petit et le plus délicat à implémenter
+correctement. Les schémas en treillis sont jeunes à l'échelle où ce projet
+compte. Il n'y a aucune urgence à trancher, à une condition : que le format
+n'ait plus à changer le jour où l'on tranche.
+
+### La position
+
+<div class="decisions">
+  <div class="dec">
+    <span class="q">L'adresse</span>
+    <span class="a">L'empreinte de la clé, plus jamais la clé, avant le mainnet</span>
+    <span class="why">Un billet porte désormais trente-deux octets qui nomment une clé sans la montrer. Le dépensier révèle sa clé en dépensant, le nœud vérifie l'empreinte puis la signature : un hachage et une comparaison de plus. Le prix : trente-deux octets par entrée, un paiement passe de 191 à 223 octets, un bloc de 686 à 587 paiements, 9,8 par seconde. Ce que cela achète : le bouclier de Bitcoin, un billet non dépensé d'une adresse jamais réutilisée n'expose rien, et surtout le découplage, car le billet ne sait plus quel schéma de signature le garde, donc le schéma peut changer sans que le format change. C'est la seule décision de ce document qui doive entrer dans le format avant qu'une chaîne de valeur existe, et elle coûte trente-deux octets.</span>
+    <span class="state">Statut : fait dans la 0.11.0, sur testnet-7. Le billet porte l'empreinte, l'entrée qui le dépense porte la clé, et une adresse s'écrit en Bech32m avec le préfixe de son réseau, tcairn1 sur les réseaux de test, si bien qu'une faute de frappe est refusée au lieu d'être payée.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Le schéma de signature</span>
+    <span class="a">Ed25519 aujourd'hui, aucun schéma post-quantique choisi</span>
+    <span class="why">Choisir aujourd'hui, c'est figer des tailles brutales sur des standards qui ont deux ans, pour un adversaire dont personne ne date l'arrivée. Le mécanisme d'introduction existe déjà : une règle qui change nomme sa hauteur d'activation, et les transferts portent un numéro de version, donc un second type de témoin s'ajoute le jour venu sans rien renuméroter. Chaque année d'attente rend le choix mieux informé, et l'adresse en empreinte fait que rien dans le format ne rend l'attente plus chère. Ce qui se décide maintenant n'est pas le schéma : c'est que le format n'en dépende plus.</span>
+  </div>
+  <div class="dec">
+    <span class="q">La migration, le jour venu</span>
+    <span class="a">Un déménagement des fonds, annoncé, et un bord assumé</span>
+    <span class="why">Aucun protocole ne remplace une clé à la place de son propriétaire : le jour où un schéma post-quantique s'active, chacun devra déplacer ses fonds vers une adresse du nouveau type, et les fonds dont la clé est perdue resteront prenables par l'adversaire. Bitcoin a exactement le même bord et pas de meilleure réponse. Ce que les deux décisions précédentes changent, c'est tout ce qui précède ce jour : avec l'empreinte et sans réutilisation, l'exposition se réduit aux paiements en vol, quelques minutes que nos blocs d'une minute font plus courtes que chez Bitcoin. Elle cesse d'être une propriété du format pour devenir un choix de comportement, ce qui est le mieux qu'une chaîne sache faire.</span>
+  </div>
+</div>
+
+## L'archiviste | De qui dépend l'épargnant qui revient
+
+<p class="lede">La cave n'est pas une perte, disent nos documents, puisqu'un archiviste peut toujours reconstituer une preuve. La revue répond : et s'il n'y en a pas ? Elle a raison de poser la question à cette hauteur, car le personnage le plus concerné est celui que ce projet met en avant, l'épargnant hors ligne depuis des années.</p>
+
+### La situation exacte, chiffrée
+
+Le tiroir tient 131 072 billets, et le plus ancien tombe quand il est plein. À
+blocs pleins, un billet qui ne bouge pas descend à la cave en 3,2 heures ; à
+un dixième du trafic, en 32 heures ; à un centième, en treize jours. La
+fenêtre qui suit la chute, pendant laquelle il se dépense encore sans preuve,
+dure douze minutes à pleine charge. La cave est donc l'état normal de toute
+épargne, pas un cas rare, et le document de conception le disait déjà.
+
+Trois situations, et elles n'appellent pas le même service. Un portefeuille
+allumé ne remarque rien : chaque bloc porte de quoi rafraîchir ses preuves, il
+ne demande rien à personne, et une preuve pèse 586 octets en moyenne à un
+million de billets tombés, de l'ordre du kilooctet à trente ans de chaîne
+pleine. Un portefeuille éteint quelques jours se rattrape en relisant les
+blocs manqués, que les nœuds gardent pour cela : un gigaoctet par défaut,
+environ cinq jours de chaîne pleine.
+
+Au-delà, tout dépend de ce qui a survécu. Celui qui a gardé son carnet, quels
+billets, à quelle position de la forêt, n'a besoin que d'une preuve fraîche.
+La produire demande l'archive de la cave, 104 octets par billet tombé et pas
+encore dépensé, que le programme tient aujourd'hui en mémoire et reconstruit en
+relisant toute la chaîne à chaque démarrage ; cela coûte quelques microsecondes et une réponse d'un kilooctet, et le portefeuille
+vérifie seul le résultat contre les racines que tout nœud tient. La confiance
+demandée est nulle : un archiviste ne peut pas mentir, il peut seulement se
+taire. Celui qui a tout perdu sauf sa clé doit d'abord retrouver ce qu'il
+possède, et cela, l'archive ne le sait pas, car elle tient des empreintes, pas
+des noms. Retrouver demande l'histoire des blocs, ou un index par propriétaire
+comme celui de l'explorateur.
+
+Et personne n'est payé pour tenir l'un ou l'autre. Voilà l'omission, énoncée
+depuis le code : la deuxième garantie du document de conception,
+reconstituable pour toujours, repose sur un rôle que le protocole ne rémunère
+pas, dont le réseau ne dépend pas, et dont l'épargnant, lui, dépend
+entièrement.
+
+<div class="tablewrap">
+  <table>
+    <caption>Ce que pèsent les deux services, mesuré à trente ans, un bloc par minute</caption>
+    <thead><tr><th>La chaîne est</th><th>Paiements / s</th><th>L'archive, pour prouver</th><th>L'histoire, pour retrouver</th></tr></thead>
+    <tbody>
+      <tr><td>pleine à 1 %</td><td class="num">0,1</td><td class="num">8,2 Go</td><td class="num">20,7 Go</td></tr>
+      <tr><td>pleine à 10 %</td><td class="num">1,0</td><td class="num">95,1 Go</td><td class="num">206,7 Go</td></tr>
+      <tr class="us"><td>pleine</td><td class="num">9,8</td><td class="num">962,6 Go</td><td class="num">2,1 To</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="push-md">Même au pire, l'archive tiendrait sur un seul disque ordinaire ; que le programme la garde aujourd'hui en mémoire plutôt que sur disque est un défaut du programme, pas du rôle. C'est un rôle de bénévole au sens où l'archive complète de Bitcoin en est un, à deux différences près : là-bas, tout nouveau venu dépend d'elle, ici seul l'épargnant sans carnet en dépend ; et là-bas elle pèse des téraoctets dès aujourd'hui. Le risque n'est donc pas le prix du service. Le risque est qu'une année calme d'une petite chaîne n'ait personne pour le rendre, et un protocole ne fabrique pas des volontaires. Ce qu'il peut faire : les multiplier, les rendre vérifiables, et les rendre payables.</p>
+
+### Ce qui existe déjà, et ce qui se construit
+
+Deux morceaux sont déjà dans le code. L'explorateur garde la cave entière par
+défaut, en plus de son index : chaque explorateur public est donc déjà,
+matériellement, un point de reconstitution complet, l'index pour retrouver et
+l'archive pour prouver. Et un nœud ordinaire accepte un drapeau qui lui fait
+garder la cave. Le chemin existe aussi depuis le 2 septembre : deux messages du
+protocole réseau permettent de demander à un archiviste où se trouve un billet
+tombé et d'en recevoir la preuve, qu'un portefeuille vérifie seul contre les
+racines que tout nœud tient. Ce qui manque est de payer celui qui la rend.
+
+<div class="decisions">
+  <div class="dec">
+    <span class="q">Le carnet du portefeuille</span>
+    <span class="a">Cinquante-deux octets par billet, exportés et chiffrés</span>
+    <span class="why">L'identifiant, la position, le montant : 52 octets qui ne changent qu'à un paiement, jamais à un bloc, et que le portefeuille exporte chiffrés pour être posés n'importe où. Ce fichier transforme « j'ai tout perdu » en « il me faut une preuve fraîche », c'est-à-dire le service qui ne coûte rien et n'exige aucune confiance. Ce que la graine seule ne pourra jamais : une preuve dépend de la forme de la forêt entière, qu'aucune graine ne connaît. Ce qu'une graine retrouve, ce sont les clés, et avec les clés dérivées de la section II, toutes les adresses. Graine plus n'importe quel archiviste complet suffisent donc au pire cas ; graine seule, jamais, et l'écrire vaut mieux que le laisser croire.</span>
+    <span class="state">Statut : pas commencé. Un fichier qu'un portefeuille écrit et que le même relit : aucun nœud, aucun message, aucun engagement ne le lit, et il peut venir dans n'importe quelle version.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Payer la reconstitution</span>
+    <span class="a">Un marché, petit, non atomique, sans toucher au consensus</span>
+    <span class="why">Le format le permet déjà, et c'était voulu : la signature d'un transfert engage les billets et les montants, jamais le témoin qui les accompagne. Un portefeuille signe donc un transfert qui dépense le billet retrouvé et paie l'archiviste dans une sortie ordinaire ; l'archiviste y attache la preuve et le diffuse. Il ne peut pas détourner un centime, tout est signé ; le portefeuille ne peut guère tricher, dépenser le même billet ailleurs demanderait une autre preuve fraîche, qu'il n'a pas. Le seul vol possible est le frais de reconstitution lui-même, en soufflant la preuve d'une transaction déjà en vol : à ce niveau d'enjeu, viser l'atomicité coûterait au protocole plus que le marché ne pèse. Les deux messages qu'il demande, demander et livrer, sont déjà dans le protocole réseau ; il n'ajoute rien au consensus, rien au format. Le prix se découvre entre les parties ; servir coûte des microsecondes, c'est porter l'ensemble qui se paie.</span>
+  </div>
+  <div class="dec">
+    <span class="q">Qui porte quoi</span>
+    <span class="a">L'archive se découpe, et chaque morceau se vérifie</span>
+    <span class="why">La forêt est un ensemble d'arbres, et les positions ne sont jamais réutilisées : un volontaire peut porter un arbre, ou un intervalle de positions, et servir des preuves sur son morceau seulement. Une preuve fausse ne passe aucune vérification, donc un archiviste partiel n'a rien à prouver sur lui-même pour être utile. Le rôle n'exige ni la totalité, ni une identité, ni une autorisation : il faut seulement qu'à eux tous, les morceaux couvrent l'ensemble, et le marché du point précédent donne une raison de couvrir les morceaux délaissés.</span>
+    <span class="state">Statut : pas commencé. Dire quelles positions un archiviste porte est un champ du message qui annonce ce qu'un nœud garde, et un choix de routage pour la demande de preuves : une version du protocole, qui s'installe sans redémarrer la chaîne.</span>
+  </div>
+  <div class="dec">
+    <span class="q">La fenêtre qui suit la chute</span>
+    <span class="a">Ne bouge pas</span>
+    <span class="why">Elle existe pour le payeur qu'un bloc prend de vitesse, pas pour l'épargnant, et elle ne peut pas servir les deux. Couvrir un an de sommeil à pleine charge demanderait de garder chauds environ 360 millions de billets, soit 186 Go chez chaque nœud : une fenêtre assez grande pour l'épargnant est la cave sous un autre nom, et le plafond du nœud est la raison d'être du projet. Toute la marge de ce côté est déjà prise.</span>
+  </div>
+</div>
+
+<p class="push-md">Ce qui reste vrai après tout cela, et qui doit être écrit plutôt que contourné : la reconstitution repose sur au moins un volontaire portant un ensemble qui grandit. Le protocole rend ce volontaire bon marché, découpable, vérifiable et payable ; il ne peut pas le faire exister. Le testnet est l'expérience qui dira si cela suffit, et ce document sera corrigé par ce qu'elle montre.</p>
+
+## Ce qui se dégage | Une décision achète les trois
+
+Sur trois questions, une seule chose devait entrer dans le format du billet
+avant qu'une chaîne de valeur existe : le propriétaire d'un billet devient
+l'empreinte d'une clé, plus jamais une clé. Trente-deux octets inchangés dans
+le billet, trente-deux de plus par dépense, et cela achète le bouclier
+quantique de Bitcoin, un schéma de signature remplaçable sans toucher au
+format, et une porte ouverte aux clés à usage unique si la vie privée au
+niveau du protocole devient un jour tenable. Tout le reste, clés dérivées
+d'une graine, carnet exporté, marché de la reconstitution, est du logiciel
+autour du format, remplaçable à loisir.
+
+Ce qui reste ouvert, par ordre de certitude décroissante sur ce que nous en
+savons :
+
+<ul class="open">
+  <li><b>L'entretien des preuves secrètes.</b> Cacher qui dépense sans mémoire éternelle chez les nœuds demanderait de rafraîchir des preuves d'absence que personne ne peut surveiller pour leur propriétaire. Notre accumulateur tient la moitié bornée du problème ; personne, nulle part, ne tient l'autre moitié.</li>
+  <li><b>Le choix du schéma post-quantique et sa hauteur.</b> Dans quelques années, mieux informé, sans pénalité d'attente maintenant que le format n'en dépend plus. Le déclencheur honnête est l'état de l'art, pas une date.</li>
+  <li><b>Si le marché de la reconstitution trouve des vendeurs.</b> Une petite chaîne dans une année calme est le cas défavorable, et aucun raisonnement ne remplace l'observation : c'est une question pour le testnet, pas pour ce document.</li>
+</ul>
+
+<p class="pull">La revue demandait que trois silences deviennent trois positions. Les voici : datées, chiffrées, et prises pour être contredites par écrit.</p>
+
+## La difficulté | Ce que la vague testnet-8 laisse ouvert
+
+<p class="lede">Ces questions ne viennent pas de la revue. Elles viennent du testnet : le 2 octobre 2026, un inconnu a miné quatre-vingts blocs en deux minutes et la moyenne mobile qui réglait la difficulté a presque arrêté le réseau pendant 33 heures. La règle a changé ; deux variantes ont été écartées de ce changement, la nouvelle règle donne au premier bloc un poids qu'il n'avait pas, et ce que la même puissance louée peut faire d'autre reste entier. Tout cela est écrit ici plutôt qu'oublié.</p>
+
+La règle est désormais ASERT : ce qu'un bloc doit à la difficulté dépend de
+l'écart entre la chaîne et un calendrier fixé à son premier bloc, avec une
+demi-vie de soixante blocs, une heure sur les réseaux publics, et jamais plus
+d'un facteur quatre d'un bloc au suivant. Une rafale qui porte la difficulté à
+`X` fois celle des mineurs honnêtes a coûté environ `X` fois le débit honnête
+pendant `tau / ln 2` ; elle laisse environ `X` temps-cible au prochain bloc
+honnête, et la chaîne honnête rend en tout l'avance que la rafale a prise sur
+le calendrier, `log2(X)` demi-vies. Le retard grandit donc comme le logarithme
+de ce que la rafale a payé, et non comme ce qu'elle a payé. Mesuré sur une même
+base pour les deux règles, les cent blocs honnêtes suivants arrivent 5,6 heures
+en retard après cinq minutes à 1 260 fois le débit honnête et 11,3 après une
+heure, là où la moyenne mobile en laissait 71 et 298 : à effort égal, treize à
+vingt-six fois moins. La rafale du 2 octobre elle-même, quatre-vingts blocs,
+coûterait encore à la chaîne honnête environ la moitié de ce qu'elle a payé :
+une heure, à cette taille. Le livre blanc donne le tableau.
+
+<ul class="open">
+  <li><b>Lire l'horodatage du bloc lui-même.</b> La règle lit l'horodatage du parent. Une variante lirait celui du bloc en cours : le premier bloc honnête après le départ d'un mineur verrait sa difficulté baisser à mesure que le temps passe, et attendrait au plus environ <code>tau * log2(1 + X T ln 2 / tau)</code> au lieu de <code>X</code> temps-cible. Mais la difficulté d'un en-tête cesserait d'être fixée par son parent seul : la pesée d'une chaîne inconnue, qui déduit le travail minimal d'une suite de blocs de la borne par bloc, raisonnerait sur une règle dont l'en-tête choisit lui-même une partie. Écartée de cette vague pour cette raison, et à rouvrir avec la pesée.</li>
+  <li><b>Réduire la fenêtre aux onze en-têtes de la médiane : non pour testnet-9.</b> Un nœud garde quatre-vingt-onze en-têtes, la fenêtre de l'ancienne moyenne mobile ; la règle n'en lit plus qu'un, la médiane onze. Le nombre est sur le fil : un transfert de registre en porte autant, et la suite qu'une pesée examine commence quatre-vingt-dix en-têtes sous le plus profond tirage. Depuis la vague testnet-9, ces deux suites voient la difficulté et le travail de chaque en-tête jugés à partir du deuxième, l'ancre d'un transfert et l'en-tête épinglé d'une pesée compris, puisque la règle ne lit plus que le parent ; la fenêtre est désormais la portée de ces contrôles, et le premier en-tête de chaque suite reste le seul qu'ils ne voient pas. La réduire rapporterait environ 29 Ko par nouveau venu, rétrécirait d'autant cette portée, et changerait les deux échanges : un nœud ancien et un nouveau ne pourraient plus se passer ni registre ni pesée, un changement qui n'a sa place que dans un réseau qui redémarre de toute façon. Le plancher serait alors douze et non onze : l'assertion qui garde la fenêtre de la médiane sous l'en-tête épinglé en demande un de plus que la marche n'en lit.</li>
+  <li><b>La date du premier bloc compte désormais pour toujours.</b> Le calendrier part de l'horodatage du premier bloc. Un réseau ouvert longtemps après la date de son premier bloc démarre en retard sur son calendrier, au plancher de difficulté, jusqu'à avoir rattrapé ce retard : des blocs presque gratuits. La spécification l'écrit et en tire la règle : le premier bloc d'un réseau public est frappé le jour de son ouverture. Une seule commande frappe désormais le premier bloc du testnet au moment où elle tourne et celui du devnet avec lui, et récrit tout ce qui les cite ; on la lance une dernière fois le jour où le réseau ouvre. Le devnet reste le cas difficile. Son premier bloc était daté vingt-neuf jours avant d'avoir été miné, pour un test qui mine une longue chaîne en avant de lui ; mesuré, un devnet ouvert le jour où ce bloc a été miné atteignait le plancher au treizième bloc et y restait jusqu'au bloc 517 036. Il est désormais daté de deux heures et demie, ce dont ce test a réellement besoin (sa chaîne la plus longue couvre deux heures six minutes du calendrier), et refrappé avec chaque redémarrage : un devnet ouvert le jour de la frappe passe environ mille huit cents blocs au plancher. Cela ne fait que repousser le problème, puisqu'un devnet vieillit d'environ dix-sept mille blocs presque gratuits par jour écoulé depuis. La vraie réponse serait un calendrier propre à chaque devnet lancé, ce qui demande que la date du premier bloc voyage avec une pesée et un transfert de registre : un changement de protocole, laissé à une vague suivante.</li>
+  <li><b>Un grand départ finit lui aussi au plancher.</b> Après le départ d'un mineur qui a porté la difficulté à <code>X</code> fois celle des honnêtes, le premier bloc honnête attend environ <code>X</code> temps-cible. Au-delà d'environ 120 fois, cette attente dépasse deux demi-vies, et la borne de quatre par bloc retient la baisse qui suit : chaque bloc ne descend qu'au quart du précédent, là où le calendrier seul aurait demandé moins tout de suite, et à partir de quelques centaines de fois cela ajoute au blocage environ un tiers de la première attente, <code>X / 3</code> temps-cible. Une heure à 1 260 fois le débit honnête laisse les cent blocs honnêtes suivants 11,3 heures en retard avec la borne et 9,6 sans elle ; le plan avait mesuré la règle sans sa borne et écrit qu'elle ne changeait rien. Au-delà de quelques milliers de fois, le blocage laisse la chaîne plus loin derrière son calendrier que le bord du plancher, <code>log2(D) - 1</code> demi-vies, et la chaîne honnête mine alors des centaines ou des milliers de blocs à la difficulté 1, en quelques minutes, jusqu'à revenir à ce bord : c'est la dette envers le calendrier qui se rembourse. Mesuré sur les règles de testnet-8, quand chaque bloc prend le temps moyen que sa difficulté demande : 579 blocs au plancher après un départ de 2 048 fois, 3 455 après 4 096 fois, moins de cinq heures au débit de l'intrus du 2 octobre, et 9 191 après 8 192 fois ; avec des temps de bloc tirés au hasard, la médiane sur soixante-quatre graines est d'une vingtaine, de 2 244 et de 7 793. Ce document disait aucun après 2 048 fois et 874 après 4 096 fois : des médianes sur seize graines, tombées bas, que l'étude de la vague testnet-9 a refaites. La borne avance cette course et l'allonge. Un paiement inscrit dans ces blocs n'a presque aucun travail derrière lui tant que la chaîne n'est pas remontée, puisqu'une branche de blocs au plancher ne coûte rien. La variante qui lit l'horodatage du bloc lui-même, plus haut, bornerait la première attente ; il faudra la mesurer, borne comprise, avant d'en conclure qu'elle supprime ces deux effets.</li>
+  <li><b>La demi-vie et un plafond à la dette, tranchés pour testnet-9 : soixante blocs, la borne de quatre, pas de plafond.</b> La course au plancher après un grand départ est le remboursement de la dette envers le calendrier, et l'étude de la vague testnet-9 a mesuré chaque levier en simulation, à coût égal pour l'attaquant. Les chiffres de ce paragraphe sont ceux de ses simulations, qui ne sont pas dans ce dépôt, et aucun test d'ici ne les mesure : les départs et les plafonds en médiane sur trente-deux graines (<code>sims/q2_departures.py</code> de l'étude), les pertes de débit sur seize (<code>sims/q2_loss.py</code>), le début de la course au plancher sur le chemin moyen, sans tirage (<code>sims/q2_onset.py</code>). Un plafond qui ne lit que le parent et l'origine ne peut rien effacer : rapporté à la difficulté du parent, c'est la borne de quatre sous un autre nom, et la dette reste entière (mesurée avec une borne de deux et une de huit, la course s'allonge à deux et raccourcit un peu à huit, sans jamais disparaître) ; rapporté à l'origine, c'est une difficulté minimale fixée à l'ouverture, qui ne change que le niveau du rattrapage et arrête une chaîne dont le débit tombe plus bas. Le plafond qui marche porte un état d'un bloc à l'autre, donc un nouveau champ d'en-tête : il supprime la course au plancher et l'aubaine d'une ouverture tardive, mais allonge les grands blocages d'environ cinq heures à <code>K = 2</code> (de rien à deux heures à <code>K = 4</code>), et la chaîne ne rattrape plus jamais son calendrier écrit : elle reste en retard d'environ la durée du blocage, 67 heures à <code>K = 2</code> après un départ de 4 096 fois. Aucune règle de difficulté ne rend non plus coûteuse en temps une réécriture depuis un point de bifurcation ancien, puisque le temps écoulé depuis ce point est réel et gratuit à déclarer ; cette question reste à la revue extérieure. La demi-vie, enfin, déplace les dégâts d'une sorte d'événement à l'autre sans en retirer : à coût égal, cent vingt blocs divisent par deux les grands blocages et ne laissent de course au plancher qu'après une attaque d'environ 9 100 heures du débit honnête au lieu de 2 300, mais une vraie perte de débit se résorbe deux fois plus lentement (après une perte de neuf dixièmes, les mille blocs suivants ont 6,6 heures de retard contre 3,3, et 13,2 contre 6,6 après une perte de quatre-vingt-dix-neuf centièmes). Soixante reste, parce qu'un jeune réseau à peu de mineurs verra des pertes réelles bien plus souvent que des départs de milliers de fois ; cent vingt est l'alternative défendable si l'on juge l'inverse, et demanderait un redémarrage. Ce que la course au plancher abîme se traite hors du consensus. Le surveillant du réseau de test sonne sur une suite de dix blocs au plancher (l'alarme <code>floor-run</code> de <code>.github/scripts/watch_testnet.py</code>). Le portefeuille et l'explorateur devront compter les confirmations d'un paiement au travail au-dessus de lui plutôt qu'en blocs : c'est dû, et ce n'est pas encore fait. Le plafond porté par l'en-tête est décrit et prêt si la revue de lancement du réseau principal tranche autrement, <code>K = 4</code> étant la meilleure constante ; le décider alors, ce sera le décider sans testnet qui l'ait fait tourner.</li>
+  <li><b>Une chaîne jeune se réécrit au-delà de ce qu'un nœud annule.</b> Un nœud n'annule jamais plus de 1 024 blocs, 32 sur le devnet : c'est sa politique, pas une règle de la chaîne. Tant que le réseau est petit, de la puissance louée suffit pour miner en privé une branche plus lourde qui bifurque plus bas que cette limite : 1 024 blocs à la difficulté honnête de testnet-7, c'étaient environ dix-sept heures de travail honnête, et moins d'une minute au débit de l'intrus du 2 octobre. Les nœuds qui suivaient refusent cette branche et disent qu'elle est hors de portée ; les nouveaux venus, et les nœuds qui étaient absents, la pèsent et la prennent, puisqu'elle est la plus lourde. Le réseau se coupe alors en deux pour de bon, sans fautif, et rien ne le recoud. Le calendrier de la difficulté n'y change rien : il fixe ce que coûte un bloc, pas qui en mine le plus. Rien dans le protocole n'y répond, et rien ne le pourrait, puisque c'est l'hypothèse majoritaire achetée à bas prix ; la seule réponse est davantage de puissance honnête. Le modèle de menace l'écrit comme tel.</li>
+</ul>
+
+## Les frais | Ce que le laboratoire D laisse ouvert
+
+Le laboratoire D a montré qu'un paiement qui ne dépense que des billets tombés
+de l'ensemble chaud attendait sans fin derrière des blocs tenus pleins de
+transferts au plancher. Le portefeuille lui proposait son plancher exact, et ce
+plancher laisse à son mineur moins par unité de poids que le remplissage qui ne
+prend aucune place. Le portefeuille propose désormais toujours de quoi passer
+devant ce remplissage-là. C'est la réponse étroite, et elle laisse une question.
+
+<ul class="open">
+  <li><b>Surenchérir sur le bloc suivant, pas seulement sur le plancher.</b> Le portefeuille ne regarde le taux le plus bas de sa réserve que lorsqu'elle est pleine. Une réserve qui tient plus d'un bloc sans être pleine laisse dehors tout ce qui paie moins que le taux le plus bas que le prochain bloc emporterait, si bien qu'un remplissage payé un peu au-dessus du plancher retient encore un paiement proposé juste devant le plancher. La version large proposerait, dès que la réserve tient plus d'un bloc, de quoi dépasser ce taux-là. Elle demande au portefeuille de lire la sélection de son propre nœud, qu'un autre mineur peut trier autrement, et elle fait payer chaque envoi davantage pendant une attaque qui coûte à l'attaquant ce qu'elle coûte aux payeurs. Laissée à plus tard, et à mesurer avant d'être choisie.</li>
+</ul>
