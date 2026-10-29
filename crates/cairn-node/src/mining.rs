@@ -478,10 +478,12 @@ impl CatchUp {
     /// When this node's chain has to hold `work` by, for a claim of it seen
     /// `now` to have been handed over rather than waited for.
     fn made_good_by(&self, now: Instant, chain: Weighed, work: u128) -> Option<Instant> {
-        if chain.per_block == 0 || work <= chain.ours {
+        if work <= chain.ours {
             return None;
         }
-        let ahead = work.saturating_sub(chain.ours) / chain.per_block;
+        let ahead = work
+            .saturating_sub(chain.ours)
+            .checked_div(chain.per_block)?;
         let seconds = self
             .block_time
             .saturating_mul(u64::try_from(ahead).unwrap_or(u64::MAX))
