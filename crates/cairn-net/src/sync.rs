@@ -1635,6 +1635,11 @@ fn request_range(
     if starts_a_batch {
         peer.asked_at = now;
     }
+    // See [`PeerState::round`].
+    peer.round = batch
+        .first()
+        .zip(batch.last())
+        .map(|(first, last)| (*first, last.saturating_add(1)));
     Reaction::reply(vec![Message::GetBlocks(batch)])
 }
 
@@ -2571,9 +2576,6 @@ fn answer(
                 follow_up(local.chain, peer, now)
             } else {
                 peer.walk = Some((from, None));
-                let batch = u64::try_from(MAX_REQUESTED).unwrap_or(u64::MAX);
-                let batch = end.saturating_sub(start).min(batch);
-                peer.round = Some((start, start.saturating_add(batch)));
                 request_range(
                     local.chain,
                     peer,
