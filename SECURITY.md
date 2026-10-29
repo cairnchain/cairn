@@ -1,7 +1,8 @@
 # Reporting a vulnerability
 
-Nothing in this repository has been audited, and the only network in existence
-is a test network whose currency is worthless by design. That does not make a
+Everything in this repository was written and audited by AI models, and no
+person outside the project has reviewed it; the only network in existence is a
+test network whose currency is worthless by design. That does not make a
 flaw uninteresting: the point of finding one now is that it costs nothing to
 fix now.
 

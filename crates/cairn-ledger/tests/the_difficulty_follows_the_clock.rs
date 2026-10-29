@@ -51,7 +51,7 @@ const SPECIFICATION: &str = include_str!("../../../docs/cairn-specification.md")
 
 /// Every other place that says what a burst that leaves costs the honest
 /// chain, by name.
-const ELSEWHERE: [(&str, &str); 9] = [
+const ELSEWHERE: [(&str, &str); 10] = [
     ("README.md", include_str!("../../../README.md")),
     ("genesis.rs", include_str!("../src/genesis.rs")),
     (
@@ -65,6 +65,10 @@ const ELSEWHERE: [(&str, &str); 9] = [
     (
         "the open questions",
         include_str!("../../../docs/cairn-open-questions.md"),
+    ),
+    (
+        "les questions ouvertes",
+        include_str!("../../../docs/cairn-open-questions.fr.md"),
     ),
     ("note.rs", include_str!("../src/note.rs")),
     ("pow.rs", include_str!("../src/pow.rs")),
@@ -819,12 +823,19 @@ fn the_documents_quote_the_floor_run_as_measured() {
     );
     quoted("the specification", "2 244 and 7 793 over sixty four seeds");
     quoted(
-        "the open questions",
+        "les questions ouvertes",
         "579 blocs au plancher après un départ de 2 048 fois",
     );
-    quoted("the open questions", "3 455 après 4 096 fois");
-    quoted("the open questions", "9 191 après 8 192 fois");
-    quoted("the open questions", "2 244 et de 7 793");
+    quoted("les questions ouvertes", "3 455 après 4 096 fois");
+    quoted("les questions ouvertes", "9 191 après 8 192 fois");
+    quoted("les questions ouvertes", "2 244 et de 7 793");
+    quoted(
+        "the open questions",
+        "579 blocks at the floor after a departure from 2 048 times",
+    );
+    quoted("the open questions", "3 455 after 4 096 times");
+    quoted("the open questions", "9 191 after 8 192 times");
+    quoted("the open questions", "2 244 and 7 793");
 }
 
 /// The watcher, which the open questions say rings on a run of floor blocks.
@@ -847,7 +858,7 @@ fn the_open_questions_quote_the_half_life_study_as_simulated_elsewhere() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let (_, questions) = ELSEWHERE
         .iter()
-        .find(|(name, _)| *name == "the open questions")
+        .find(|(name, _)| *name == "les questions ouvertes")
         .unwrap();
     let questions = flat(questions);
     for stated in [
@@ -877,6 +888,30 @@ fn the_open_questions_quote_the_half_life_study_as_simulated_elsewhere() {
         assert!(
             questions.contains(stated),
             "the open questions no longer say \"{stated}\""
+        );
+    }
+    let (_, english) = ELSEWHERE
+        .iter()
+        .find(|(name, _)| *name == "the open questions")
+        .unwrap();
+    let english = flat(english);
+    for stated in [
+        "The figures in this paragraph are those of its simulations, which are not in this \
+         repository, and no test here measures them",
+        "(the study's <code>sims/q2_departures.py</code>)",
+        "the losses of hash rate over sixteen (<code>sims/q2_loss.py</code>)",
+        "on the mean path, with no draw (<code>sims/q2_onset.py</code>)",
+        "67 hours at <code>K = 2</code> after a departure from 4 096 times",
+        "after an attack of about 9 100 hours of the honest rate instead of 2 300",
+        "the next thousand blocks are 6.6 hours late against 3.3",
+        "and 13.2 against 6.6 after a loss of ninety-nine hundredths",
+        "The test network's watcher rings on a run of ten blocks at the floor (the \
+         <code>floor-run</code> alarm of <code>.github/scripts/watch_testnet.py</code>)",
+        "that is owed, and it is not done yet.",
+    ] {
+        assert!(
+            english.contains(stated),
+            "the English open questions no longer say \"{stated}\""
         );
     }
     assert!(
@@ -1060,8 +1095,10 @@ fn the_documents_quote_the_measured_cost_of_a_burst() {
     );
     quoted("the threat model", "5.6 hours late after five minutes");
     quoted("the threat model", "11.3 after an hour");
-    quoted("the open questions", "5,6 heures en retard");
-    quoted("the open questions", "11,3 après une heure");
+    quoted("les questions ouvertes", "5,6 heures en retard");
+    quoted("les questions ouvertes", "11,3 après une heure");
+    quoted("the open questions", "5.6 hours late");
+    quoted("the open questions", "11.3 after an hour");
     quoted(
         "note.rs",
         "5.6 hours after the same five minutes, 11.3 after the same hour",

@@ -31,12 +31,18 @@ use cairn_accumulator::forest::tree_of;
 use cairn_accumulator::Archive;
 use cairn_crypto::SecretKey;
 use cairn_ledger::block::{Block, BlockHeader};
+use cairn_ledger::emission::INITIAL_REWARD_PEBBLES;
 use cairn_ledger::note::{Note, NoteId};
-use cairn_ledger::sampling::{draw, levels_for, open_start, seed_of, MOST_TAIL, SAMPLES};
+use cairn_ledger::sampling::{
+    draw, levels_for, open_start, seed_of, MOST_FALL, MOST_TAIL, SAMPLES,
+};
 use cairn_ledger::state::{header_leaf, GRACE_BLOCKS, GRACE_NOTES};
 use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
-use cairn_ledger::validation::{assemble_block, connect_block, ConsensusParams};
+use cairn_ledger::validation::{
+    assemble_block, connect_block, ConsensusParams, COINBASE_MATURITY, PLACE_PRICE,
+};
 use cairn_ledger::LedgerState;
+use cairn_primitives::amount::PEBBLES_PER_CAIRN;
 use cairn_primitives::codec::Encode;
 use cairn_primitives::Amount;
 
@@ -51,8 +57,16 @@ const DESIGN: &str = include_str!("../../../docs/cairn-design.html");
 /// figure this build decides.
 const PRIOR_ART: &str = include_str!("../../../docs/cairn-prior-art.html");
 /// The open questions paper, which quotes the proof a holder carries and what
-/// an archivist holds.
-const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.html");
+/// an archivist holds, in the French it was written in. The English
+/// translation is held to it figure for figure below, so the French is where
+/// each figure is held to the code.
+const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.fr.html");
+/// The open questions, in English and in the French original, as written.
+const QUESTIONS_EN: &str = include_str!("../../../docs/cairn-open-questions.md");
+const QUESTIONS_FR: &str = include_str!("../../../docs/cairn-open-questions.fr.md");
+/// The page for an outside reviewer, and the page for joining the test network.
+const REVIEW_GUIDE: &str = include_str!("../../../docs/cairn-review-guide.md");
+const TESTNET: &str = include_str!("../../../docs/cairn-testnet.md");
 const SITE_EN: &str = include_str!("../../../web/i18n/en.json");
 /// The site's page, whose description is what a search engine shows.
 const SITE_PAGE: &str = include_str!("../../../web/index.html");
@@ -2326,5 +2340,154 @@ fn the_papers_price_a_flood_of_the_hot_set_from_the_constants() {
             "exempt for up to {free} extra outputs a block, free"
         )),
         "the threat model's eviction-cap row does not give the miner's free channel, {free}"
+    );
+}
+
+/// Every figure in a document, in the order it is written, with its digit
+/// groups joined and a decimal comma read as a point, and the front matter
+/// left out: "131 072" and "5,6" in French are the same figures as "131 072"
+/// and "5.6" in English.
+fn figures_of(document: &str) -> Vec<String> {
+    let body = document
+        .split_once("\n---\n")
+        .map_or(document, |(_, body)| body);
+    let chars: Vec<char> = body.chars().collect();
+    let mut figures = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        if !chars[at].is_ascii_digit() {
+            at += 1;
+            continue;
+        }
+        let mut figure = String::new();
+        while at < chars.len() {
+            let c = chars[at];
+            let next_is_digit = chars.get(at + 1).is_some_and(char::is_ascii_digit);
+            if c.is_ascii_digit() {
+                figure.push(c);
+            } else if matches!(c, ',' | '.') && next_is_digit {
+                figure.push('.');
+            } else if !(matches!(c, ' ' | '\u{a0}' | '\u{202f}') && next_is_digit) {
+                break;
+            }
+            at += 1;
+        }
+        figures.push(figure);
+    }
+    figures.sort();
+    figures
+}
+
+/// **The open questions say the same figures in English as in the French
+/// they were written in.**
+///
+/// The paper was French only, and it is the one that says what is still
+/// open, so a reviewer who reads no French could not read it. The English
+/// is a translation, and every guard on a figure of it reads the French: a
+/// figure corrected in one language and not the other would leave the
+/// English unguarded and wrong. So the two are held to carry the same
+/// figures, as many times each.
+#[test]
+fn the_open_questions_say_the_same_figures_in_both_languages() {
+    let english = figures_of(QUESTIONS_EN);
+    let french = figures_of(QUESTIONS_FR);
+    assert!(
+        english.len() > 100,
+        "the English open questions carry only {} figures, which is not the paper",
+        english.len()
+    );
+    let only = |one: &[String], other: &[String]| {
+        let mut left = other.to_vec();
+        one.iter()
+            .filter(|figure| {
+                left.iter()
+                    .position(|seen| seen == *figure)
+                    .map(|at| left.remove(at))
+                    .is_none()
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        only(&english, &french),
+        Vec::<String>::new(),
+        "figures the English open questions say and the French do not"
+    );
+    assert_eq!(
+        only(&french, &english),
+        Vec::<String>::new(),
+        "figures the French open questions say and the English do not"
+    );
+}
+
+/// A count written with its thousands apart, the way the documents write it.
+fn spaced(count: u64) -> String {
+    let digits = count.to_string();
+    let mut out = String::new();
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at) % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// **The page for reviewers and the page for joining the test network quote
+/// what this build holds, and what the paper says.**
+///
+/// Both pages restate figures an outside reader acts on first: the cap, the
+/// grace window, the place price, the count of draws, the fall a tip may
+/// take, the reward and when it can be spent. The rules give the first set
+/// here; the measured ones, the share the draw holds to, the depth it
+/// guarantees and the price of a seed, are held to the paper, whose own
+/// guards hold them to the measurements.
+#[test]
+fn the_pages_for_outside_readers_quote_this_build_and_the_paper() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let guide = flat(REVIEW_GUIDE);
+    let testnet = flat(TESTNET);
+    let paper = flat(PAPER);
+    let params = ConsensusParams::testnet();
+    for said in [
+        format!("{} notes, about 68 MB", spaced(params.hot_capacity as u64)),
+        format!("grace window of {GRACE_BLOCKS} blocks"),
+        format!("at most {} notes", spaced(GRACE_NOTES as u64)),
+        format!(
+            "place price of {} pebbles",
+            spaced(PLACE_PRICE.as_pebbles())
+        ),
+        format!("{} draws", spaced(SAMPLES as u64)),
+        format!("more than {MOST_FALL} times below the hardest header of its run"),
+    ] {
+        assert!(
+            guide.contains(&said),
+            "the reviewers' guide does not say `{said}`"
+        );
+    }
+    for said in [
+        "42.96% of the world's work",
+        "about 633 blocks",
+        "2^18.9 hashes",
+        "2<sup>-5.8</sup> instead of 2<sup>-128</sup>",
+        "512 draws and 45.7%",
+    ] {
+        assert!(
+            guide.contains(said),
+            "the reviewers' guide does not say `{said}`"
+        );
+        assert!(
+            paper.contains(said),
+            "the reviewers' guide says `{said}` and the paper does not"
+        );
+    }
+    let reward = INITIAL_REWARD_PEBBLES / PEBBLES_PER_CAIRN;
+    let said = format!(
+        "A block pays {reward} CAIRN, which can be spent {} blocks after it",
+        spaced(COINBASE_MATURITY)
+    );
+    assert!(
+        testnet.contains(&said),
+        "the testnet page does not say `{said}`"
     );
 }
