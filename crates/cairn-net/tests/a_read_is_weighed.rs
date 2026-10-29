@@ -671,3 +671,74 @@ fn a_visitor_dripping_its_branch_holds_a_newcomer_off_for_one_read_s_bound() {
          the bound of {bound:?}"
     );
 }
+
+/// **A stranger whose read runs out at its bound does not leave the claims
+/// heard after it counting for nothing.**
+///
+/// The newcomer reaches one stranger first, which claims a thousand times the
+/// honest work, keeps no headers and drips its branch a block a little inside
+/// every answering window, so its read is ended by [`read_at_most`] and not
+/// by a block refused. Only then does it reach the honest seed, and a visitor
+/// claiming more again, keeping no headers and pushing the floor branch one
+/// block past the depth. A read ended at its bound used to fix the claims
+/// that hold a branch off at that moment, as a refusal does, and the seed's
+/// claim, heard after it, held nothing off: the visitor's block past the
+/// depth was taken and the newcomer was left on a chain it could not undo.
+#[test]
+fn a_read_that_ran_out_at_its_bound_leaves_later_claims_weighing_a_branch() {
+    let (honest_chain, visitor_chain) = the_two_chains();
+    let seed = Node::bind(rules(), loopback()).unwrap();
+    for block in &honest_chain {
+        seed.submit_block(block.clone()).unwrap();
+    }
+    let honest_tip = seed.with_chain(ChainStore::tip).unwrap();
+    let newcomer = Node::bind(rules(), loopback()).unwrap();
+
+    let dripped = Arc::new(AtomicBool::new(false));
+    let stranger = drip(
+        newcomer.address(),
+        seed.total_work().saturating_mul(1_000),
+        &visitor_chain[..=usize::try_from(UNDO).unwrap()],
+        Duration::from_secs(ANSWERING_WINDOW - 8),
+        &dripped,
+    );
+    assert!(
+        wait_until(PATIENCE, || dripped.load(Ordering::SeqCst)),
+        "fixture: the choice asked the stranger for its branch"
+    );
+    // Its bound and a few rounds of upkeep, with nobody else to ask.
+    thread::sleep(Duration::from_secs(read_at_most(UNDO) + 4));
+    assert!(
+        newcomer.height().unwrap_or(0) < UNDO,
+        "fixture: the stranger's read ran out short of the depth, at {:?}",
+        newcomer.height()
+    );
+
+    let asked = Arc::new(AtomicBool::new(false));
+    let visitor = visit(
+        newcomer.address(),
+        seed.total_work().saturating_mul(1_000_000),
+        &visitor_chain,
+        visitor_chain.len(),
+        &asked,
+    );
+    newcomer.connect(seed.address()).unwrap();
+    let took_the_honest_chain = wait_until(PATIENCE, || {
+        newcomer.with_chain(ChainStore::tip) == Some(honest_tip)
+    });
+    let (height, on_the_visitor) = (
+        newcomer.height(),
+        newcomer.id_at(1) == Some(visitor_chain[1].id()),
+    );
+    let _ = visitor.shutdown(Shutdown::Both);
+    let _ = stranger.shutdown(Shutdown::Both);
+    newcomer.shutdown();
+    seed.shutdown();
+    assert!(
+        took_the_honest_chain,
+        "after a stranger's read ran out at its bound, a visitor pushing a floor branch past \
+         the depth left the newcomer at height {height:?}, on the visitor's chain: \
+         {on_the_visitor}, rather than on the honest chain of {HONEST_BLOCKS} blocks its seed \
+         holds: the seed's claim, heard after the read ran out, held nothing off"
+    );
+}

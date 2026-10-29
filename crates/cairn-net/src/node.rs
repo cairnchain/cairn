@@ -4921,9 +4921,10 @@ impl Node {
                     directory: directory.display().to_string(),
                 });
             }
-            std::fs::File::create(&marker)
-                .and_then(|file| file.sync_all())
-                .map_err(NodeError::Io)?;
+            // Through the store, as every file a node cannot do without: a
+            // file's own sync makes its bytes durable and not the name that
+            // finds it, which is all this file is.
+            write_beside_and_move(&marker, b"").map_err(NodeError::Io)?;
         }
         let reads_from_the_first = marker.exists();
         let (mut log, recovered) = BlockLog::open(&directory).map_err(in_file(BLOCK_LOG))?;
@@ -5944,8 +5945,8 @@ impl Node {
     /// whose clock is behind a network that has opened reads exactly the
     /// same from here.
     pub fn opening(&self) -> Option<Opening> {
-        let holds_a_chain = !self.shared.chain().is_empty();
-        not_yet_open(&self.shared.params, holds_a_chain, unix_now())
+        let holds_blocks = !self.shared.chain().is_empty();
+        not_yet_open(&self.shared.params, holds_blocks, unix_now())
     }
 
     /// What this node is still missing before it can show a newcomer the
@@ -10164,9 +10165,10 @@ where
         // Only the ones this node went out and found. A connection somebody
         // else opened does not tell this node anything about the network: the
         // stranger chose it. The half a tie kept in place of a dial is the one
-        // exception, being the peer that dial found. Counting those was enough to stop a node dialling
-        // at all: hold eight connections open and it never looks for anybody
-        // again, and then sees the world through whoever is holding them.
+        // exception, being the peer that dial found. Counting those was
+        // enough to stop a node dialling at all: hold eight connections open
+        // and it never looks for anybody again, and then sees the world
+        // through whoever is holding them.
         // The neighbourhoods this node already went out to.
         let held: HashSet<Group> = peers
             .values()
@@ -11099,11 +11101,7 @@ fn read_loop(
         // peer claimed is what it sent in place of what it said, and one that
         // would have ended the choice on less than another claim states is
         // what it sent too, and the end of its turn.
-        if reaction.applied.is_some() {
-            let (height, work) = {
-                let chain = shared.chain();
-                (chain.height().unwrap_or(0), chain.total_work())
-            };
+        if let Some((height, work)) = reaction.moved_to {
             shared.choosing().delivered(id, height, work, last_heard);
         }
         if let Some((height, work)) = reaction.outgrew {

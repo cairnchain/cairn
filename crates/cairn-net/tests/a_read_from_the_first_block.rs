@@ -514,6 +514,41 @@ fn a_read_from_the_first_block_starts_only_over_a_directory_holding_no_chain() {
     );
 }
 
+/// **The marker is written the way every file a node cannot start without
+/// is: staged beside its place, synced, moved in, and the directory synced.**
+///
+/// Created in place and synced, its bytes reached the disk and its name, which
+/// is all it is, could still be lost to the machine stopping, and a node
+/// started again over the directory was a newcomer to be handed a ledger. No
+/// test cuts the power, so this holds the path the marker is written by: a
+/// staged copy an earlier write left behind is moved in, and none remains.
+#[test]
+fn the_marker_is_written_as_a_file_a_node_cannot_start_without() {
+    let directory = scratch("marker-staged");
+    std::fs::create_dir_all(&directory).unwrap();
+    let marker = directory.join(READING_FROM_THE_FIRST);
+    let staged = cairn_store::staged_beside(&marker);
+    std::fs::write(&staged, b"left by a write the machine stopped").unwrap();
+    let (node, _) = Node::open_recovering(rules(), loopback(), &directory, &[]).unwrap();
+    let reads = node.reads_from_the_first_block();
+    node.shutdown();
+    drop(node);
+    let (left, written) = (staged.exists(), std::fs::read(&marker).ok());
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(reads, "fixture: the node reads from the first block");
+    assert!(
+        !left,
+        "a copy staged beside the marker is still there: the marker was not written through \
+         the store's staged write, which syncs the directory that names it"
+    );
+    assert_eq!(
+        written.as_deref(),
+        Some(&b""[..]),
+        "the marker is an empty file"
+    );
+}
+
 /// **A marker that cannot be taken off the disk is said, and the node goes on
 /// reading from the first block.**
 ///
