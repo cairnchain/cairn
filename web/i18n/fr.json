@@ -614,7 +614,7 @@
       "body": [
         "Ceci est un réseau de test. Le CAIRN qui s'y trouve ne vaut rien, et il est fait pour ne rien valoir.",
         "Le réseau sera réinitialisé. Ce jour-là, tous les soldes disparaissent et rien n'est reporté vers un réseau futur. N'en achetez pas, n'en vendez pas, n'en acceptez pas en paiement.",
-        "Cairn n'a pas été auditée. N'y mettez rien qui compte pour vous."
+        "Cairn n'a été auditée que par des modèles d'IA, jamais par une personne. N'y mettez rien qui compte pour vous."
       ]
     },
     "get": {
@@ -753,6 +753,8 @@
     "design": "Comment c’est construit",
     "openQuestions": "Ce qui n’est pas tranché",
     "priorArt": "Ce qui existait avant",
+    "forReviewers": "Pour les relecteurs",
+    "testnet": "Rejoindre le réseau de test",
     "source": "Le code source",
     "watching": "Cette page ne fait que lire. Elle ne détient aucune clé, elle ne peut rien signer, et elle ne vous en demandera jamais.",
     "node": "{network} · {blocks} blocs lus sur {height} · depuis {genesis}"

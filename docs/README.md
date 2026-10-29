@@ -51,8 +51,17 @@ normative, and `crates/cairn-explorer/tests/the_integration_guide.rs` holds
 every default, command and figure in it to the programs.
 
 **`cairn-design.md`**, **`cairn-open-questions.md`**, **`cairn-prior-art.md`**
-are the project's own reasoning, in French, for readers who want the thinking
-rather than the protocol.
+are the project's own reasoning, for readers who want the thinking rather than
+the protocol. The design notes and the survey are in French. The open questions
+are in English, translated from the French original kept beside them as
+`cairn-open-questions.fr.md`; a test holds the two to the same figures, so a
+number changed in one is changed in the other.
+
+**`cairn-review-guide.md`** is for an outside reviewer: where each claim is,
+the command that checks it, the serious defects already found and fixed, and
+what is open. **`cairn-testnet.md`** is how to join the test network. Every
+command either names is run against the release it is written for before it
+is published, and a test checks that every file and test it names exists.
 
 ## House style
 

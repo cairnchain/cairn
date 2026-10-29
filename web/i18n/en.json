@@ -614,7 +614,7 @@
       "body": [
         "This is a test network. The CAIRN on it is worth nothing, and it is meant to be worth nothing.",
         "The network will be reset. When it is, every balance on it disappears and nothing is carried over to any future network. Do not buy it, do not sell it, do not accept it as payment.",
-        "Cairn has not been audited. Do not put anything you care about on it."
+        "Cairn has been audited by AI models only, never by a person. Do not put anything you care about on it."
       ]
     },
     "get": {
@@ -753,6 +753,8 @@
     "design": "How it is built",
     "openQuestions": "What is not settled",
     "priorArt": "What came before",
+    "forReviewers": "For reviewers",
+    "testnet": "Join the test network",
     "source": "The source",
     "watching": "This page only reads. It holds no key, it can sign nothing, and it will never ask you for one.",
     "node": "{network} · {blocks} of {height} blocks read · from {genesis}"

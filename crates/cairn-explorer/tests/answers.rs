@@ -2037,7 +2037,8 @@ fn the_pages_that_quote_the_hot_set_quote_what_this_program_serves() {
     const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
     const DESIGN: &str = include_str!("../../../docs/cairn-design.html");
     const README: &str = include_str!("../../../README.md");
-    const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.html");
+    // The French original; the English is held to it figure for figure.
+    const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.fr.html");
 
     let explorer = explorer(ConsensusParams::testnet());
     let status = body(&ask(&explorer, "status"));

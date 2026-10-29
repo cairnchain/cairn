@@ -30,7 +30,9 @@ const FR: &str = include_str!("../../../web/i18n/fr.json");
 const SCRIPT: &str = include_str!("../../../web/cairn.js");
 const PAGE: &str = include_str!("../../../web/index.html");
 const PAPER: &str = include_str!("../../../docs/cairn-whitepaper.html");
-const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.html");
+/// The open questions in the French they were written in, whose decisions
+/// the English translation states figure for figure.
+const QUESTIONS: &str = include_str!("../../../docs/cairn-open-questions.fr.html");
 
 /// The crates the workspace is made of, read from the workspace.
 fn members() -> Vec<String> {
@@ -850,13 +852,34 @@ fn the_threat_model_names_only_what_the_repository_holds() {
 /// decision, fails here.
 #[test]
 fn each_of_the_four_decisions_of_31_august_says_where_it_stands() {
-    for (decision, state) in [
-        ("La réutilisation d'adresse", "Statut : pas commencé."),
-        ("L'adresse", "Statut : fait dans la 0.11.0, sur testnet-7."),
-        ("Le carnet du portefeuille", "Statut : pas commencé."),
-        ("Qui porte quoi", "Statut : pas commencé."),
+    const ENGLISH: &str = include_str!("../../../docs/cairn-open-questions.html");
+    for (paper, decision, state) in [
+        (
+            QUESTIONS,
+            "La réutilisation d'adresse",
+            "Statut : pas commencé.",
+        ),
+        (
+            QUESTIONS,
+            "L'adresse",
+            "Statut : fait dans la 0.11.0, sur testnet-7.",
+        ),
+        (
+            QUESTIONS,
+            "Le carnet du portefeuille",
+            "Statut : pas commencé.",
+        ),
+        (QUESTIONS, "Qui porte quoi", "Statut : pas commencé."),
+        (ENGLISH, "Address reuse", "Status: not started."),
+        (
+            ENGLISH,
+            "The address",
+            "Status: done in 0.11.0, on testnet-7.",
+        ),
+        (ENGLISH, "The wallet's record", "Status: not started."),
+        (ENGLISH, "Who carries what", "Status: not started."),
     ] {
-        let block = QUESTIONS
+        let block = paper
             .split_once(&format!("<span class=\"q\">{decision}</span>"))
             .unwrap_or_else(|| panic!("the open questions paper no longer holds `{decision}`"))
             .1
@@ -931,5 +954,77 @@ fn no_address_page_claims_nothing_can_be_paid_to_a_key_nobody_holds() {
                 "the {language} site still says `{stale}`, which the address format made false"
             );
         }
+    }
+}
+
+/// **The pages for outside readers name only files the repository holds, and
+/// only tests and examples that exist.**
+///
+/// The guide for reviewers was drafted with a test named after what it
+/// should have shown, `audit_a_burial_from_every_fork_point`, where the file
+/// is `audit_a_burial_from_three_fork_ages`, and the first command a reviewer
+/// copied would have failed. A reader whose first command fails stops there.
+/// So every path these pages name has to exist, and every `cargo` command
+/// has to name a crate and a test or example the workspace has.
+#[test]
+fn the_pages_for_outside_readers_name_only_what_the_repository_holds() {
+    const GUIDE: &str = include_str!("../../../docs/cairn-review-guide.md");
+    const TESTNET: &str = include_str!("../../../docs/cairn-testnet.md");
+    let exists = |path: &str| std::path::Path::new(&format!("../../{path}")).exists();
+    for (page, text, least) in [
+        ("the reviewers' guide", GUIDE, 11),
+        ("the testnet page", TESTNET, 0),
+    ] {
+        let spans = text
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .chain(
+                text.split("<code>")
+                    .skip(1)
+                    .filter_map(|rest| rest.split_once("</code>").map(|(span, _)| span)),
+            )
+            .chain(text.lines().map(str::trim));
+        let mut commands = 0;
+        for span in spans {
+            for word in span.split_whitespace() {
+                if ["crates/", "deploy/", "docs/", ".github/"]
+                    .iter()
+                    .any(|root| word.starts_with(root))
+                {
+                    assert!(exists(word), "{page} names `{word}`, which is not here");
+                }
+            }
+            let Some(command) = span.strip_prefix("cargo ") else {
+                continue;
+            };
+            let words: Vec<&str> = command.split_whitespace().collect();
+            let after = |flag: &str| {
+                words
+                    .iter()
+                    .position(|word| *word == flag)
+                    .and_then(|at| words.get(at + 1).copied())
+            };
+            let Some(package) = after("-p") else {
+                continue;
+            };
+            let target = after("--test")
+                .map(|test| format!("crates/{package}/tests/{test}.rs"))
+                .or_else(|| {
+                    after("--example")
+                        .map(|example| format!("crates/{package}/examples/{example}.rs"))
+                });
+            if let Some(target) = target {
+                assert!(
+                    exists(&target),
+                    "{page} runs `cargo {command}`, and `{target}` is not here"
+                );
+                commands += 1;
+            }
+        }
+        assert!(
+            commands >= least,
+            "{page} runs {commands} commands that name a test or an example, fewer than {least}"
+        );
     }
 }

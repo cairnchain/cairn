@@ -47,7 +47,7 @@ macro_rules! paper {
     };
 }
 
-pub(crate) const PAPERS: [(&str, &str); 7] = [
+pub(crate) const PAPERS: [(&str, &str); 10] = [
     ("/whitepaper", paper!("../../../docs/cairn-whitepaper.html")),
     (
         "/specification",
@@ -62,7 +62,16 @@ pub(crate) const PAPERS: [(&str, &str); 7] = [
         "/open-questions",
         paper!("../../../docs/cairn-open-questions.html"),
     ),
+    (
+        "/open-questions/fr",
+        paper!("../../../docs/cairn-open-questions.fr.html"),
+    ),
     ("/prior-art", paper!("../../../docs/cairn-prior-art.html")),
+    (
+        "/for-reviewers",
+        paper!("../../../docs/cairn-review-guide.html"),
+    ),
+    ("/testnet", paper!("../../../docs/cairn-testnet.html")),
     (
         "/integration",
         paper!("../../../docs/cairn-integration.html"),
