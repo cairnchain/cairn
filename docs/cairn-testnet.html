@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Join testnet-8</title>
+<link rel="stylesheet" href="cairn-whitepaper.css">
+<div class="paper" lang="en">
+
+<header class="title">
+  <h1>Join testnet-8</h1>
+  <p class="strap">
+    How to run a node on Cairn's public test network, make a wallet from
+    twenty four words, get test coins and pay someone, on Linux, macOS or
+    Windows.
+  </p>
+  <div class="byline">
+    <span>For release 0.14.0, 29 October 2026</span>
+    <span><a href="https://github.com/cairnchain/cairn">github.com/cairnchain/cairn</a></span>
+    <span>Every command below was run against that release and the live network</span>
+  </div>
+</header>
+
+<div class="abstract">
+  <h2>What this is</h2>
+  <p>
+    <code>testnet-8</code> is Cairn's public test network. It opened on 5 October 2026 at
+    18:00 UTC. Its coins are worthless, are meant to stay worthless, and the
+    network will be reset; nothing on it carries over to anything else. It is
+    here to be run, attacked and criticised.
+  </p>
+
+  <p>
+    Cairn was written, and audited, by an AI model, and no human has reviewed it
+    yet. <a href="https://cairnchain.org/for-reviewers">The guide for reviewers</a> says
+    where the claims are and what has already gone wrong.
+  </p>
+</div>
+
+<section>
+  <div class="num">1</div>
+  <div class="body">
+    <h2 id="what-you-need">What you need</h2>
+    <p>
+      A computer running Linux, macOS or Windows, a few hundred megabytes of disk,
+      and a connection that reaches the internet. No account and no key from us.
+      Each command below is written for a terminal opened in the folder the
+      archive unpacks to; on Windows, in PowerShell, write <code>.\cairnd.exe</code> where
+      this page writes <code>./cairnd</code>, and the same for the other two programs.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">2</div>
+  <div class="body">
+    <h2 id="get-the-programs">Get the programs</h2>
+    <p>
+      Download the archive for your system from the
+      <a href="https://github.com/cairnchain/cairn/releases/tag/v0.14.0">release page</a>,
+      with the <code>SHA256SUMS</code> file beside it, and unpack it:
+    </p>
+
+    <pre><code>tar -xzf cairn-linux-x86_64.tar.gz
+cd cairn-0.14.0-linux-x86_64</code></pre>
+
+    <p>
+      The other archives are <code>cairn-linux-arm64.tar.gz</code>,
+      <code>cairn-macos-apple-silicon.tar.gz</code>, <code>cairn-macos-intel.tar.gz</code> and
+      <code>cairn-windows-x86_64.zip</code>, which PowerShell unpacks with
+      <code>Expand-Archive cairn-windows-x86_64.zip -DestinationPath .</code>. Each holds the
+      same three programs: <code>cairnd</code>, the node, <code>cairn-wallet</code> and <code>cairn-explorer</code>.
+    </p>
+
+    <p>
+      Your system will warn you that the programs are not signed with a paid
+      certificate. On macOS, once you have checked them, tell it where they came
+      from:
+    </p>
+
+    <pre><code>xattr -d com.apple.quarantine cairnd cairn-wallet cairn-explorer</code></pre>
+
+    <p>
+      There are three checks, and they prove different things. The first only
+      shows that the download arrived whole, against the list published beside it:
+    </p>
+
+    <pre><code>shasum -a 256 -c SHA256SUMS --ignore-missing</code></pre>
+
+    <p>
+      On Windows, <code>certutil -hashfile cairn-windows-x86_64.zip SHA256</code> prints the
+      hash to compare with its line in <code>SHA256SUMS</code>.
+    </p>
+
+    <p>
+      The second asks GitHub which commit and which workflow built the archive.
+      It needs the GitHub command line, <code>gh</code>, signed in to a GitHub account of
+      your own:
+    </p>
+
+    <pre><code>gh attestation verify cairn-macos-apple-silicon.tar.gz --repo cairnchain/cairn</code></pre>
+
+    <p>
+      The third needs nobody's word, GitHub's included, and is described at the
+      end of this page: build the Linux archive again from its tag and compare the
+      bytes.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">3</div>
+  <div class="body">
+    <h2 id="run-a-node">Run a node</h2>
+    <pre><code>./cairnd</code></pre>
+
+    <p>
+      That is the whole command. The addresses it starts from are written into the
+      program, as the network's first block is. Within a minute it prints a status
+      line with a height close to the explorer's at https://cairnchain.org and a
+      few peers. It does not download the whole history: a newcomer is handed a
+      ledger by a peer, after weighing a sample of the headers, and checks the
+      blocks above it itself. For a while it also says it cannot yet show the chain
+      to somebody arriving new, while it collects the older headers; that is
+      expected, and it carries on. Its chain is in the folder <code>cairn-data</code>. Stop it
+      with Ctrl-C.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">4</div>
+  <div class="body">
+    <h2 id="make-a-wallet-from-twenty-four-words">Make a wallet from twenty four words</h2>
+    <pre><code>./cairn-wallet new me.key</code></pre>
+
+    <p>
+      It shows twenty four words once, asks for three of them back, then writes
+      the key file and prints the address you are paid at, which
+      <code>./cairn-wallet address me.key</code> prints again at any time. Write the words on
+      paper. They make the same key again on any machine:
+    </p>
+
+    <pre><code>./cairn-wallet restore me.key</code></pre>
+
+    <p>
+      <code>restore</code> reads the words from its input, never from its command line, and
+      refuses to write over a file that is there. On a test network none of this
+      matters; the habit does.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">5</div>
+  <div class="body">
+    <h2 id="get-test-coins">Get test coins</h2>
+    <p>
+      There is no faucet. There are two ways.
+    </p>
+
+    <p>
+      <strong>Mine them.</strong> Stop the node, and start it again mining to your address:
+    </p>
+
+    <pre><code>./cairnd --mine &lt;the address new printed&gt;</code></pre>
+
+    <p>
+      It waits until it has a peer, then mines, and prints a line for each block
+      it finds. A block pays 50 CAIRN, which can be spent 1 024 blocks after it,
+      about seventeen hours at a block a minute: the rules hold a reward still
+      until nothing can undo the block that paid it. The difficulty follows the
+      whole network's hash rate, so what one computer finds depends on how many
+      others are mining. On 29 October 2026 one laptop found two blocks in its
+      first seven minutes, which was luck as much as speed.
+    </p>
+
+    <p>
+      <strong>Ask.</strong> Open an issue on <a href="https://github.com/cairnchain/cairn/issues">GitHub</a>
+      with your address, or ask in the discussion thread, and the project sends
+      some from its miner's rewards. That is done by hand, so it takes hours
+      rather than minutes.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">6</div>
+  <div class="body">
+    <h2 id="see-your-balance-and-pay-someone">See your balance and pay someone</h2>
+    <pre><code>./cairn-wallet balance me.key</code></pre>
+
+    <p>
+      The wallet is a node of its own: it joins the network, checks the chain, and
+      only then answers, with its copy of the chain in <code>cairn-wallet-data</code>. It runs
+      beside a node on the same machine without trouble. A reward not yet
+      spendable is shown apart, with the block it moves at.
+    </p>
+
+    <pre><code>./cairn-wallet open me.key</code></pre>
+
+    <p>
+      prints an address to open in your browser: the balance, the address to be
+      paid at, and a form to pay from. The address carries a secret drawn for that
+      run; without it the page answers nothing. From the command line instead:
+    </p>
+
+    <pre><code>./cairn-wallet send me.key --to &lt;their address&gt; --amount 1</code></pre>
+
+    <p>
+      It says who is paid, how much, the fee and the total, and asks before
+      sending. Only a block confirms a payment, and <code>balance</code> lists it as waiting
+      until then. No payment between two people has been made on testnet-8 yet,
+      so the first ones are worth a line in the discussion thread.
+    </p>
+
+    <p>
+      A wallet is its key file and the <code>history.dat</code> and <code>pending.dat</code> its data
+      folder keeps beside the chain, and <code>./cairn-wallet backup me.key --into &lt;folder&gt;</code> copies all of them.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">7</div>
+  <div class="body">
+    <h2 id="watch-the-network">Watch the network</h2>
+    <p>
+      The public explorer is https://cairnchain.org. To run your own:
+    </p>
+
+    <pre><code>./cairn-explorer</code></pre>
+
+    <p>
+      It prints the address of its site, <code>http://127.0.0.1:8080/</code>. An explorer
+      keeps every block and reads the chain from the first one, so on testnet-8
+      today it takes most of an hour before its pages reach the tip.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">8</div>
+  <div class="body">
+    <h2 id="rebuild-a-linux-release-yourself">Rebuild a Linux release yourself</h2>
+    <p>
+      The attestation is GitHub saying which commit built each archive. This is
+      the check that does not need GitHub to tell the truth. From a clone of the
+      repository, with git, curl and Docker installed:
+    </p>
+
+    <pre><code>deploy/rebuild.sh 0.14.0</code></pre>
+
+    <p>
+      It checks out the tag, builds the Linux archive for your processor in the
+      container the release was built in, named by its digest, and says whether
+      the result is the published file, byte for byte. <code>all</code> as a second argument
+      builds both Linux archives. macOS and Windows archives cannot yet be rebuilt
+      identically on another machine; <code>deploy/README.md</code> says why. Every release
+      is built twice on GitHub and the two compared before it is published.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="num">9</div>
+  <div class="body">
+    <h2 id="what-we-would-like-you-to-try">What we would like you to try</h2>
+    <ul>
+      <li>Leave a node running for days, stop it, come back a week later and see
+      whether it catches up on its own.</li>
+      <li>Join from behind a slow or unreliable connection.</li>
+      <li>Mine in bursts: start and stop a powerful machine.</li>
+      <li>Make the first payments on the network, and spend a note old enough to
+      have fallen out of the hot set.</li>
+      <li>Read the <a href="https://cairnchain.org/threat-model">threat model</a> and try what
+      it says should fail, against nodes of your own. Do not flood the hosted
+      servers: a flood tells us nothing a local test does not, and stops other
+      people's tests. <code>--network devnet</code> runs the same rules on one machine with
+      a five second block.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="num">10</div>
+  <div class="body">
+    <h2 id="reporting">Reporting</h2>
+    <p>
+      Anything that surprises you is worth an issue on
+      <a href="https://github.com/cairnchain/cairn/issues">GitHub</a>: what you ran, what you
+      expected, what the program printed. A security problem goes by the route in
+      <a href="https://github.com/cairnchain/cairn/blob/main/SECURITY.md">SECURITY.md</a>
+      instead.
+    </p>
+  </div>
+</section>
+
+</div>
