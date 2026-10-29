@@ -477,6 +477,16 @@ pub struct History {
     /// was read as a switch: the account was rewound to the node's height,
     /// every place above it dropped, and written over the file.
     work: u128,
+    /// The address this account is of, once a wallet has said.
+    ///
+    /// The stamp says the bytes are the ones written and nothing about whose
+    /// they are, so a key pointed at another key's directory read that
+    /// account as its own: a person keeping two keys and two backups, told by
+    /// `recover` and `restore` which directory to give the others, can put
+    /// them together the wrong way round. A file written before this has none
+    /// and is taken as this wallet's, and is given its address by the next
+    /// save.
+    owner: Option<Address>,
 }
 
 /// Why a history file that was there was not used.
@@ -545,6 +555,18 @@ impl History {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.movements.is_empty()
+    }
+
+    /// The address this account was written for, if it says.
+    #[must_use]
+    pub const fn owner(&self) -> Option<Address> {
+        self.owner
+    }
+
+    /// Writes down the address this account is of, for every save from now
+    /// on.
+    pub fn belongs_to(&mut self, owner: Address) {
+        self.owner = Some(owner);
     }
 
     /// The next height this history has not read.
@@ -1150,6 +1172,8 @@ impl History {
             undone,
             movements: kept,
             from,
+            // Whose account it is does not change with what it remembers.
+            owner: self.owner,
             ..Self::default()
         };
     }
@@ -1446,6 +1470,11 @@ impl Encode for History {
             })
             .collect();
         fell_in.encode_to(out);
+        // Last, so a file without it is one an earlier release wrote, and is
+        // read as saying nothing about whose it is.
+        if let Some(owner) = self.owner {
+            owner.encode_to(out);
+        }
     }
 }
 
@@ -1571,6 +1600,14 @@ impl Decode for History {
         } else {
             Vec::new()
         };
+        // Whose account this is. A file written before this wallet said
+        // ends here, and is taken as belonging to whichever key opens it, as
+        // every file was.
+        let owner = if reader.remaining() > 0 {
+            Some(Address::decode_from(reader)?)
+        } else {
+            None
+        };
         let last = (last != Hash32::ZERO).then_some(last);
         let recent: VecDeque<Hash32> = if recent.is_empty() {
             last.into_iter().collect()
@@ -1623,6 +1660,7 @@ impl Decode for History {
                 .into_iter()
                 .map(|fell| (fell.id, (fell.height, fell.block)))
                 .collect(),
+            owner,
         })
     }
 }
