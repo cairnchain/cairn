@@ -1224,7 +1224,10 @@ impl History {
         // A file whose stamp holds over a body with no magic in front was
         // written between the stamp and the address, and what it lists is on
         // a network this build does not follow.
-        let why = if Self::decode(&bytes).is_ok() {
+        //
+        // A body read with no stamp has to name no owner: none was written
+        // before the stamp, and a stamp read as a body's last field is one.
+        let why = if Self::decode(&bytes).is_ok_and(|history| history.owner.is_none()) {
             Discarded::BeforeTheStamp
         } else if Self::stamped(&bytes) {
             if bytes.starts_with(MAGIC_STEM) {

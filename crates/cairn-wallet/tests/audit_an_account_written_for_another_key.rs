@@ -115,10 +115,7 @@ fn an_account_is_written_for_its_key_and_opens_again_for_it() {
     let opened = Wallet::open(&key_file, params(), &data);
     let _ = std::fs::remove_dir_all(&home);
     let (wallet, _) = opened.expect("the key the account was written for was refused it");
-    assert!(
-        wallet.history().iter().count() > 0,
-        "and it is the same account"
-    );
+    assert!(!wallet.history().is_empty(), "and it is the same account");
     wallet.shutdown();
 }
 
