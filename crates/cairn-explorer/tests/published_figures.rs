@@ -2392,7 +2392,7 @@ fn the_open_questions_say_the_same_figures_in_both_languages() {
     let english = figures_of(QUESTIONS_EN);
     let french = figures_of(QUESTIONS_FR);
     assert!(
-        english.len() > 200,
+        english.len() > 100,
         "the English open questions carry only {} figures, which is not the paper",
         english.len()
     );

@@ -177,8 +177,13 @@ The public explorer is https://cairnchain.org. To run your own:
 ```
 
 It prints the address of its site, `http://127.0.0.1:8080/`. An explorer
-keeps every block and reads the chain from the first one, so on testnet-8
-today it takes most of an hour before its pages reach the tip.
+keeps every block and reads the chain from the first one, from peers that
+keep every block too. On 29 October 2026 one started from nothing stopped at
+block 1 152 and said nothing about it, and `cairn-wallet recover`, which
+reads the chain the same way, stopped at the same block and said no peer
+that keeps every block had sent the next ones. That is being looked into;
+until it is fixed, a new explorer does not reach the tip, and the public one
+is the one to watch.
 
 ## Rebuild a Linux release yourself
 

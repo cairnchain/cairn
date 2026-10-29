@@ -235,6 +235,12 @@ An audit of everything that changed since 14 October was started on
 
 ## What is known and open
 
+Found while checking this page, on 29 October 2026, and not yet explained:
+a program that reads testnet-8 from its first block, a new explorer or
+`cairn-wallet recover`, stops at block 1 152; the explorer says nothing, and
+`recover` says the one peer it reached that keeps every block sent nothing
+more.
+
 These are stated in the documents and not fixed:
 
 - **A stall a stranger can still cause.** The time a newcomer gives one
