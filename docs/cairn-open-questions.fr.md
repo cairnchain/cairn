@@ -238,10 +238,10 @@ n'ait plus à changer le jour où l'on tranche.
 ### La situation exacte, chiffrée
 
 Le tiroir tient 131 072 billets, et le plus ancien tombe quand il est plein. À
-blocs pleins, un billet qui ne bouge pas descend à la cave en 3,2 heures ; à
-un dixième du trafic, en 32 heures ; à un centième, en treize jours. La
+blocs pleins, un billet qui ne bouge pas descend à la cave en 3,7 heures ; à
+un dixième du trafic, en 37 heures ; à un centième, en quinze jours. La
 fenêtre qui suit la chute, pendant laquelle il se dépense encore sans preuve,
-dure douze minutes à pleine charge. La cave est donc l'état normal de toute
+dure environ quatorze minutes à pleine charge. La cave est donc l'état normal de toute
 épargne, pas un cas rare, et le document de conception le disait déjà.
 
 Trois situations, et elles n'appellent pas le même service. Un portefeuille
