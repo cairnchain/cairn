@@ -236,10 +236,10 @@ has to change on the day the decision is made.
 ### The exact situation, in figures
 
 The drawer holds 131 072 notes, and the oldest falls when it is full. At full
-blocks, a note that does not move goes down to the cold set in 3.2 hours; at
-a tenth of the traffic, in 32 hours; at a hundredth, in thirteen days. The
+blocks, a note that does not move goes down to the cold set in 3.7 hours; at
+a tenth of the traffic, in 37 hours; at a hundredth, in fifteen days. The
 window after the fall, during which it can still be spent without a proof,
-lasts twelve minutes at full load. The cold set is therefore the normal state
+lasts about fourteen minutes at full load. The cold set is therefore the normal state
 of all savings, not a rare case, and the design document said so already.
 
 Three situations, and they do not call for the same service. A wallet that

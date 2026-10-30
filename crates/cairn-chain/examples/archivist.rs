@@ -29,14 +29,17 @@
 )]
 
 use cairn_chain::ChainStore;
+use cairn_crypto::SecretKey;
 use cairn_ledger::block::BlockHeader;
+use cairn_ledger::note::Note;
+use cairn_ledger::transaction::{CoinbaseTransaction, Input, Transfer};
 use cairn_ledger::validation::ConsensusParams;
+use cairn_primitives::codec::Encode;
+use cairn_primitives::Amount;
 
 /// Thirty years of a block a minute.
 const BLOCKS: u64 = 30 * 365 * 24 * 60;
 
-/// Bytes an ordinary payment takes on the wire: one note in, two out.
-const PAYMENT_BYTES: u64 = 191;
 /// Notes such a payment leaves behind, net of the one it spends.
 const NOTES_PER_PAYMENT: u64 = 1;
 
@@ -67,9 +70,33 @@ const ARCHIVED_BYTES: u64 = FOREST_BYTES + 40;
 /// it; an example has nothing to refuse and would go on printing the old one.
 const HEADER_BYTES: u64 = BlockHeader::ENCODED_BYTES as u64;
 
+/// Bytes an ordinary payment takes on the wire: one note in, two out, signed.
+///
+/// Encoded rather than written out. It was a literal, 191, and went on
+/// printing the size from before the address became a hash of the key while
+/// the papers moved on to what the build encodes.
+fn payment_bytes(params: &ConsensusParams) -> u64 {
+    let key = SecretKey::from_bytes(&[2; 32]);
+    let value = Amount::from_pebbles(1_000).unwrap();
+    let note = Note::new(value, key.public_key());
+    let coinbase = CoinbaseTransaction::new(0, vec![note]);
+    let (id, note) = coinbase.created_notes().into_iter().next().unwrap();
+    let half = Amount::from_pebbles(500).unwrap();
+    let mut transfer = Transfer::new(
+        vec![Input::hot(id)],
+        vec![
+            Note::new(half, key.public_key()),
+            Note::new(half, key.public_key()),
+        ],
+    );
+    transfer.sign_input(params.network, 0, &note, &key);
+    transfer.encode().len() as u64
+}
+
 fn main() {
     let params = ConsensusParams::testnet();
     let full = params.max_block_bytes as u64;
+    let payment_size = payment_bytes(&params);
 
     println!("What thirty years of Cairn costs, by what a node has chosen to do.\n");
     println!("A block a minute, {BLOCKS} blocks, at three ways a chain can be used.\n");
@@ -82,7 +109,7 @@ fn main() {
 
     for share in [0.01f64, 0.10, 1.00] {
         let block = (full as f64 * share) as u64;
-        let payments = block / PAYMENT_BYTES;
+        let payments = block / payment_size;
         let notes = payments * NOTES_PER_PAYMENT;
 
         // Following: bounded by the rules and does not grow with the chain.
