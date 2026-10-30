@@ -230,9 +230,26 @@ pub struct PeerState {
     /// is about another branch, or the same one seen from another tip, and
     /// a block of the branch this node follows says nothing about where that
     /// one parts. Only a block this node asked for and the peer did not
-    /// offer counts, so a block sent back unasked, or one announced, steers
-    /// nothing.
+    /// offer counts, or one of the heights the round itself asked for (see
+    /// [`Self::round`]), so a block sent back unasked, or one announced,
+    /// steers nothing.
     pub walk: Option<(u64, Option<Located>)>,
+    /// The first height the round in [`Self::walk`] asked for and the one
+    /// past its last, so that a block of that round counts towards the walk
+    /// whatever price it was asked at.
+    ///
+    /// A round is asked at the price of a push when the round before it did
+    /// not move this node's chain (see [`Self::work_when_asked`]), and a block
+    /// asked at that price reads as one the peer offered. A walk through
+    /// blocks this node already follows is made of rounds that move nothing,
+    /// so its second round was asked at that price, nothing of it was written
+    /// down, and the third was asked from where the first was: the same two
+    /// batches, for good. A node reading from the first block on testnet-8,
+    /// told by an archivist to start from the first block once it held 1 152,
+    /// stood still there. The heights of a round are this node's own, worked
+    /// out past what arrived; the peer chose only the `from` the walk is
+    /// keyed on.
+    pub round: Option<(u64, u64)>,
     /// When the outstanding batch last came in part: the moment a block of
     /// it arrived and left some of it still awaited, or the moment what was
     /// left was last asked for again.
@@ -1628,6 +1645,11 @@ fn request_range(
     if starts_a_batch {
         peer.asked_at = now;
     }
+    // See [`PeerState::round`].
+    peer.round = batch
+        .first()
+        .zip(batch.last())
+        .map(|(first, last)| (*first, last.saturating_add(1)));
     Reaction::reply(vec![Message::GetBlocks(batch)])
 }
 
@@ -2407,6 +2429,9 @@ fn on_block_charged(
     let at = block.header.height;
     let id = block.id();
     let asked = asked_for(peer, at);
+    let in_the_round = peer
+        .round
+        .is_some_and(|(first, past)| (first..past).contains(&at));
     let reaction = on_block(chain, peer, block, now);
     if asked && chain.id_at(at) == Some(id) {
         peer.hand_back(charged.saturating_sub(COST_TRIVIAL), now);
@@ -2421,7 +2446,7 @@ fn on_block_charged(
     // see [`PeerState::walk`].
     let located = Located::new(at, id);
     if chain.id_at(at) == Some(id) {
-        if let Some((_, last)) = peer.walk.as_mut().filter(|_| asked) {
+        if let Some((_, last)) = peer.walk.as_mut().filter(|_| asked || in_the_round) {
             *last = Some(located);
         }
     } else if chain.held_header(&id).is_some() {

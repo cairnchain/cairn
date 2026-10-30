@@ -4262,15 +4262,25 @@ impl Shared {
     /// that, the only position both sides could agree on would be one of the
     /// few this node keeps, and a peer would be told to start again from far
     /// behind where it had already reached.
+    ///
+    /// Entry by entry, the disk asked for each one memory cannot place, and
+    /// not memory over the whole locator before the disk over any of it. A
+    /// locator always ends at the first block and memory always holds it, so
+    /// memory always agreed with something and the disk was never asked: a
+    /// reader from the first block at 1 152, more than a window below an
+    /// archivist's tip, was told to start at 1, asked again for blocks it
+    /// held, and stood still there on testnet-8.
     fn chain_after(&self, locator: &[Located], max: u64) -> (u64, u64) {
-        let (reaches, agreed) = {
+        // What memory says of each entry: that it agrees, that it holds
+        // something else there, or that it holds nothing there to compare.
+        let (reaches, placed) = {
             let chain = self.chain();
             let reaches = chain.height().map_or(0, |tip| tip.saturating_add(1));
-            let agreed = locator
+            let placed: Vec<Option<bool>> = locator
                 .iter()
-                .find(|entry| chain.agrees_with(entry))
-                .map(|entry| entry.height);
-            (reaches, agreed)
+                .map(|entry| chain.id_at(entry.height).map(|id| id == entry.id))
+                .collect();
+            (reaches, placed)
         };
 
         // The log is taken and let go of once per entry rather than held for
@@ -4280,17 +4290,19 @@ impl Shared {
         // in hand waited to write a block it had just validated. There is no
         // run to tear: each entry is its own question, and the answer to it
         // does not depend on what the entry before it found.
-        let agreed = agreed.or_else(|| {
-            locator.iter().find_map(|entry| {
+        let agreed = locator.iter().zip(placed).find_map(|(entry, placed)| {
+            if let Some(agrees) = placed {
+                agrees.then_some(entry.height)
+            } else {
                 // A refusal here is not an entry the peer and this node
-                // disagree about. It is this node failing to look, and the two
-                // used to be the same answer: the position was passed over,
-                // the walk ran out of entries, and the peer was told from zero,
-                // which is this node's disk reported as a fact about somebody
-                // else's chain.
+                // disagree about. It is this node failing to look, and the
+                // two used to be the same answer: the position was passed
+                // over, the walk ran out of entries, and the peer was told
+                // from zero, which is this node's disk reported as a fact
+                // about somebody else's chain.
                 let block = self.block_off_disk(entry.height)?;
                 (block.id() == entry.id).then_some(entry.height)
-            })
+            }
         });
 
         // Where this node can start, for a peer it agrees with about nothing.
