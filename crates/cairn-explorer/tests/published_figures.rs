@@ -2523,20 +2523,22 @@ fn the_papers_give_the_cold_fall_at_the_pace_the_drawer_makes() {
 
     let params = ConsensusParams::testnet();
     let payment = Bench::new(1).payment().encode().len();
-    let per_block = (params.max_block_bytes / payment) as f64;
+    let per_block = params.max_block_bytes / payment;
     // A block a minute, and every payment leaves one note more than it spends.
-    let minutes = params.hot_capacity as f64 / per_block;
-    let full = format!("{:.1}", minutes / 60.0);
-    let tenth = (minutes * 10.0 / 60.0) as u64;
-    let hundredth = (minutes * 100.0 / (60.0 * 24.0)) as u64;
-    let grace = (GRACE_NOTES as f64 / per_block).round() as u64;
+    let full = format!(
+        "{:.1}",
+        params.hot_capacity as f64 / per_block as f64 / 60.0
+    );
+    let tenth = (params.hot_capacity * 10 / (per_block * 60)) as u64;
+    let hundredth = (params.hot_capacity * 100 / (per_block * 60 * 24)) as u64;
+    let grace = ((GRACE_NOTES + per_block / 2) / per_block) as u64;
     println!(
         "{per_block} payments a block: {full} hours, {tenth} hours, {hundredth} days, {grace} minutes"
     );
 
     let paper = flat(WHITEPAPER);
     for sentence in [
-        format!("({} payments a block", per_block as u64),
+        format!("({per_block} payments a block"),
         format!(
             "in **{full} hours**, and the grace window that follows lasts about {} minutes",
             in_words(grace)

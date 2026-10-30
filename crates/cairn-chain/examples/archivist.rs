@@ -77,11 +77,15 @@ const HEADER_BYTES: u64 = BlockHeader::ENCODED_BYTES as u64;
 /// the papers moved on to what the build encodes.
 fn payment_bytes(params: &ConsensusParams) -> u64 {
     let key = SecretKey::from_bytes(&[2; 32]);
-    let value = Amount::from_pebbles(1_000).unwrap();
+    let value = Amount::from_pebbles(1_000).expect("a valid amount");
     let note = Note::new(value, key.public_key());
     let coinbase = CoinbaseTransaction::new(0, vec![note]);
-    let (id, note) = coinbase.created_notes().into_iter().next().unwrap();
-    let half = Amount::from_pebbles(500).unwrap();
+    let (id, note) = coinbase
+        .created_notes()
+        .into_iter()
+        .next()
+        .expect("the note it pays");
+    let half = Amount::from_pebbles(500).expect("a valid amount");
     let mut transfer = Transfer::new(
         vec![Input::hot(id)],
         vec![
