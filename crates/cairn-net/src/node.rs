@@ -4295,7 +4295,7 @@ impl Shared {
             .zip(placed)
             .find_map(|(entry, placed)| match placed {
                 Some(agrees) => agrees.then_some(entry.height),
-                None if entry.height < reaches => {
+                None => {
                     // A refusal here is not an entry the peer and this node
                     // disagree about. It is this node failing to look, and the
                     // two used to be the same answer: the position was passed
@@ -4305,7 +4305,6 @@ impl Shared {
                     let block = self.block_off_disk(entry.height)?;
                     (block.id() == entry.id).then_some(entry.height)
                 }
-                None => None,
             });
 
         // Where this node can start, for a peer it agrees with about nothing.

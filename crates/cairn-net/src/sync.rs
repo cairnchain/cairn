@@ -2429,10 +2429,9 @@ fn on_block_charged(
     let at = block.header.height;
     let id = block.id();
     let asked = asked_for(peer, at);
-    let in_the_round = peer.awaiting.contains(&at)
-        && peer
-            .round
-            .is_some_and(|(first, past)| (first..past).contains(&at));
+    let in_the_round = peer
+        .round
+        .is_some_and(|(first, past)| (first..past).contains(&at));
     let reaction = on_block(chain, peer, block, now);
     if asked && chain.id_at(at) == Some(id) {
         peer.hand_back(charged.saturating_sub(COST_TRIVIAL), now);
