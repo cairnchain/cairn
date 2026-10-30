@@ -1853,6 +1853,11 @@ struct Shared {
     written: Mutex<Option<(Hash32, Located)>>,
     /// How far this node is through joining a chain it was not on.
     joining: Mutex<Progress>,
+    /// The peer this node put its join question to. Pieces from anybody else
+    /// are dropped before the collector sees them: they are not priced, and
+    /// one of them could otherwise end the attempt and have the chooser blame
+    /// the peer that was asked.
+    join_asked_of: Mutex<Option<PeerId>>,
     /// When this node last asked again for a piece of a join answer that had
     /// not arrived, so a slow piece is waited for rather than asked for once
     /// a second.
@@ -5322,6 +5327,7 @@ impl Node {
             join_built: Condvar::new(),
             written: Mutex::new(None),
             joining: Mutex::new(Progress::Idle),
+            join_asked_of: Mutex::new(None),
             join_asked_again_at: AtomicU64::new(0),
             probation: Mutex::new(probation),
             stranding_patience: AtomicU64::new(STRANDING_PATIENCE),
@@ -6741,6 +6747,16 @@ fn take_join_part(
     bytes: Vec<u8>,
 ) -> Option<Message> {
     let now = unix_now();
+    // Only the peer asked may answer. A piece from anybody else is ignored,
+    // as an answer nobody asked for is everywhere else.
+    if *shared
+        .join_asked_of
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        != Some(from)
+    {
+        return None;
+    }
     // Filing the piece is all that happens with the collector held. What
     // follows once the last piece lands is a weighing of four thousand samples
     // or a ledger accepted, adopted and written to disk in one multi-megabyte
@@ -9832,6 +9848,10 @@ fn drive_choosing(shared: &Arc<Shared>, now: u64) {
                 .joining
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = Progress::Idle;
+            *shared
+                .join_asked_of
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(peer);
             shared.send_to(
                 peer,
                 Message::GetJoin {
