@@ -4290,22 +4290,20 @@ impl Shared {
         // in hand waited to write a block it had just validated. There is no
         // run to tear: each entry is its own question, and the answer to it
         // does not depend on what the entry before it found.
-        let agreed = locator
-            .iter()
-            .zip(placed)
-            .find_map(|(entry, placed)| match placed {
-                Some(agrees) => agrees.then_some(entry.height),
-                None => {
-                    // A refusal here is not an entry the peer and this node
-                    // disagree about. It is this node failing to look, and the
-                    // two used to be the same answer: the position was passed
-                    // over, the walk ran out of entries, and the peer was told
-                    // from zero, which is this node's disk reported as a fact
-                    // about somebody else's chain.
-                    let block = self.block_off_disk(entry.height)?;
-                    (block.id() == entry.id).then_some(entry.height)
-                }
-            });
+        let agreed = locator.iter().zip(placed).find_map(|(entry, placed)| {
+            if let Some(agrees) = placed {
+                agrees.then_some(entry.height)
+            } else {
+                // A refusal here is not an entry the peer and this node
+                // disagree about. It is this node failing to look, and the
+                // two used to be the same answer: the position was passed
+                // over, the walk ran out of entries, and the peer was told
+                // from zero, which is this node's disk reported as a fact
+                // about somebody else's chain.
+                let block = self.block_off_disk(entry.height)?;
+                (block.id() == entry.id).then_some(entry.height)
+            }
+        });
 
         // Where this node can start, for a peer it agrees with about nothing.
         // That is a newcomer, whose locator is empty, and it is the one asker
