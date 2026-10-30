@@ -2491,3 +2491,94 @@ fn the_pages_for_outside_readers_quote_this_build_and_the_paper() {
         "the testnet page does not say `{said}`"
     );
 }
+
+/// **The papers give the cold fall at the pace the drawer and a full block
+/// make, in both languages and in the whitepaper.**
+///
+/// The open questions said 3.2 hours, 32 hours, thirteen days and a twelve
+/// minute window, in English and in French, for a year after the payment grew
+/// from 191 bytes to what this build encodes: the guard that reads both
+/// languages compares them with each other, and a figure wrong in both
+/// passed it. These are taken from the drawer and the payment instead.
+#[test]
+fn the_papers_give_the_cold_fall_at_the_pace_the_drawer_makes() {
+    const WHITEPAPER: &str = include_str!("../../../docs/cairn-whitepaper.md");
+    let flat = |page: &str| page.split_whitespace().collect::<Vec<_>>().join(" ");
+    let in_words = |value: u64| match value {
+        12 => "twelve",
+        13 => "thirteen",
+        14 => "fourteen",
+        15 => "fifteen",
+        16 => "sixteen",
+        other => panic!("no word for {other}"),
+    };
+    let en_mots = |value: u64| match value {
+        12 => "douze",
+        13 => "treize",
+        14 => "quatorze",
+        15 => "quinze",
+        16 => "seize",
+        other => panic!("pas de mot pour {other}"),
+    };
+
+    let params = ConsensusParams::testnet();
+    let payment = Bench::new(1).payment().encode().len();
+    let per_block = (params.max_block_bytes / payment) as f64;
+    // A block a minute, and every payment leaves one note more than it spends.
+    let minutes = params.hot_capacity as f64 / per_block;
+    let full = format!("{:.1}", minutes / 60.0);
+    let tenth = (minutes * 10.0 / 60.0) as u64;
+    let hundredth = (minutes * 100.0 / (60.0 * 24.0)) as u64;
+    let grace = (GRACE_NOTES as f64 / per_block).round() as u64;
+    println!(
+        "{per_block} payments a block: {full} hours, {tenth} hours, {hundredth} days, {grace} minutes"
+    );
+
+    let paper = flat(WHITEPAPER);
+    for sentence in [
+        format!("({} payments a block", per_block as u64),
+        format!(
+            "in **{full} hours**, and the grace window that follows lasts about {} minutes",
+            in_words(grace)
+        ),
+        format!(
+            "At a tenth of that traffic it is {tenth} hours, and at a hundredth, {} days",
+            in_words(hundredth)
+        ),
+    ] {
+        assert!(
+            paper.contains(&sentence),
+            "the whitepaper does not say: {sentence}"
+        );
+    }
+
+    let english = flat(QUESTIONS_EN);
+    for sentence in [
+        format!("goes down to the cold set in {full} hours"),
+        format!(
+            "a tenth of the traffic, in {tenth} hours; at a hundredth, in {} days",
+            in_words(hundredth)
+        ),
+        format!("lasts about {} minutes at full load", in_words(grace)),
+    ] {
+        assert!(
+            english.contains(&sentence),
+            "the open questions do not say: {sentence}"
+        );
+    }
+
+    let french = flat(QUESTIONS_FR);
+    for sentence in [
+        format!("descend à la cave en {} heures", full.replace('.', ",")),
+        format!(
+            "un dixième du trafic, en {tenth} heures ; à un centième, en {} jours",
+            en_mots(hundredth)
+        ),
+        format!("dure environ {} minutes à pleine charge", en_mots(grace)),
+    ] {
+        assert!(
+            french.contains(&sentence),
+            "les questions ouvertes ne disent pas : {sentence}"
+        );
+    }
+}
