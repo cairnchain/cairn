@@ -185,7 +185,15 @@ chmod 0644 "$stage/$folder"/LICENSE-MIT "$stage/$folder"/LICENSE-APACHE "$stage/
 case "$target" in
   *windows*)
     archive="cairn-${name}.zip"
-    python "$root/deploy/release-zip.py" "$stage" "$folder" "$out/$archive"
+    # Python 3 by either of its names: `python` is the one the Windows runner
+    # has, and on a Mac or most Linux machines only `python3` is there. Asked
+    # to run rather than looked up, because Windows answers `python3` with a
+    # stand-in that opens the store and fails.
+    python=python
+    if python3 -c '' >/dev/null 2>&1; then
+      python=python3
+    fi
+    "$python" "$root/deploy/release-zip.py" "$stage" "$folder" "$out/$archive"
     ;;
   *)
     archive="cairn-${name}.tar.gz"

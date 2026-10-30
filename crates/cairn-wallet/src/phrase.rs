@@ -27,6 +27,15 @@
 //! checksum over in arrays of its own, and `pbkdf2` and `hmac` hold their
 //! working state in buffers they free themselves. None of them outlives the
 //! process the way a file does.
+//!
+//! Two more sit in the standard library, on either side of the person, and
+//! neither is wiped. The words `restore` reads arrive through standard
+//! input's buffer, and the words `new` shows leave through standard output's:
+//! each is one buffer for the whole process, which nothing here can reach,
+//! and each holds the last words that passed through it until the process
+//! ends. Closing them means reading and writing the descriptors directly,
+//! past the standard library, which is more code on the path of the key than
+//! the gap is worth while neither outlives the process either.
 
 use std::fmt;
 

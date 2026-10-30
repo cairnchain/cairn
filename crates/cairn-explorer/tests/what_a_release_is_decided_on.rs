@@ -184,6 +184,29 @@ fn release_decision_sees_every_file_a_program_is_built_from() {
     );
 }
 
+/// Every file that makes the archives is one the daily release decision
+/// looks at, the workflow that picks the macOS and Windows machines among
+/// them.
+///
+/// `build.yml` names the runner images and the matrix the macOS and Windows
+/// programs are compiled on, and was not in the list: a change to it changed
+/// those bytes and was released only once something else moved.
+#[test]
+fn release_decision_sees_every_file_that_makes_an_archive() {
+    let listed = compared();
+    for path in [
+        "deploy/release-build.sh",
+        "deploy/release-zip.py",
+        ".github/workflows/build.yml",
+    ] {
+        assert!(
+            listed.iter().any(|listed| covers(listed, path)),
+            "{path} makes the archives people download, and the release decision does not \
+             look at it"
+        );
+    }
+}
+
 /// A release refuses a first block still marked provisional, in the job every
 /// release passes through, and reads the two files `remint` lists such lines
 /// in.

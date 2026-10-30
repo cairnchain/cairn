@@ -181,66 +181,121 @@ pub const fn what_was_not_checked() -> Option<&'static str> {
 /// too, because a file whose name has not reached the disk is a file that is
 /// not there.
 pub fn write(path: &Path, secret: &SecretKey) -> Result<(), String> {
+    reserve(path)?.write(secret).map_err(|failed| failed.said)
+}
+
+/// A key file made, empty and private, before there is a key to put in it.
+///
+/// For a command that shows twenty four words before it writes: words copied
+/// onto paper for a key the write then refuses are words for nothing, and a
+/// person holding them has no way to tell. Looking for a file already at the
+/// name was the earlier word, and it answered one refusal of the several a
+/// write can meet: a directory nobody may write in, a filesystem mounted read
+/// only and a parent that cannot be made were all found out after the paper.
+/// Making the file is the one way to know it can be made, so it is made
+/// first, and the key goes into the same handle afterwards.
+///
+/// Dropped without a key, it takes the empty file away again, so a command
+/// that stops in between leaves the name free. A process killed in between
+/// leaves the empty file, which [`read`] and a second `new` both name as
+/// empty and safe to delete.
+#[derive(Debug)]
+pub struct Reserved {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+}
+
+/// Why a key did not reach the file [`reserve`] made for it.
+#[derive(Debug)]
+pub struct NotWritten {
+    /// What to tell the person.
+    pub said: String,
+    /// Whether a file is left at the name: one written whose name this
+    /// machine would not confirm, rather than none at all.
+    pub left_a_file: bool,
+}
+
+/// Makes the key file at `path` empty and private, with the directory above
+/// it, or says why it cannot be: everything [`write`] can refuse for a name,
+/// asked before there is a key.
+pub fn reserve(path: &Path) -> Result<Reserved, String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             make_private_directory(parent)
                 .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
         }
     }
-
-    let mut file = create_private(path).map_err(|error| {
+    let file = create_private(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
             return already_there(path);
         }
         format!("could not write {}: {error}", path.display())
     })?;
-
-    // The newline goes out in a call of its own rather than being appended to
-    // the key. A string holding the key that has to grow leaves its old buffer
-    // behind, freed and unwiped, with nothing left pointing at it to wipe.
-    let text = key_hex(secret);
-    let written = file
-        .write_all(text.as_bytes())
-        .and_then(|()| file.write_all(b"\n"))
-        .and_then(|()| file.sync_all());
-    drop(file);
-
-    if let Err(error) = written {
-        // What is on the disk now is a file holding part of a key or none of
-        // it, under the name the next attempt will refuse to touch. Taking it
-        // away loses nothing, because nothing usable was ever in it, and
-        // leaving it turns a full disk into a wallet that cannot be made.
-        let _ = std::fs::remove_file(path);
-        return Err(format!(
-            "could not write {}: {error}. Nothing was left behind, so there is a name free to \
-             try again at.",
-            path.display()
-        ));
-    }
-
-    if let Err(error) = sync_the_directory(path) {
-        return Err(format!(
-            "{} was written but this machine would not confirm it: {error}. Check the file is \
-             there before giving out the address it names.",
-            path.display()
-        ));
-    }
-    Ok(())
+    Ok(Reserved {
+        path: path.to_path_buf(),
+        file: Some(file),
+    })
 }
 
-/// Refuses a name a key file is already at, before anything is done that the
-/// refusal would waste.
-///
-/// [`write`] refuses the same name, in the one call that creates the file,
-/// and that stays the refusal that counts. This is the earlier word for a
-/// command that shows twenty four words before it writes: words copied onto
-/// paper for a key the write then refuses are words for nothing, and a person
-/// holding them has no way to tell.
-pub fn refuse_if_there(path: &Path) -> Result<(), String> {
-    if std::fs::symlink_metadata(path).is_ok() {
-        return Err(already_there(path));
+impl Reserved {
+    /// Writes the key into the file, as [`write`] says.
+    pub fn write(mut self, secret: &SecretKey) -> Result<(), NotWritten> {
+        let Some(mut file) = self.file.take() else {
+            return Err(NotWritten {
+                said: format!("could not write {}: it was given up", self.path.display()),
+                left_a_file: false,
+            });
+        };
+        // The newline goes out in a call of its own rather than being appended
+        // to the key. A string holding the key that has to grow leaves its old
+        // buffer behind, freed and unwiped, with nothing left pointing at it to
+        // wipe.
+        let text = key_hex(secret);
+        let written = file
+            .write_all(text.as_bytes())
+            .and_then(|()| file.write_all(b"\n"))
+            .and_then(|()| file.sync_all());
+        drop(file);
+
+        if let Err(error) = written {
+            // What is on the disk now is a file holding part of a key or none
+            // of it, under the name the next attempt will refuse to touch.
+            // Taking it away loses nothing, because nothing usable was ever in
+            // it, and leaving it turns a full disk into a wallet that cannot
+            // be made.
+            let _ = std::fs::remove_file(&self.path);
+            return Err(NotWritten {
+                said: format!(
+                    "could not write {}: {error}. Nothing was left behind, so there is a name \
+                     free to try again at.",
+                    self.path.display()
+                ),
+                left_a_file: false,
+            });
+        }
+
+        if let Err(error) = sync_the_directory(&self.path) {
+            return Err(NotWritten {
+                said: format!(
+                    "{} was written but this machine would not confirm it: {error}. Check the \
+                     file is there before giving out the address it names.",
+                    self.path.display()
+                ),
+                left_a_file: true,
+            });
+        }
+        Ok(())
     }
-    Ok(())
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        // Still held means no key went in: the file is the empty one
+        // `reserve` made, and the name goes back to being free.
+        if self.file.take().is_some() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// Where a backup put the files a wallet is made of.

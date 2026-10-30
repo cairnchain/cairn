@@ -1662,6 +1662,36 @@ impl std::fmt::Debug for Wallet {
     }
 }
 
+/// What a wallet says of an account written for another key's address.
+///
+/// Both addresses by their first characters, which is what a person can
+/// compare against the one they were paid at.
+fn another_keys_account(file: &Path, theirs: Address, mine: Address, network: NetworkId) -> String {
+    format!(
+        "{} is the account of another key: it was written for the address starting {}, and \
+         this key's address starts {}. Nothing has been changed. Give this key the --data \
+         directory its own account is in, or check that the key file is the one you meant. If \
+         this key's own account is lost, `cairn-wallet recover` with this key into an empty \
+         directory finds its money again.",
+        file.display(),
+        beginning(&theirs.to_text(network)),
+        beginning(&mine.to_text(network))
+    )
+}
+
+/// The network's prefix and the first eight characters after it.
+fn beginning(address: &str) -> &str {
+    let data = address
+        .rfind('1')
+        .map_or(0, |separator| separator.saturating_add(1));
+    let end = address
+        .char_indices()
+        .map(|(at, _)| at)
+        .nth(data.saturating_add(8))
+        .unwrap_or(address.len());
+    address.get(..end).unwrap_or(address)
+}
+
 impl Wallet {
     /// Opens the key at `path` and starts a node that watches it.
     ///
@@ -1718,6 +1748,19 @@ impl Wallet {
     ) -> Result<(Self, usize), WalletError> {
         let secret = keyfile::read(path).map_err(WalletError::CouldNotStart)?;
         let mine = Address::from(secret.public_key());
+        // Read before the node opens, which writes into the directory, so an
+        // account written for another key is refused with nothing changed.
+        let history_file = data.join(HISTORY_FILE);
+        let (mut history, discarded) = History::load(&history_file);
+        if let Some(theirs) = history.owner().filter(|theirs| *theirs != mine) {
+            return Err(WalletError::CouldNotStart(another_keys_account(
+                &history_file,
+                theirs,
+                mine,
+                params.network,
+            )));
+        }
+        history.belongs_to(mine);
         let listen: SocketAddr = "0.0.0.0:0"
             .parse()
             .map_err(|_| WalletError::CouldNotStart("bad listen address".to_owned()))?;
@@ -1728,8 +1771,6 @@ impl Wallet {
         };
         let (node, restored) =
             opened.map_err(|error| WalletError::CouldNotStart(error.to_string()))?;
-        let history_file = data.join(HISTORY_FILE);
-        let (history, discarded) = History::load(&history_file);
         // Before anything can save, since a save renames a new account over
         // this name. A file that did not read back is the only record of where
         // this key's fallen notes sit, and it is moved, never written over.
